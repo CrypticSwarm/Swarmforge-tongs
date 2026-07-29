@@ -1,0 +1,15 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+*.log
+npm-debug.log*
+
+.DS_Store
+
+# Never commit resolved secret material. Secrets are resolved on the host
+# launcher from `${secret:...}` references; nothing here should hold a value.
+.env
+.env.*
+*.pem
+*.key
