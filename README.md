@@ -20,7 +20,7 @@ builds tongs against that contract rather than restating it.
 
 | Tong | Status | Holds | Interface |
 | --- | --- | --- | --- |
-| `git-signing` | planned | commit signing key; workspace `rw` | `mcp` |
+| [`git-signing`](git-signing/) | built | commit signing key; workspace `rw` | `mcp` |
 | `github` | planned | GitHub token; no mounts | `mcp` |
 
 Git and GitHub are deliberately **separate** tongs. Signing is a local
