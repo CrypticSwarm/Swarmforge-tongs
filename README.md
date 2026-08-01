@@ -21,15 +21,16 @@ builds tongs against that contract rather than restating it.
 | Tong | Status | Holds | Interface |
 | --- | --- | --- | --- |
 | [`git-signing`](git-signing/) | built | commit signing key; workspace `rw` | `mcp` |
-| `github` | planned | GitHub token; no mounts | `mcp` |
+| [`github`](github/) | built | GitHub token; workspace `rw` | `mcp` |
 
-Git and GitHub are deliberately **separate** tongs. Signing is a local
-filesystem operation: it needs the workspace mounted read-write with the signing
-key in-process. Reading and writing pull requests is a pure HTTP API call: it
-needs a token and no mounts at all. A combined tong would be the union of both
-grants, forcing any project that merely wants to read a PR to also grant
-workspace write and hold a signing key — exactly the privilege bundling the
-approval prompt exists to make visible.
+Git and GitHub are deliberately **separate** tongs, separated by the credential
+each one holds rather than by what it mounts. Both want the workspace: signing
+rewrites commit objects, and pushing needs the objects plus a remote-tracking ref
+update. What differs is the secret. A combined tong would be the union of both,
+forcing any project that merely wants to open a pull request to also hold a GPG
+signing key, and any project that wants signed commits to also hold a token that
+can write to its GitHub repository — exactly the privilege bundling the approval
+prompt exists to make visible.
 
 ## Why one directory per tong
 

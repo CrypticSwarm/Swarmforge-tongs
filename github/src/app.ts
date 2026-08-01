@@ -1,9 +1,9 @@
 // The tong's HTTP surface, split from the process entrypoint so tests can start it
-// without a token or a repository.
+// against a stubbed repository and token.
 
 import express, { type Express, type Request, type Response } from "express";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { buildServer, type Context } from "./server.js";
 
 function methodNotAllowed(_req: Request, res: Response): void {
   res.status(405).json({
@@ -13,17 +13,13 @@ function methodNotAllowed(_req: Request, res: Response): void {
   });
 }
 
-export function buildServer(): McpServer {
-  return new McpServer({ name: "github", version: "0.1.0" });
-}
-
-export function createApp(): Express {
+export function createApp(context: Context): Express {
   const app = express();
   app.use(express.json());
 
   // Stateless Streamable HTTP: a fresh server and transport per request.
   app.post("/mcp", async (req: Request, res: Response) => {
-    const server = buildServer();
+    const server = buildServer(context);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on("close", () => {
       transport.close();
