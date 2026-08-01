@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Never commit key material. The signing key reaches this tong only as a
+# `${secret:...}` reference resolved on the host launcher.
+*.asc
+*.gpg
+*.key
+*.pem
