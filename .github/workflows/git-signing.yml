@@ -1,0 +1,48 @@
+name: git-signing
+
+# One workflow per tong, scoped by path: a tong is standalone, so a change to
+# one never has to run another's suite. Lifting this tong into its own repo
+# takes this file with it unchanged apart from the paths filter.
+on:
+  push:
+    branches: [master]
+    paths:
+      - git-signing/**
+      - .github/workflows/git-signing.yml
+  pull_request:
+    paths:
+      - git-signing/**
+      - .github/workflows/git-signing.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: git-signing-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # Both suites are separate jobs so a failure names itself: `test` is the
+    # no-docker, no-gpg, no-key suite, `test-e2e` is the one that needs real
+    # `git` and `gpg` on PATH. Both are preinstalled on ubuntu-latest.
+    name: make ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [test, test-e2e]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          # Tracks the Dockerfile's NODE_TAG, so CI runs the runtime the image
+          # ships.
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: git-signing/package-lock.json
+
+      # Via the tong's own Makefile, which is the contract the root recurses
+      # through — CI learns no more about the build than `make` already knows.
+      - run: make -C git-signing ${{ matrix.target }}

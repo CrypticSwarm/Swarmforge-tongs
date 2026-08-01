@@ -83,6 +83,7 @@ to resolve.
    every grant it requests and why, and the copy-into-a-layer command to enable
    it.
 6. Add a row to the tong table in the root `README.md`.
+7. Add `.github/workflows/<tong-name>.yml` — see CI below.
 
 ## Tong definitions
 
@@ -141,6 +142,24 @@ cd git-signing && make test  # equivalent; each tong's Makefile stands alone
 first: argv construction, parameter validation, config rejection. Keep `test`
 runnable without docker and without a real credential — anything needing a live
 container or vault goes behind a separate `test:e2e` target.
+
+## CI
+
+Each tong gets its own workflow, `.github/workflows/<tong-name>.yml`, filtered
+to `paths: [<tong-name>/**]` and invoking that tong's `Makefile` through
+`make -C <tong-name> <target>`. Never add a workflow that recurses over every
+tong: a shared one reintroduces at the CI layer exactly the coupling the
+directory layout exists to prevent, and a tong lifted into its own repo should
+carry its workflow out with it.
+
+`.github/` is the one root directory GitHub does not let a tong own, so it is an
+allowed exception to the layout rule above and not a precedent for other shared
+root tooling. It has no bearing on tong discovery, which reads only top-level
+`*.yaml` (see above) — `.github/workflows/*.yml` is neither top-level nor in a
+`tongs/` directory.
+
+Run the tong's `test-e2e` target in CI even when it is out of `make test`: the
+runner has the binaries a developer laptop may not.
 
 ---
 
