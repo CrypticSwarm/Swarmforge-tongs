@@ -6,17 +6,28 @@ import type { Origin } from "./origin.js";
 export class RepoError extends Error {}
 
 /**
- * The workspace is the agent's: its `.git/config` and its hooks are both writable
- * from the anvil. A plain `git -C <workspace> push` would honour either, running a
- * workspace-supplied command as a child of the one git process that holds the
- * token. `-c` on the command line outranks local config, so these hold even
- * against a repository configured to fight them.
+ * The workspace is the agent's, so its `.git/config` would otherwise be an input
+ * to the one git process that holds the token.
  *
- *   safe.directory     git refuses a repository owned by another uid without it
- *   core.hooksPath     a directory with no hooks in it
- *   core.fsmonitor     an arbitrary command git would otherwise run
- *   credential.helper  empty, so no helper can intercept or persist the token
- *   protocol.ext.allow `ext::` transports execute their URL
+ * What contains that is the anvil's mount, not this function: `.git/config` and
+ * `.git/hooks` (along with `.git/branches`, `.git/remotes`, and `.git/commondir`)
+ * are mounted read-only in the agent's container, so a hostile entry cannot be
+ * written in the first place. These overrides are a second layer for the case
+ * where that mount is absent or incomplete.
+ *
+ * Read the list as a second layer rather than as the boundary. It cannot be
+ * exhaustive, and one gap is structural: git resolves `http.<url>.*` by longest
+ * URL match, so a workspace `http.https://github.com/.proxy` outranks any generic
+ * `-c http.proxy=` given here.
+ *
+ *   safe.directory         git refuses a repository owned by another uid without it
+ *   core.hooksPath         a directory with no hooks in it
+ *   core.fsmonitor         an arbitrary command git would otherwise run
+ *   core.gitProxy          the same, for any URL an `insteadOf` rewrote to git://
+ *   credential.helper      empty, so no helper can intercept or persist the token
+ *   protocol.ext.allow     `ext::` transports execute their URL
+ *   push.recurseSubmodules a submodule push carries GIT_ASKPASS to its own remote
+ *   push.followTags        tags are outside what this tong is asked to push
  */
 function hardening(workspace: string): string[] {
   return [
@@ -27,9 +38,15 @@ function hardening(workspace: string): string[] {
     "-c",
     "core.fsmonitor=",
     "-c",
+    "core.gitProxy=",
+    "-c",
     "credential.helper=",
     "-c",
     "protocol.ext.allow=never",
+    "-c",
+    "push.recurseSubmodules=no",
+    "-c",
+    "push.followTags=false",
   ];
 }
 

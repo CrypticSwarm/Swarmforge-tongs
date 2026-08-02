@@ -12,6 +12,16 @@ function repoFor(git: FakeGit): Repo {
   return new Repo(git.run, WORKSPACE, ASKPASS);
 }
 
+function configPairs(args: readonly string[]): Map<string, string> {
+  const pairs = new Map<string, string>();
+  for (let i = 0; i < args.length - 1; i++) {
+    if (args[i] !== "-c") continue;
+    const [key, ...rest] = args[i + 1].split("=");
+    pairs.set(key, rest.join("="));
+  }
+  return pairs;
+}
+
 describe("push argv", () => {
   it("never puts the token on a command line", async () => {
     const git = new FakeGit();
@@ -72,20 +82,29 @@ describe("push argv", () => {
     const git = new FakeGit();
     await repoFor(git).push(ORIGIN, URL, TOKEN);
 
-    const pairs = new Map<string, string>();
     const args = git.pushCall!.args;
-    for (let i = 0; i < args.length - 1; i++) {
-      if (args[i] !== "-c") continue;
-      const [key, ...rest] = args[i + 1].split("=");
-      pairs.set(key, rest.join("="));
-    }
+    const pairs = configPairs(args);
 
     assert.equal(pairs.get("core.hooksPath"), "/dev/null");
     assert.equal(pairs.get("core.fsmonitor"), "");
+    assert.equal(pairs.get("core.gitProxy"), "");
     assert.equal(pairs.get("credential.helper"), "");
     assert.equal(pairs.get("protocol.ext.allow"), "never");
     assert.equal(pairs.get("safe.directory"), WORKSPACE);
     assert.ok(args.includes("--no-verify"));
+  });
+
+  // Not command execution like the keys above: these two send the token, or refs
+  // the caller never asked for, somewhere the workspace chose.
+  it("keeps the push to the one branch, and to the pinned remote only", async () => {
+    const git = new FakeGit();
+    await repoFor(git).push(ORIGIN, URL, TOKEN);
+
+    const pairs = configPairs(git.pushCall!.args);
+
+    // `on-demand` would push submodules to their own remotes, carrying GIT_ASKPASS.
+    assert.equal(pairs.get("push.recurseSubmodules"), "no");
+    assert.equal(pairs.get("push.followTags"), "false");
   });
 });
 

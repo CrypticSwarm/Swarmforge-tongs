@@ -97,12 +97,27 @@ Where it goes at runtime:
 
 ## Hardening the workspace's git
 
-The workspace's `.git/config` and hooks are writable by the agent, and a `pre-push`
-hook or a `core.fsmonitor` entry would run as a child of the one git process
-holding the token. Every git invocation therefore overrides those keys on the
-command line, where local config cannot win: `core.hooksPath` points at a directory
-with no hooks, `core.fsmonitor` and `credential.helper` are emptied, and
-`protocol.ext.allow` is `never`. The push also passes `--no-verify`.
+The session workspace belongs to the agent, so without care its `.git/config`
+would be an input to the one git process that holds the token. That is not a
+theoretical concern: a `core.fsmonitor` or `core.gitProxy` entry runs a command as
+a child of that process, and a `url.<x>.insteadOf` entry rewrites the push URL out
+from under the pin — sending the token wherever the rewrite points.
+
+**What contains that is the anvil's mount.** `.git/config` and `.git/hooks`, along
+with `.git/branches`, `.git/remotes`, and `.git/commondir`, are mounted read-only
+in the agent's container, so a hostile entry cannot be written in the first place.
+The rest of `.git` stays writable, which is all the agent and this tong need.
+
+Every git invocation here also overrides the dangerous keys on the command line —
+`core.hooksPath`, `core.fsmonitor`, `core.gitProxy`, `credential.helper`,
+`protocol.ext.allow`, `push.recurseSubmodules`, and `push.followTags` — and the
+push passes `--no-verify`.
+
+Treat that list as a second layer rather than as the boundary. It cannot be
+exhaustive, and one gap is structural rather than an oversight: git resolves
+`http.<url>.*` by longest URL match, so a workspace `http.https://github.com/.proxy`
+outranks a generic `-c http.proxy=` no matter what this tong passes. Containment
+lives in the mount.
 
 ## Enabling it
 
