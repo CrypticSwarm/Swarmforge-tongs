@@ -6,7 +6,7 @@
 // calls and fails every one of them.
 
 import { realRun } from "./exec.js";
-import { GitHub, GitHubError } from "./github.js";
+import { GitHub, pushBlocker } from "./github.js";
 import { parseOrigin, pushUrl } from "./origin.js";
 import { Repo } from "./repo.js";
 import { createApp } from "./app.js";
@@ -48,15 +48,20 @@ const origin = await (async () => {
 
 const github = new GitHub(fetch, origin, token);
 
-// Catches the two configuration mistakes that are otherwise invisible until the
-// first verb call: a bad token, and a fine-grained token not scoped to this
-// repository. A network failure is not a configuration mistake, so it only warns.
+// Catches the configuration mistakes that are otherwise invisible until the first
+// verb call. Reachability is not enough on its own: a public repository answers
+// this for any valid token, including one with no write access to it, so the
+// reported permissions are what actually gets checked.
 try {
-  const { defaultBranch } = await github.repository();
-  console.log(`github: ${origin.owner}/${origin.repo} reachable, default branch ${defaultBranch}`);
+  const { defaultBranch, permissions } = await github.repository();
+  const blocker = pushBlocker(origin, permissions);
+  if (blocker) die(blocker);
+  console.log(`github: ${origin.owner}/${origin.repo} writable, default branch ${defaultBranch}`);
 } catch (err) {
-  if (err instanceof GitHubError && [401, 403, 404].includes(err.status)) die(err.message);
-  console.error(`github: warning: could not reach GitHub at startup: ${(err as Error).message}`);
+  // Including the network case. Warning and starting anyway produces a tong that
+  // looks healthy and fails every verb with an error from deep inside git, which
+  // is a worse outcome than not starting.
+  die((err as Error).message);
 }
 
 const httpServer = createApp({ repo, github, origin, pushUrl: pushUrl(origin), token }).listen(port, () => {

@@ -117,6 +117,21 @@ export class GitHub {
   }
 }
 
+/**
+ * Reachability says nothing about write access: a public repository answers
+ * `repository()` for any valid token, including one that has never been granted
+ * anything on it. Returns null when the token can push, else why not.
+ */
+export function pushBlocker(origin: Origin, permissions?: Record<string, boolean>): string | null {
+  if (permissions?.push === true) return null;
+  return (
+    `the token cannot push to ${origin.owner}/${origin.repo}. GitHub reports ` +
+    `${permissions ? `push access ${permissions.push}` : "no permissions for it at all"}. A classic token ` +
+    `needs the 'repo' scope (or 'public_repo'); a fine-grained token needs this repository selected, with ` +
+    `Contents: read and write.`
+  );
+}
+
 function safeJson(text: string): unknown {
   try {
     return JSON.parse(text);

@@ -20,8 +20,8 @@ export type FakeGitOptions = {
   head?: string;
   originUrl?: string | null;
   isRepo?: boolean;
-  /** Exit code and stderr for the push, for the rejection paths. */
-  pushFails?: { stderr: string };
+  /** Output for the rejection paths. `--porcelain` puts the per-ref verdict on stdout. */
+  pushFails?: { stderr: string; stdout?: string };
   pushUpToDate?: boolean;
   updateRefFails?: boolean;
 };
@@ -34,7 +34,7 @@ export class FakeGit {
   head: string;
   originUrl: string | null;
   isRepo: boolean;
-  pushFails: { stderr: string } | undefined;
+  pushFails: { stderr: string; stdout?: string } | undefined;
   pushUpToDate: boolean;
   updateRefFails: boolean;
 
@@ -92,7 +92,13 @@ export class FakeGit {
         return this.branch ? this.ok(`${this.branch}\n`) : this.fail("HEAD is detached");
 
       case "push":
-        if (this.pushFails) return this.fail(this.pushFails.stderr);
+        if (this.pushFails) {
+          return {
+            exitCode: 1,
+            stdout: Buffer.from(this.pushFails.stdout ?? "", "utf8"),
+            stderr: this.pushFails.stderr,
+          };
+        }
         return this.ok(
           this.pushUpToDate
             ? `To github.com\n=\trefs/heads/x:refs/heads/x\t[up to date]\nDone\n`

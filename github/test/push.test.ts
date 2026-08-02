@@ -168,6 +168,23 @@ describe("push outcome", () => {
     });
     assert.equal(git.refs.size, 0);
   });
+
+  it("reports the porcelain verdict, not just git's generic summary", async () => {
+    // The half that names the cause is on stdout; stderr carries only the summary.
+    const git = new FakeGit({
+      pushFails: {
+        stdout: "To github.com\n!\trefs/heads/feature:refs/heads/feature\t[remote rejected] (permission denied)\n",
+        stderr: "error: failed to push some refs to 'https://github.com/acme/widgets.git'",
+      },
+    });
+
+    await assert.rejects(() => repoFor(git).push(ORIGIN, URL, TOKEN), (err: Error) => {
+      assert.match(err.message, /permission denied/);
+      assert.match(err.message, /remote rejected/);
+      assert.match(err.message, /failed to push some refs/);
+      return true;
+    });
+  });
 });
 
 describe("push refusals", () => {

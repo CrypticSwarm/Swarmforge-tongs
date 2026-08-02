@@ -170,7 +170,10 @@ export class Repo {
 
     const stdout = result.stdout.toString("utf8");
     if (result.exitCode !== 0) {
-      const detail = result.stderr.trim() || stdout.trim();
+      // Both streams, because they carry different halves of the reason: with
+      // --porcelain the per-ref verdict ("[remote rejected] ... permission denied")
+      // is on stdout, while stderr has only the generic "failed to push some refs".
+      const detail = [stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n");
       throw new RepoError(
         `pushing ${branch} to ${origin.owner}/${origin.repo} failed: ${detail || `git exited ${result.exitCode}`}`,
       );

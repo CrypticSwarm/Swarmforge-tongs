@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { GitHub } from "../src/github.js";
+import { GitHub, pushBlocker } from "../src/github.js";
 import { pushUrl, type Origin } from "../src/origin.js";
 import { Repo } from "../src/repo.js";
 import { branchName, createPr, type Context } from "../src/server.js";
@@ -128,6 +128,22 @@ describe("create_pr failures", () => {
       await assert.rejects(() => createPr(contextFor(git, api), { title: "t" }), expected);
     });
   }
+});
+
+describe("pushBlocker", () => {
+  it("passes a token GitHub reports push access for", () => {
+    assert.equal(pushBlocker(ORIGIN, { pull: true, push: true }), null);
+  });
+
+  it("blocks read-only access, which is all a public repo proves", () => {
+    const blocker = pushBlocker(ORIGIN, { pull: true, push: false });
+    assert.match(blocker!, /cannot push to acme\/widgets/);
+    assert.match(blocker!, /Contents: read and write/);
+  });
+
+  it("blocks when GitHub reports no permissions at all", () => {
+    assert.match(pushBlocker(ORIGIN, undefined)!, /no permissions for it at all/);
+  });
 });
 
 describe("base branch validation", () => {

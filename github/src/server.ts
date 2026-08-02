@@ -92,6 +92,9 @@ function textResult(text: string) {
 }
 
 function errorResult(verb: string, err: unknown) {
+  // Also to the container log: an MCP client may truncate or reformat this, and
+  // the log is the only copy an operator can read after the fact.
+  console.error(`${verb} failed:`, err);
   return {
     content: [{ type: "text" as const, text: `${verb}: error: ${(err as Error).message}` }],
     isError: true,
