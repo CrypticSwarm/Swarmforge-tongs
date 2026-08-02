@@ -55,13 +55,19 @@ export const realRun: Run = (command, args, options = {}) =>
     child.stdin!.end(options.stdin ?? Buffer.alloc(0));
 
     child.on("error", (err) => reject(new RunError(`cannot run ${command}: ${err.message}`)));
-    child.on("close", (code) =>
+    child.on("close", (code, signal) => {
+      // A signal-killed child has no exit code; `code ?? 0` would report it as
+      // success, and a killed push must never read as a completed one.
+      if (code === null) {
+        reject(new RunError(`${command} was killed by ${signal ?? "a signal"}`));
+        return;
+      }
       resolve({
-        exitCode: code ?? 0,
+        exitCode: code,
         stdout: Buffer.concat(stdoutChunks),
         stderr: Buffer.concat(stderrChunks).toString("utf8"),
-      }),
-    );
+      });
+    });
   });
 
 export async function runOrThrow(

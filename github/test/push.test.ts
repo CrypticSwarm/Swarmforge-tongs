@@ -55,8 +55,8 @@ describe("push argv", () => {
     assert.equal(git.pushCall!.env.GIT_TERMINAL_PROMPT, "0");
   });
 
-  it("pushes a fully qualified refspec to the constructed URL", async () => {
-    const git = new FakeGit({ branch: "feature" });
+  it("pushes the sha it read, fully qualified, to the constructed URL", async () => {
+    const git = new FakeGit({ branch: "feature", head: "abc123abc123abc123abc123abc123abc123abcd" });
     await repoFor(git).push(ORIGIN, URL, TOKEN);
 
     assert.deepEqual(git.pushCall!.verb, [
@@ -64,8 +64,28 @@ describe("push argv", () => {
       "--no-verify",
       "--porcelain",
       URL,
-      "refs/heads/feature:refs/heads/feature",
+      "abc123abc123abc123abc123abc123abc123abcd:refs/heads/feature",
     ]);
+  });
+
+  // The agent owns the workspace and can move the branch between the sha read and
+  // the push. A branch-name refspec would push the moved tip while update-ref
+  // records the old one — a stale tracking ref, which is what lets git-signing
+  // rewrite commits that are already on the server.
+  it("pushes and records the same sha even when the branch moves mid-push", async () => {
+    const git = new FakeGit({ branch: "feature", head: "abc123abc123abc123abc123abc123abc123abcd" });
+    const read = git.head;
+    const movingBranch: typeof git.run = async (command, args, options) => {
+      const result = await git.run(command, args, options);
+      // The moment the sha has been read, the agent moves the branch.
+      if (args.includes("rev-parse")) git.head = "def456def456def456def456def456def456def4";
+      return result;
+    };
+    await new Repo(movingBranch, WORKSPACE, ASKPASS).push(ORIGIN, URL, TOKEN);
+
+    const refspec = git.pushCall!.verb[git.pushCall!.verb.length - 1];
+    assert.equal(refspec, `${read}:refs/heads/feature`);
+    assert.equal(git.refs.get("refs/remotes/origin/feature"), read);
   });
 
   it("never force-pushes", async () => {
@@ -123,6 +143,19 @@ describe("push outcome", () => {
     const git = new FakeGit({ pushUpToDate: true });
     const outcome = await repoFor(git).push(ORIGIN, URL, TOKEN);
     assert.equal(outcome.alreadyUpToDate, true);
+  });
+
+  it("says the push succeeded when only the tracking-ref update fails", async () => {
+    const git = new FakeGit({ branch: "feature", head: "abc123abc123abc123abc123abc123abc123abcd" });
+    git.updateRefFails = true;
+
+    await assert.rejects(() => repoFor(git).push(ORIGIN, URL, TOKEN), (err: Error) => {
+      assert.ok(err instanceof RepoError);
+      assert.match(err.message, /commits ARE on the server/);
+      assert.match(err.message, /do not run sign_commits/);
+      assert.match(err.message, /abc123abc123abc123abc123abc123abc123abcd/);
+      return true;
+    });
   });
 
   it("leaves the remote-tracking ref alone when the push fails", async () => {

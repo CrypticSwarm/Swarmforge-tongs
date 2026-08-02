@@ -147,6 +147,11 @@ export class Repo {
    * the tracking ref itself, and a stale one would let a later `sign_commits`
    * rewrite commits that are now on the server.
    *
+   * The refspec source is the sha read here, not the branch name: the agent owns
+   * the workspace and can move the branch between that read and the push, and a
+   * branch-name refspec would then push commits the tracking-ref update below
+   * never records — the stale state described above, on demand.
+   *
    * No force, ever.
    */
   async push(origin: Origin, url: string, token: string): Promise<PushOutcome> {
@@ -159,7 +164,7 @@ export class Repo {
 
     const result = await this.run(
       "git",
-      this.git(["push", "--no-verify", "--porcelain", url, `refs/heads/${branch}:refs/heads/${branch}`]),
+      this.git(["push", "--no-verify", "--porcelain", url, `${sha}:refs/heads/${branch}`]),
       { env: this.env({ GIT_ASKPASS: this.askpass, GITHUB_TONG_TOKEN: token }) },
     );
 
@@ -172,13 +177,23 @@ export class Repo {
     }
 
     const alreadyUpToDate = stdout.includes("[up to date]");
-    await this.capture([
-      "update-ref",
-      "-m",
-      "swarmforge github tong: pushed",
-      `refs/remotes/origin/${branch}`,
-      sha,
-    ]);
+    try {
+      await this.capture([
+        "update-ref",
+        "-m",
+        "swarmforge github tong: pushed",
+        `refs/remotes/origin/${branch}`,
+        sha,
+      ]);
+    } catch (err) {
+      // The push itself succeeded; a generic failure here would hide that, and
+      // the stale tracking ref is exactly the state that makes signing unsafe.
+      throw new RepoError(
+        `pushed ${branch} to ${origin.owner}/${origin.repo} at ${sha}, but updating ` +
+          `refs/remotes/origin/${branch} failed: ${(err as Error).message}. The commits ARE on the server; ` +
+          `do not run sign_commits until that ref points at ${sha}.`,
+      );
+    }
 
     return { branch, sha, alreadyUpToDate, detail: stdout.trim() || result.stderr.trim() };
   }

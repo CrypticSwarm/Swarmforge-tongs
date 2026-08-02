@@ -15,7 +15,10 @@ function methodNotAllowed(_req: Request, res: Response): void {
 
 export function createApp(context: Context): Express {
   const app = express();
-  app.use(express.json());
+  // Above the worst case for a schema-legal request: MAX_BODY is 64K *characters*,
+  // which JSON-escaped multibyte text can inflate past express's 100kb default —
+  // that would 413 outside JSON-RPC before the MCP layer ever saw the call.
+  app.use(express.json({ limit: "1mb" }));
 
   // Stateless Streamable HTTP: a fresh server and transport per request.
   app.post("/mcp", async (req: Request, res: Response) => {

@@ -73,7 +73,9 @@ on `origin` and the follow-up push is a fast-forward. Sign, then push.
 | `lifecycle: session` | It holds a credential and mounts the workspace. A `shared` tong outlives the session and cannot mount the workspace at all. |
 | `env: GITHUB_TOKEN` | The token itself. |
 
-No `docker-socket`. Network egress reaches `github.com` and `api.github.com` only.
+No `docker-socket`. The only hosts this tong contacts are `github.com` and
+`api.github.com` — but that is its behavior, not a boundary it can impose on
+itself; actually restricting egress to those hosts is the launcher's job.
 
 ## The token
 
@@ -114,10 +116,13 @@ Every git invocation here also overrides the dangerous keys on the command line 
 push passes `--no-verify`.
 
 Treat that list as a second layer rather than as the boundary. It cannot be
-exhaustive, and one gap is structural rather than an oversight: git resolves
+exhaustive, and two gaps are structural rather than oversights: git resolves
 `http.<url>.*` by longest URL match, so a workspace `http.https://github.com/.proxy`
-outranks a generic `-c http.proxy=` no matter what this tong passes. Containment
-lives in the mount.
+outranks a generic `-c http.proxy=` no matter what this tong passes; and `-c` can
+add config but never remove it, so an existing `url.<base>.insteadOf` entry —
+which rewrites even a command-line push URL, aiming the askpass-supplied token at
+whatever host the rewrite names — cannot be neutralized from the command line at
+all. Containment lives in the mount.
 
 ## Enabling it
 
@@ -158,7 +163,10 @@ make clean
 
 `make test` covers the security boundary: origin parsing and everything it
 rejects, that the token never reaches argv and reaches git's environment only for
-the push, the exact push argv including the absence of any force flag, the config
-hardening, the remote-tracking ref update, and that a rejected push opens no pull
-request. It drives a fake `git` through the single `Run` seam in `src/exec.ts` and
-a fake `fetch` through `src/github.ts`, so it needs no binaries and no credential.
+the push, the exact push argv including the absence of any force flag and that
+the refspec pins the sha the tong read rather than a branch name a concurrent
+commit could move, the config hardening, the remote-tracking ref update, and that
+a rejected push opens no pull request. It drives a fake `git` through the single
+`Run` seam in `src/exec.ts` and a fake `fetch` through `src/github.ts`, so it
+needs no git and no credential; the only real subprocesses spawned are the test
+runner's own `node`, exercising `realRun`'s exit, signal, and truncation paths.

@@ -23,6 +23,7 @@ export type FakeGitOptions = {
   /** Exit code and stderr for the push, for the rejection paths. */
   pushFails?: { stderr: string };
   pushUpToDate?: boolean;
+  updateRefFails?: boolean;
 };
 
 export class FakeGit {
@@ -35,6 +36,7 @@ export class FakeGit {
   isRepo: boolean;
   pushFails: { stderr: string } | undefined;
   pushUpToDate: boolean;
+  updateRefFails: boolean;
 
   constructor(options: FakeGitOptions = {}) {
     this.branch = options.branch === undefined ? "feature" : options.branch;
@@ -43,6 +45,7 @@ export class FakeGit {
     this.isRepo = options.isRepo ?? true;
     this.pushFails = options.pushFails;
     this.pushUpToDate = options.pushUpToDate ?? false;
+    this.updateRefFails = options.updateRefFails ?? false;
   }
 
   /** The push call, for asserting on argv and environment. */
@@ -97,6 +100,7 @@ export class FakeGit {
         );
 
       case "update-ref": {
+        if (this.updateRefFails) return this.fail("cannot lock ref");
         const [ref, sha] = rest.slice(2);
         this.refs.set(ref, sha);
         return this.ok();
