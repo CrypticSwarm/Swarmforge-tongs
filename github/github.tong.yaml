@@ -1,0 +1,33 @@
+# Example tong definition for the github tong.
+#
+# Not auto-discovered: tong discovery reads only top-level *.yaml in a layer's
+# tongs/ directory, and this lives a level down.
+#
+# To enable it:
+#   1. make image TONG=github            # builds swarmforge-tong-github:latest
+#   2. cp github/github.tong.yaml ~/.swarmforge/tongs/github.yaml
+#   3. edit the copy's ${secret:...} reference to point at your own vault
+#
+# The secret reference below is a PLACEHOLDER. `REPLACE-ME` is not a real vault
+# path and will fail to resolve until you edit it. `op` is whatever provider name
+# you declared in ~/.swarmforge/secret-providers.yaml; use yours.
+description: Pushes branches and opens pull requests for the workspace's repository, with a token the agent never holds.
+lifecycle: session
+image: swarmforge-tong-github:latest
+env:
+  # A fine-grained personal access token scoped to just this repository, with
+  # Contents: read and write, and Pull requests: read and write.
+  GITHUB_TOKEN: ${secret:op:op://REPLACE-ME/github-tong/token}
+command: ["/app/entrypoint.sh"]
+interface:
+  kind: mcp
+  transport: http
+  port: 8080
+  name: github
+mounts:
+  # rw: the tong reads `origin` to learn which repository it serves, and updates
+  # refs/remotes/origin/<branch> after a push so the git-signing tong can still
+  # tell published commits from unpublished ones. No working-tree file is touched.
+  - workspace:rw
+readiness:
+  mode: tcp

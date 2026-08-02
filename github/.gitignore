@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Never commit token material. The GitHub token reaches this tong only as a
+# `${secret:...}` reference resolved on the host launcher.
+.env
+.env.*
+*.token

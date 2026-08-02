@@ -1,0 +1,35 @@
+name: github
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - github/**
+      - .github/workflows/github.yml
+  pull_request:
+    paths:
+      - github/**
+      - .github/workflows/github.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: github-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: make test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          # Tracks the Dockerfile's NODE_TAG.
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: github/package-lock.json
+
+      - run: make -C github test
