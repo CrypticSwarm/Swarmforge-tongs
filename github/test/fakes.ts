@@ -11,6 +11,7 @@ export const ASKPASS = "/app/askpass.sh";
 export type GitCall = {
   args: string[];
   env: NodeJS.ProcessEnv;
+  stdin: Buffer | undefined;
   /** argv with the `-c key=value` hardening pairs and `-C <workspace>` removed. */
   verb: string[];
 };
@@ -24,6 +25,14 @@ export type FakeGitOptions = {
   pushFails?: { stderr: string; stdout?: string };
   pushUpToDate?: boolean;
   updateRefFails?: boolean;
+  /** What rev-list reports as reachable from HEAD but from no origin ref, oldest first. */
+  unpushed?: string[];
+  /** Which of those carry a `gpgsig` header. */
+  signed?: string[];
+  /** Commit messages, for the shas that need a specific one. Defaults to the sha. */
+  messages?: Record<string, string>;
+  /** Shas `cat-file --batch` answers `missing` for, as a truncated batch also would. */
+  missingObjects?: string[];
 };
 
 export class FakeGit {
@@ -37,6 +46,10 @@ export class FakeGit {
   pushFails: { stderr: string; stdout?: string } | undefined;
   pushUpToDate: boolean;
   updateRefFails: boolean;
+  unpushed: string[];
+  signed: Set<string>;
+  messages: Record<string, string>;
+  missingObjects: Set<string>;
 
   constructor(options: FakeGitOptions = {}) {
     this.branch = options.branch === undefined ? "feature" : options.branch;
@@ -46,11 +59,19 @@ export class FakeGit {
     this.pushFails = options.pushFails;
     this.pushUpToDate = options.pushUpToDate ?? false;
     this.updateRefFails = options.updateRefFails ?? false;
+    this.unpushed = options.unpushed ?? [];
+    this.signed = new Set(options.signed ?? []);
+    this.messages = options.messages ?? {};
+    this.missingObjects = new Set(options.missingObjects ?? []);
   }
 
   /** The push call, for asserting on argv and environment. */
   get pushCall(): GitCall | undefined {
     return this.calls.find((call) => call.verb[0] === "push");
+  }
+
+  callsTo(verb: string): GitCall[] {
+    return this.calls.filter((call) => call.verb[0] === verb);
   }
 
   private ok(stdout = ""): RunResult {
@@ -67,12 +88,46 @@ export class FakeGit {
     const argv = [...args];
     const verb = [...argv];
     while (verb[0] === "-c" || verb[0] === "-C") verb.splice(0, 2);
-    this.calls.push({ args: argv, env: options?.env ?? {}, verb });
+    this.calls.push({ args: argv, env: options?.env ?? {}, stdin: options?.stdin, verb });
 
-    return this.runGit(verb);
+    return this.runGit(verb, options?.stdin);
   };
 
-  private runGit(verb: string[]): RunResult {
+  /**
+   * The bytes git stores, so the signature check runs against a real commit object
+   * rather than against something shaped like the answer it is looking for.
+   */
+  private commitObject(sha: string): Buffer {
+    const headers = [
+      `tree ${"0".repeat(40)}`,
+      "author A U Thor <a@example.com> 1700000000 +0000",
+      "committer A U Thor <a@example.com> 1700000000 +0000",
+      ...(this.signed.has(sha)
+        ? ["gpgsig -----BEGIN PGP SIGNATURE-----", " ", " iQIzBAABCgAdFiEE", " -----END PGP SIGNATURE-----"]
+        : []),
+    ];
+    return Buffer.from(`${headers.join("\n")}\n\n${this.messages[sha] ?? `commit ${sha}\n`}`, "utf8");
+  }
+
+  /** `<oid> <type> <size>\n<contents>\n` per requested object, as git writes it. */
+  private catFileBatch(stdin: Buffer | undefined): RunResult {
+    const requested = (stdin?.toString("utf8") ?? "")
+      .split("\n")
+      .filter((line) => line.length > 0);
+
+    const parts: Buffer[] = [];
+    for (const sha of requested) {
+      if (this.missingObjects.has(sha)) {
+        parts.push(Buffer.from(`${sha} missing\n`, "utf8"));
+        continue;
+      }
+      const raw = this.commitObject(sha);
+      parts.push(Buffer.from(`${sha} commit ${raw.length}\n`, "utf8"), raw, Buffer.from("\n", "utf8"));
+    }
+    return { exitCode: 0, stdout: Buffer.concat(parts), stderr: "" };
+  }
+
+  private runGit(verb: string[], stdin?: Buffer): RunResult {
     const [name, ...rest] = verb;
 
     switch (name) {
@@ -84,6 +139,12 @@ export class FakeGit {
           return sha ? this.ok(`${sha}\n`) : this.fail("no such ref");
         }
         return this.fail(`unexpected rev-parse: ${rest.join(" ")}`);
+
+      case "rev-list":
+        return this.ok(this.unpushed.map((sha) => `${sha}\n`).join(""));
+
+      case "cat-file":
+        return this.catFileBatch(stdin);
 
       case "config":
         return this.originUrl ? this.ok(`${this.originUrl}\n`) : this.fail("no such key");

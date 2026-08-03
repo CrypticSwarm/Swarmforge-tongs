@@ -5,6 +5,7 @@
 // repository all stop the process here rather than leaving a tong that accepts
 // calls and fails every one of them.
 
+import { booleanFromEnv } from "./config.js";
 import { realRun } from "./exec.js";
 import { GitHub, pushBlocker } from "./github.js";
 import { parseOrigin, pushUrl } from "./origin.js";
@@ -33,7 +34,20 @@ if (!token) {
   );
 }
 
-const repo = new Repo(realRun, workspace, askpass);
+// Parsed before anything else happens, so a misspelled value is a startup failure
+// rather than a gate that turns out to have been off after a push has gone out.
+const requireSignedCommits = (() => {
+  try {
+    return booleanFromEnv(
+      "GITHUB_TONG_REQUIRE_SIGNED_COMMITS",
+      process.env.GITHUB_TONG_REQUIRE_SIGNED_COMMITS,
+    );
+  } catch (err) {
+    die((err as Error).message);
+  }
+})();
+
+const repo = new Repo(realRun, workspace, askpass, requireSignedCommits);
 
 const origin = await (async () => {
   try {
@@ -62,6 +76,10 @@ try {
   // looks healthy and fails every verb with an error from deep inside git, which
   // is a worse outcome than not starting.
   die((err as Error).message);
+}
+
+if (requireSignedCommits) {
+  console.log("github: every commit a push would add to the repository must carry a signature");
 }
 
 const httpServer = createApp({ repo, github, origin, pushUrl: pushUrl(origin), token }).listen(port, () => {

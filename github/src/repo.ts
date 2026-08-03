@@ -50,6 +50,61 @@ function hardening(workspace: string): string[] {
   ];
 }
 
+const LF = 0x0a;
+
+/**
+ * `cat-file --batch` output: `<oid> <type> <size>\n`, the object's bytes, then a
+ * newline, repeated once per requested object.
+ *
+ * Framed by the declared size rather than by scanning for the next line that looks
+ * like a header, so no byte of a commit message can be read as the start of another
+ * entry. An `<oid> missing` line has no body and is skipped; the caller fails on any
+ * sha it got no object for, which is also what catches output truncated at
+ * MAX_OUTPUT_BYTES.
+ */
+function parseBatch(output: Buffer): Map<string, Buffer> {
+  const objects = new Map<string, Buffer>();
+  let cursor = 0;
+  while (cursor < output.length) {
+    const lineEnd = output.indexOf(LF, cursor);
+    if (lineEnd === -1) break;
+    const [oid, type, size] = output.subarray(cursor, lineEnd).toString("utf8").split(" ");
+    const length = Number(size);
+    if (type !== "commit" || !Number.isSafeInteger(length) || length < 0) {
+      cursor = lineEnd + 1;
+      continue;
+    }
+    const start = lineEnd + 1;
+    const end = start + length;
+    if (end > output.length) break;
+    objects.set(oid, output.subarray(start, end));
+    cursor = end + 1;
+  }
+  return objects;
+}
+
+/**
+ * Whether a commit object carries a signature header, which is all this tong can
+ * honestly answer. It holds no keyring, so it cannot verify one; that is the
+ * server's job, and GitHub's branch protection is what decides whether a signature
+ * is trusted.
+ *
+ * `git log --format=%G?` is not an alternative: this image has no gpg, and git
+ * reports a signed commit as `N` when it cannot run one -- every signed commit
+ * would read as unsigned.
+ *
+ * Only the header block is scanned. The message below it is the agent's to write,
+ * so scanning the whole object would let a commit message beginning `gpgsig `
+ * pass the check. Continuation lines start with a space and cannot match either.
+ * latin1 decodes byte-for-byte, so an author name that is not valid UTF-8 stays
+ * exactly as many bytes as it was.
+ */
+function isSigned(raw: Buffer): boolean {
+  const headerEnd = raw.indexOf("\n\n");
+  const headerBlock = headerEnd === -1 ? raw : raw.subarray(0, headerEnd);
+  return /^gpgsig(?:-sha256)? /m.test(headerBlock.toString("latin1"));
+}
+
 /** git's own rules are stricter; this is the subset that keeps a refspec unambiguous. */
 function assertUsableBranch(branch: string): void {
   const bad =
@@ -74,11 +129,21 @@ export type PushOutcome = {
 };
 
 export class Repo {
+  /**
+   * `requireSignedCommits` is held here rather than passed to `push`, so it applies
+   * to every verb that pushes without any of them having to remember it.
+   */
   constructor(
     private readonly run: Run,
     private readonly workspace: string,
     private readonly askpass: string,
+    private readonly requireSignedCommits: boolean,
   ) {}
+
+  /** For the MCP surface, which tells the agent about the gate before it trips over it. */
+  get requiresSignedCommits(): boolean {
+    return this.requireSignedCommits;
+  }
 
   private git(args: readonly string[]): string[] {
     return [...hardening(this.workspace), "-C", this.workspace, ...args];
@@ -95,8 +160,8 @@ export class Repo {
     };
   }
 
-  private async capture(args: readonly string[]): Promise<Buffer> {
-    return runOrThrow(this.run, "git", this.git(args), { env: this.env() });
+  private async capture(args: readonly string[], stdin?: Buffer): Promise<Buffer> {
+    return runOrThrow(this.run, "git", this.git(args), { env: this.env(), stdin });
   }
 
   /** For queries whose failure is meaningful rather than exceptional. */
@@ -138,6 +203,67 @@ export class Repo {
   }
 
   /**
+   * The commits pushing `sha` would add to the server: reachable from it, and from
+   * no `refs/remotes/origin/*` ref. Oldest first.
+   *
+   * `--not --remotes=origin` rather than the branch's own upstream, for two reasons
+   * that point the same way. It is the more accurate answer to "what would this push
+   * add", since a commit already on some other origin branch is one the server has
+   * and git will not send. And it is the exact set the git-signing tong signs, so
+   * `sign_commits` followed by a push always satisfies the gate below -- a narrower
+   * or wider set here would make the two tongs disagree about which commits matter.
+   */
+  private async commitsToPush(sha: string): Promise<string[]> {
+    const out = await this.capture(["rev-list", "--topo-order", "--reverse", sha, "--not", "--remotes=origin"]);
+    const text = out.toString("utf8").trim();
+    return text.length > 0 ? text.split("\n") : [];
+  }
+
+  /** Those of `shas` whose commit object carries no signature header, in the order given. */
+  private async unsignedCommits(shas: readonly string[]): Promise<string[]> {
+    if (shas.length === 0) return [];
+
+    const out = await this.capture(["cat-file", "--batch"], Buffer.from(`${shas.join("\n")}\n`, "utf8"));
+    const objects = parseBatch(out);
+
+    const unsigned: string[] = [];
+    for (const sha of shas) {
+      const raw = objects.get(sha);
+      // Fail closed. Not knowing whether a commit is signed is not the same as it
+      // being signed, and this is the branch a truncated batch would arrive on.
+      if (!raw) {
+        throw new RepoError(
+          `git cat-file returned no commit object for ${sha}, so this tong cannot tell whether it is signed. ` +
+            `Nothing has been pushed.`,
+        );
+      }
+      if (!isSigned(raw)) unsigned.push(sha);
+    }
+    return unsigned;
+  }
+
+  /**
+   * Refuse before the push rather than let the server do it: a repository whose
+   * branch protection requires signatures would reject the whole push anyway, and a
+   * repository without that protection would silently accept unsigned history.
+   */
+  private async assertPushIsSigned(origin: Origin, sha: string): Promise<void> {
+    const commits = await this.commitsToPush(sha);
+    const unsigned = await this.unsignedCommits(commits);
+    if (unsigned.length === 0) return;
+
+    const shown = unsigned.slice(0, 5).map((commit) => commit.slice(0, 12));
+    const rest = unsigned.length > shown.length ? `, and ${unsigned.length - shown.length} more` : "";
+    throw new RepoError(
+      `refusing to push: ${unsigned.length} of the ${commits.length} commit${commits.length === 1 ? "" : "s"} ` +
+        `this would add to ${origin.owner}/${origin.repo} ` +
+        `${unsigned.length === 1 ? "carries" : "carry"} no signature (${shown.join(", ")}${rest}). This tong is ` +
+        `configured with GITHUB_TONG_REQUIRE_SIGNED_COMMITS=true. Sign them and push again -- the ` +
+        `git-signing tong's sign_commits verb signs exactly this set of commits. Nothing has been pushed.`,
+    );
+  }
+
+  /**
    * Push the branch to the pinned repository, then move `refs/remotes/origin/<branch>`
    * to match.
    *
@@ -161,6 +287,11 @@ export class Repo {
     }
     assertUsableBranch(branch);
     const sha = await this.headSha();
+
+    // Against the sha being pushed, not HEAD: the agent can move the branch, and a
+    // gate that inspected a different commit than the refspec names would be one it
+    // could push unsigned commits past.
+    if (this.requireSignedCommits) await this.assertPushIsSigned(origin, sha);
 
     const result = await this.run(
       "git",

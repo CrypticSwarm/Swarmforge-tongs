@@ -18,7 +18,7 @@ before(async () => {
   const git = new FakeGit();
   const api = new FakeGitHubApi();
   server = createApp({
-    repo: new Repo(git.run, WORKSPACE, ASKPASS),
+    repo: new Repo(git.run, WORKSPACE, ASKPASS, false),
     github: new GitHub(api.fetch, ORIGIN, "unused"),
     origin: ORIGIN,
     pushUrl: pushUrl(ORIGIN),
