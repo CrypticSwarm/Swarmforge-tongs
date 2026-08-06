@@ -18,6 +18,10 @@ env:
   # A fine-grained personal access token scoped to just this repository, with
   # Contents: read and write, and Pull requests: read and write.
   GITHUB_TOKEN: ${secret:op:op://REPLACE-ME/github-tong/token}
+  # "true" refuses any push that would add a commit carrying no signature, which
+  # pairs with the git-signing tong: it signs exactly the commits this checks.
+  # Only "true" and "false" are accepted; anything else stops the tong at startup.
+  GITHUB_TONG_REQUIRE_SIGNED_COMMITS: "false"
 command: ["/app/entrypoint.sh"]
 interface:
   kind: mcp

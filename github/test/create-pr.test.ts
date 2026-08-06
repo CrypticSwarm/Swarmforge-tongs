@@ -11,7 +11,7 @@ const TOKEN = "ghp_thisIsTheSecretTokenValue";
 
 function contextFor(git: FakeGit, api: FakeGitHubApi): Context {
   return {
-    repo: new Repo(git.run, WORKSPACE, ASKPASS),
+    repo: new Repo(git.run, WORKSPACE, ASKPASS, false),
     github: new GitHub(api.fetch, ORIGIN, TOKEN),
     origin: ORIGIN,
     pushUrl: pushUrl(ORIGIN),

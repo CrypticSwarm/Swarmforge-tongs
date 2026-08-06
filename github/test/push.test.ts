@@ -9,7 +9,7 @@ const URL = pushUrl(ORIGIN);
 const TOKEN = "ghp_thisIsTheSecretTokenValue";
 
 function repoFor(git: FakeGit): Repo {
-  return new Repo(git.run, WORKSPACE, ASKPASS);
+  return new Repo(git.run, WORKSPACE, ASKPASS, false);
 }
 
 function configPairs(args: readonly string[]): Map<string, string> {
@@ -81,7 +81,7 @@ describe("push argv", () => {
       if (args.includes("rev-parse")) git.head = "def456def456def456def456def456def456def4";
       return result;
     };
-    await new Repo(movingBranch, WORKSPACE, ASKPASS).push(ORIGIN, URL, TOKEN);
+    await new Repo(movingBranch, WORKSPACE, ASKPASS, false).push(ORIGIN, URL, TOKEN);
 
     const refspec = git.pushCall!.verb[git.pushCall!.verb.length - 1];
     assert.equal(refspec, `${read}:refs/heads/feature`);

@@ -64,6 +64,48 @@ on `origin` and the follow-up push is a fast-forward. Sign, then push.
 - The token cannot see the repository. That is checked at startup, because a
   fine-grained token missing this repository and a repository that does not exist
   are the same 404 later on.
+- A commit the push would add carries no signature, if the tong is configured to
+  require signed commits — see below.
+
+## Requiring signed commits
+
+```yaml
+env:
+  GITHUB_TONG_REQUIRE_SIGNED_COMMITS: "true"
+```
+
+With that set, every push — `push_branch` and the push inside `create_pr` alike —
+first lists the commits it would add to the repository and refuses if any of them
+carries no signature. The refusal happens before git is asked to push anything, so
+nothing reaches the server and `refs/remotes/origin/<branch>` does not move. The
+error names the offending commits.
+
+The knob takes `true` or `false` and nothing else. Unset means `false`; an
+unrecognized value stops the tong at startup rather than leaving a check that
+looks configured and is not.
+
+**The set it checks is the set `git-signing` signs.** "Commits this push would
+add" means reachable from the sha being pushed and from no `refs/remotes/origin/*`
+ref — the same question the [`git-signing`](../git-signing/) tong asks to decide
+what it may rewrite. So `sign_commits` followed by a push always satisfies this,
+and the two tongs can never disagree about which commits are at stake. It is also
+the more accurate reading of "would add": a commit already on some other `origin`
+branch is one the server has and git will not send.
+
+**It checks that a signature is present, not that it is good.** This tong holds no
+key and no keyring — verifying is the server's job, and GitHub's branch protection
+and `Verified` badge are what decide whether a signature is trusted. What this
+catches is the mistake that is otherwise silent: pushing commits nobody signed. On
+a repository whose branch protection already requires signatures, it turns a
+remote rejection of the whole push into a local error naming the commits; on a
+repository without that protection, it is the only thing standing between an
+unsigned commit and `main`.
+
+Two details follow from holding no key. `git log --format=%G?` is not used, because
+git reports a signed commit as `N` when it cannot run gpg, and there is no gpg in
+this image — every signed commit would read as unsigned. And only the commit
+object's header block is inspected: the message below it is the agent's to write,
+so a commit whose message opens with `gpgsig ` does not pass.
 
 ## Grants it requests, and why
 
@@ -72,6 +114,7 @@ on `origin` and the follow-up push is a fast-forward. Sign, then push.
 | `mounts: [workspace:rw]` | The tong reads `origin` to learn which repository it serves, and writes `refs/remotes/origin/<branch>` after a push. No working-tree file is touched. |
 | `lifecycle: session` | It holds a credential and mounts the workspace. A `shared` tong outlives the session and cannot mount the workspace at all. |
 | `env: GITHUB_TOKEN` | The token itself. |
+| `env: GITHUB_TONG_REQUIRE_SIGNED_COMMITS` | Optional, not a credential. `"true"` refuses to push unsigned commits; see above. |
 
 No `docker-socket`. The only hosts this tong contacts are `github.com` and
 `api.github.com` — but that is its behavior, not a boundary it can impose on
@@ -165,8 +208,10 @@ make clean
 rejects, that the token never reaches argv and reaches git's environment only for
 the push, the exact push argv including the absence of any force flag and that
 the refspec pins the sha the tong read rather than a branch name a concurrent
-commit could move, the config hardening, the remote-tracking ref update, and that
-a rejected push opens no pull request. It drives a fake `git` through the single
+commit could move, the config hardening, the remote-tracking ref update, that
+a rejected push opens no pull request, and the signed-commit gate: which commits
+it asks about, that a signature in a commit message does not satisfy it, and that
+a commit it cannot read is a refusal rather than a pass. It drives a fake `git` through the single
 `Run` seam in `src/exec.ts` and a fake `fetch` through `src/github.ts`, so it
 needs no git and no credential; the only real subprocesses spawned are the test
 runner's own `node`, exercising `realRun`'s exit, signal, and truncation paths.

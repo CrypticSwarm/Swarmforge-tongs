@@ -28,6 +28,21 @@ repository.
 push_branch pushes the branch you have checked out. create_pr pushes it and then
 opens the pull request, so there is no need to call both. Neither ever force-pushes.`;
 
+// Only when the gate is on: a tong that describes a rule it is not enforcing is
+// worse than one that says nothing, because the agent has no way to tell which.
+const SIGNED_COMMITS_INSTRUCTIONS = `This tong is configured to require signed commits. A push that would add an
+unsigned commit to the repository is refused, and nothing is pushed. Sign the
+commits you have not pushed yet -- the git-signing tong's sign_commits verb signs
+exactly the set this checks -- and then call again.`;
+
+const SIGNED_COMMITS_SENTENCE =
+  "This tong requires signed commits: it refuses the push, and pushes nothing, if any commit the push would " +
+  "add carries no signature.";
+
+function describe(base: string, context: Context): string {
+  return context.repo.requiresSignedCommits ? `${base} ${SIGNED_COMMITS_SENTENCE}` : base;
+}
+
 /** Never reaches git, but rejecting a nonsense ref here beats a 422 from GitHub. */
 export const branchName = z
   .string()
@@ -102,16 +117,21 @@ function errorResult(verb: string, err: unknown) {
 }
 
 export function buildServer(context: Context): McpServer {
-  const server = new McpServer({ name: "github", version: "0.1.0" }, { instructions: INSTRUCTIONS });
+  const instructions = context.repo.requiresSignedCommits
+    ? `${INSTRUCTIONS}\n\n${SIGNED_COMMITS_INSTRUCTIONS}`
+    : INSTRUCTIONS;
+  const server = new McpServer({ name: "github", version: "0.1.0" }, { instructions });
 
   server.registerTool(
     "push_branch",
     {
       title: "push_branch",
-      description:
+      description: describe(
         "Push the branch currently checked out in the workspace to its origin repository on GitHub, and " +
-        "update the local remote-tracking ref to match. Never force-pushes. Fails on a detached HEAD or a " +
-        "non-fast-forward. No parameters: the branch and the repository are both derived from the workspace.",
+          "update the local remote-tracking ref to match. Never force-pushes. Fails on a detached HEAD or a " +
+          "non-fast-forward. No parameters: the branch and the repository are both derived from the workspace.",
+        context,
+      ),
       inputSchema: {},
     },
     async () => {
@@ -127,11 +147,13 @@ export function buildServer(context: Context): McpServer {
     "create_pr",
     {
       title: "create_pr",
-      description:
+      description: describe(
         "Push the branch currently checked out and open a pull request from it. The head branch and the " +
-        "repository come from the workspace; only the text and the base branch are yours to choose. Set " +
-        "'base' to another branch to stack this pull request on top of it; it defaults to the " +
-        "repository's default branch.",
+          "repository come from the workspace; only the text and the base branch are yours to choose. Set " +
+          "'base' to another branch to stack this pull request on top of it; it defaults to the " +
+          "repository's default branch.",
+        context,
+      ),
       inputSchema: {
         title: z.string().min(1).max(MAX_TITLE).describe("Pull request title."),
         body: z.string().max(MAX_BODY).optional().describe("Pull request description, in Markdown."),
