@@ -1,12 +1,13 @@
-// The MCP surface: two verbs.
+// The MCP surface.
 //
 // A pull request is text, so unlike the git-signing tong this one cannot take zero
-// parameters. What a caller controls is the prose and the base branch; the head
-// branch and the repository stay derived.
+// parameters. What a caller controls is the prose, the base branch, and which pull
+// request of the pinned repository it is talking about; the head branch and the
+// repository itself stay derived.
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { MAX_BODY, MAX_TITLE, type GitHub } from "./github.js";
+import { MAX_BODY, MAX_TITLE, type GitHub, type PullRequest } from "./github.js";
 import type { Origin } from "./origin.js";
 import type { PushOutcome, Repo } from "./repo.js";
 
@@ -26,7 +27,11 @@ accepts an owner, a repository, or a URL, and the tong will not act on any other
 repository.
 
 push_branch pushes the branch you have checked out. create_pr pushes it and then
-opens the pull request, so there is no need to call both. Neither ever force-pushes.`;
+opens the pull request, so there is no need to call both. Neither ever force-pushes.
+
+get_pr and update_pr work on an already-open pull request, by number. Read one
+before editing it: update_pr replaces the fields you pass outright, so an edit that
+means to add to a description has to send the whole new description.`;
 
 // Only when the gate is on: a tong that describes a rule it is not enforcing is
 // worse than one that says nothing, because the agent has no way to tell which.
@@ -50,6 +55,13 @@ export const branchName = z
   .max(255)
   .refine((value) => !/[\s\u0000-\u001f\u007f]/.test(value), "must not contain whitespace or control characters")
   .refine((value) => !value.startsWith("-"), "must not start with '-'");
+
+/**
+ * The repository is pinned, so a number is the whole address of a pull request.
+ * Bounded to an integer here and again in the client, because unlike every other
+ * parameter this one ends up in a URL path.
+ */
+export const prNumber = z.number().int().positive();
 
 export type CreatePrInput = {
   title: string;
@@ -100,6 +112,24 @@ export async function createPr(context: Context, input: CreatePrInput): Promise<
     "",
     renderPush(outcome, context.origin),
   ].join("\n");
+}
+
+/** What a caller needs before editing: the current text, verbatim, and where it points. */
+function renderPr(pr: PullRequest): string {
+  const status = pr.merged ? "merged" : pr.draft ? "draft" : pr.state;
+  return [
+    `#${pr.number} ${pr.head} -> ${pr.base} (${status})`,
+    pr.url,
+    "",
+    `title: ${pr.title}`,
+    "",
+    "description:",
+    pr.body.length > 0 ? pr.body : "(empty)",
+  ].join("\n");
+}
+
+export async function getPr(context: Context, input: { number: number }): Promise<string> {
+  return renderPr(await context.github.pullRequest(input.number));
 }
 
 function textResult(text: string) {
@@ -166,6 +196,27 @@ export function buildServer(context: Context): McpServer {
         return textResult(await createPr(context, input));
       } catch (err) {
         return errorResult("create_pr", err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_pr",
+    {
+      title: "get_pr",
+      description:
+        "Read one pull request of this workspace's repository: its title, its description, the branches it " +
+        "goes between, and whether it is open, draft, closed, or merged. The repository is not a parameter " +
+        "-- only pull requests of the pinned one are readable.",
+      inputSchema: {
+        number: prNumber.describe("Pull request number, as it appears in the repository."),
+      },
+    },
+    async (input) => {
+      try {
+        return textResult(await getPr(context, input));
+      } catch (err) {
+        return errorResult("get_pr", err);
       }
     },
   );

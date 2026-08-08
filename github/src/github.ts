@@ -1,8 +1,9 @@
 // The GitHub REST client.
 //
-// Everything the agent supplies travels from here as JSON in a request body; the
-// only values that reach a URL are the pinned `owner` and `repo`. `fetch` is
-// injected so the path is testable without a token or a network.
+// Everything the agent supplies travels from here as JSON in a request body, with
+// one exception: a pull request number is a path segment. The pinned `owner` and
+// `repo` are the only other values that reach a URL. `fetch` is injected so the
+// path is testable without a token or a network.
 
 import type { Origin } from "./origin.js";
 
@@ -23,10 +24,17 @@ export const MAX_BODY = 65536;
 
 export type PullRequest = {
   number: number;
+  /** GraphQL's identifier for the same pull request; empty if GitHub omitted it. */
+  nodeId: string;
   url: string;
+  title: string;
+  body: string;
   base: string;
   head: string;
   draft: boolean;
+  state: "open" | "closed";
+  /** A merged pull request is also `closed`, but almost nothing about it can change. */
+  merged: boolean;
 };
 
 export type CreatePullRequest = {
@@ -88,33 +96,70 @@ export class GitHub {
     return { defaultBranch: data.default_branch, permissions: data.permissions };
   }
 
-  async createPullRequest(input: CreatePullRequest): Promise<PullRequest> {
-    const data = (await this.request("POST", `/repos/${this.repoPath}/pulls`, {
-      title: input.title,
-      body: input.body ?? "",
-      head: input.head,
-      base: input.base,
-      draft: input.draft ?? false,
-    })) as {
-      number?: number;
-      html_url?: string;
-      draft?: boolean;
-      base?: { ref?: string };
-      head?: { ref?: string };
-    };
-
-    if (typeof data?.number !== "number" || !data.html_url) {
-      throw new GitHubError("GitHub accepted the pull request but returned no number or URL", 0);
+  /**
+   * The one caller-supplied value in this tong that becomes part of a URL rather
+   * than part of a request body. Checked here as well as at the MCP surface, so
+   * nothing but a positive integer can ever be interpolated into a path.
+   */
+  private pullPath(number: number): string {
+    if (!Number.isSafeInteger(number) || number < 1) {
+      throw new GitHubError(`'${String(number).slice(0, 40)}' is not a pull request number`, 0);
     }
-
-    return {
-      number: data.number,
-      url: data.html_url,
-      base: data.base?.ref ?? input.base,
-      head: data.head?.ref ?? input.head,
-      draft: data.draft ?? input.draft ?? false,
-    };
+    return `/repos/${this.repoPath}/pulls/${number}`;
   }
+
+  async createPullRequest(input: CreatePullRequest): Promise<PullRequest> {
+    const pr = parsePullRequest(
+      await this.request("POST", `/repos/${this.repoPath}/pulls`, {
+        title: input.title,
+        body: input.body ?? "",
+        head: input.head,
+        base: input.base,
+        draft: input.draft ?? false,
+      }),
+      "accepted the pull request",
+    );
+    // Only for the fields the caller already knows: GitHub has always reported them,
+    // and a create that answered without them is still a pull request that exists.
+    return { ...pr, base: pr.base || input.base, head: pr.head || input.head };
+  }
+
+  async pullRequest(number: number): Promise<PullRequest> {
+    return parsePullRequest(await this.request("GET", this.pullPath(number)), `returned pull request ${number}`);
+  }
+}
+
+function parsePullRequest(data: unknown, context: string): PullRequest {
+  const pr = data as {
+    number?: number;
+    node_id?: string;
+    html_url?: string;
+    title?: string;
+    body?: string | null;
+    draft?: boolean;
+    merged?: boolean;
+    state?: string;
+    base?: { ref?: string };
+    head?: { ref?: string };
+  };
+
+  if (typeof pr?.number !== "number" || !pr.html_url) {
+    throw new GitHubError(`GitHub ${context} but returned no number or URL`, 0);
+  }
+
+  return {
+    number: pr.number,
+    nodeId: typeof pr.node_id === "string" ? pr.node_id : "",
+    url: pr.html_url,
+    title: pr.title ?? "",
+    // An empty description comes back as null, not as "".
+    body: pr.body ?? "",
+    base: pr.base?.ref ?? "",
+    head: pr.head?.ref ?? "",
+    draft: pr.draft === true,
+    state: pr.state === "closed" ? "closed" : "open",
+    merged: pr.merged === true,
+  };
 }
 
 /**

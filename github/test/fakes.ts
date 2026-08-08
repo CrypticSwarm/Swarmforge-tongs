@@ -235,3 +235,34 @@ export function prRoute(number: number, base: string, head: string, draft = fals
     },
   };
 }
+
+export type PrState = {
+  number: number;
+  title: string;
+  body: string | null;
+  base: string;
+  head: string;
+  draft?: boolean;
+  state?: "open" | "closed";
+  merged?: boolean;
+};
+
+/** A pull request as GitHub reports it, for the read and edit paths. */
+export function prJson(pr: PrState) {
+  return {
+    number: pr.number,
+    node_id: `PR_node_${pr.number}`,
+    html_url: `https://github.com/acme/widgets/pull/${pr.number}`,
+    title: pr.title,
+    body: pr.body,
+    draft: pr.draft ?? false,
+    state: pr.state ?? "open",
+    merged: pr.merged ?? false,
+    base: { ref: pr.base },
+    head: { ref: pr.head },
+  };
+}
+
+export function getPrRoute(pr: PrState) {
+  return { [`GET /repos/acme/widgets/pulls/${pr.number}`]: { status: 200, json: prJson(pr) } };
+}
