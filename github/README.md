@@ -1,8 +1,8 @@
 # github
 
 A [Swarmforge](https://github.com/CrypticSwarm/Swarmforge) tong that pushes
-branches and opens pull requests for the repository checked out in your session
-workspace.
+branches and opens, reads, and edits pull requests for the repository checked out
+in your session workspace.
 
 ## What it holds
 
@@ -19,14 +19,52 @@ Reached at `http://github:8080/mcp` on the session network.
 | --- | --- | --- |
 | `push_branch` | none | Pushes the branch you have checked out to its GitHub repository and moves the local `refs/remotes/origin/<branch>` to match. Never force-pushes. |
 | `create_pr` | `title`, `body?`, `base?`, `draft?` | Pushes the branch as above, then opens a pull request from it. `base` defaults to the repository's default branch. |
+| `get_pr` | `number` | Reads one pull request: its title, description, branches, and whether it is open, draft, closed, or merged. |
+| `update_pr` | `number`, `title?`, `body?`, `base?`, `state?`, `draft?` | Edits an open pull request. Only the fields you pass change, and each replaces its current value. |
 
 `create_pr` pushes for you; there is no need to call `push_branch` first.
+
+## Editing a pull request
+
+Every field of `update_pr` is optional, and **each one you pass replaces its value
+outright**. There is no append mode: adding a paragraph to a description means
+reading the current one with `get_pr` and sending the whole new text.
+
+An edit that moves nothing says so rather than reporting an update — GitHub accepts
+a `PATCH` setting a field to the value it already held.
+
+What cannot be edited:
+
+- **The head branch.** Push to it instead; that is what changes the commits a pull
+  request proposes.
+- **A `base` equal to the head branch.** Refused locally, as `create_pr` refuses it.
+- **Draft on a merged pull request.** Refused locally too: GitHub's own error names
+  neither the pull request nor the reason.
+
+### `draft` is a second call, and not an atomic one
+
+Draft status is the one pull request field GitHub's REST API will not change: the
+`PATCH` endpoint has no `draft` key, only the GraphQL `convertPullRequestToDraft`
+and `markPullRequestReadyForReview` mutations, which take a node id rather than a
+number.
+
+So an `update_pr` touching both text and draft is two requests. They run text-first,
+and if the draft half fails the error says the text edit landed — a caller told only
+"it failed" would send the description again and overwrite whatever arrived in
+between. The mutation is skipped when the pull request already has the status asked
+for.
 
 ## It only ever touches the workspace's own repository
 
 At startup the tong reads `remote.origin.url` from the mounted workspace, parses
 it into `<owner>/<repo>`, and holds that for the life of the container. There is
 no verb parameter and no configuration key for the repository.
+
+A pull request number is the only value a caller supplies that reaches a URL rather
+than a request body, so it is bounded to a positive integer at the MCP surface and
+again in the API client, which builds a path out of nothing else. The GraphQL draft
+mutations see no caller value at all — the node id they address is the one GitHub
+just returned for a pull request of this repository.
 
 Two things follow from that:
 
@@ -125,7 +163,8 @@ itself; actually restricting egress to those hosts is the launcher's job.
 Use a **fine-grained personal access token scoped to this one repository**, with:
 
 - **Contents: read and write** — pushing
-- **Pull requests: read and write** — opening the pull request
+- **Pull requests: read and write** — opening, reading, and editing pull requests,
+  over REST and the GraphQL draft mutations
 
 A classic `repo` token also works but is account-wide, which throws away the
 containment the rest of this design is built on. An SSH deploy key is not an
@@ -190,7 +229,8 @@ image by digest rather than `:latest`.
 ## Stacked pull requests
 
 Out of scope for now, but reachable: a stack is pull requests whose bases point at
-each other, so `create_pr`'s `base` builds one today without GitHub's stack object.
+each other, so `create_pr`'s `base` builds one today without GitHub's stack object,
+and `update_pr`'s restacks one after a branch below it merges.
 Adding GitHub's own stacks later needs no new grant — the REST stack endpoints are
 ordinary API calls, and the local half of `gh stack` would work against the
 workspace this tong already mounts.
@@ -209,9 +249,12 @@ rejects, that the token never reaches argv and reaches git's environment only fo
 the push, the exact push argv including the absence of any force flag and that
 the refspec pins the sha the tong read rather than a branch name a concurrent
 commit could move, the config hardening, the remote-tracking ref update, that
-a rejected push opens no pull request, and the signed-commit gate: which commits
+a rejected push opens no pull request, the signed-commit gate: which commits
 it asks about, that a signature in a commit message does not satisfy it, and that
-a commit it cannot read is a refusal rather than a pass. It drives a fake `git` through the single
+a commit it cannot read is a refusal rather than a pass, and the edit path: that a
+pull request number is bounded on both sides of the client seam, that an edit sends
+only the keys it was given, and that a failed draft mutation still says the text
+edit landed. It drives a fake `git` through the single
 `Run` seam in `src/exec.ts` and a fake `fetch` through `src/github.ts`, so it
 needs no git and no credential; the only real subprocesses spawned are the test
 runner's own `node`, exercising `realRun`'s exit, signal, and truncation paths.

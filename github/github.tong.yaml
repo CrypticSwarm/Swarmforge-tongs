@@ -11,7 +11,7 @@
 # The secret reference below is a PLACEHOLDER. `REPLACE-ME` is not a real vault
 # path and will fail to resolve until you edit it. `op` is whatever provider name
 # you declared in ~/.swarmforge/secret-providers.yaml; use yours.
-description: Pushes branches and opens pull requests for the workspace's repository, with a token the agent never holds.
+description: Pushes branches and opens, reads, and edits pull requests for the workspace's repository, with a token the agent never holds.
 lifecycle: session
 image: swarmforge-tong-github:latest
 env:

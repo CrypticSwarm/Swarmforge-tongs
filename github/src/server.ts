@@ -1,12 +1,13 @@
-// The MCP surface: two verbs.
+// The MCP surface.
 //
 // A pull request is text, so unlike the git-signing tong this one cannot take zero
-// parameters. What a caller controls is the prose and the base branch; the head
-// branch and the repository stay derived.
+// parameters. What a caller controls is the prose, the base branch, and which pull
+// request of the pinned repository it is talking about; the head branch and the
+// repository itself stay derived.
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { MAX_BODY, MAX_TITLE, type GitHub } from "./github.js";
+import { MAX_BODY, MAX_TITLE, type GitHub, type PullRequest } from "./github.js";
 import type { Origin } from "./origin.js";
 import type { PushOutcome, Repo } from "./repo.js";
 
@@ -26,7 +27,11 @@ accepts an owner, a repository, or a URL, and the tong will not act on any other
 repository.
 
 push_branch pushes the branch you have checked out. create_pr pushes it and then
-opens the pull request, so there is no need to call both. Neither ever force-pushes.`;
+opens the pull request, so there is no need to call both. Neither ever force-pushes.
+
+get_pr and update_pr work on an already-open pull request, by number. Read one
+before editing it: update_pr replaces the fields you pass outright, so an edit that
+means to add to a description has to send the whole new description.`;
 
 // Only when the gate is on: a tong that describes a rule it is not enforcing is
 // worse than one that says nothing, because the agent has no way to tell which.
@@ -50,6 +55,13 @@ export const branchName = z
   .max(255)
   .refine((value) => !/[\s\u0000-\u001f\u007f]/.test(value), "must not contain whitespace or control characters")
   .refine((value) => !value.startsWith("-"), "must not start with '-'");
+
+/**
+ * The repository is pinned, so a number is the whole address of a pull request.
+ * Bounded to an integer here and again in the client, because unlike every other
+ * parameter this one ends up in a URL path.
+ */
+export const prNumber = z.number().int().positive();
 
 export type CreatePrInput = {
   title: string;
@@ -100,6 +112,102 @@ export async function createPr(context: Context, input: CreatePrInput): Promise<
     "",
     renderPush(outcome, context.origin),
   ].join("\n");
+}
+
+/** What a caller needs before editing: the current text, verbatim, and where it points. */
+function renderPr(pr: PullRequest): string {
+  const status = pr.merged ? "merged" : pr.draft ? "draft" : pr.state;
+  return [
+    `#${pr.number} ${pr.head} -> ${pr.base} (${status})`,
+    pr.url,
+    "",
+    `title: ${pr.title}`,
+    "",
+    "description:",
+    pr.body.length > 0 ? pr.body : "(empty)",
+  ].join("\n");
+}
+
+export async function getPr(context: Context, input: { number: number }): Promise<string> {
+  return renderPr(await context.github.pullRequest(input.number));
+}
+
+export type UpdatePrInput = {
+  number: number;
+  title?: string;
+  body?: string;
+  base?: string;
+  state?: "open" | "closed";
+  draft?: boolean;
+};
+
+/**
+ * What actually moved, rather than what was asked for. GitHub accepts an edit that
+ * changes nothing, and reporting that as an edit would leave a caller believing a
+ * description it never managed to send is now on the pull request.
+ */
+function renderUpdate(before: PullRequest, after: PullRequest): string {
+  const changed: string[] = [];
+  if (after.title !== before.title) changed.push("title");
+  if (after.body !== before.body) changed.push("description");
+  if (after.base !== before.base) changed.push(`base ${before.base} -> ${after.base}`);
+  if (after.state !== before.state) changed.push(after.state === "closed" ? "closed it" : "reopened it");
+  if (after.draft !== before.draft) {
+    changed.push(after.draft ? "converted it to a draft" : "marked it ready for review");
+  }
+
+  if (changed.length === 0) {
+    return `Pull request #${after.number} already matched what you asked for; nothing changed.\n${after.url}`;
+  }
+  return `Updated pull request #${after.number}: ${changed.join(", ")}\n${after.url}`;
+}
+
+/**
+ * Draft is not part of the PATCH, so an edit that changes it as well as the text is
+ * two calls to GitHub and cannot be atomic. They run text-first, and a failure in
+ * the second leaves the first applied -- which the error says, because a caller that
+ * assumed the whole edit was rolled back would send the text a second time.
+ */
+export async function updatePr(context: Context, input: UpdatePrInput): Promise<string> {
+  const { number, draft, ...changes } = input;
+  const editsText = Object.values(changes).some((value) => value !== undefined);
+  if (!editsText && draft === undefined) {
+    throw new Error("nothing to change: pass at least one of 'title', 'body', 'base', 'state', or 'draft'.");
+  }
+
+  // Read first, for three things: the base==head guard create_pr already has, the
+  // node id the draft mutation needs, and a summary of what actually moved.
+  const before = await context.github.pullRequest(number);
+  if (changes.base !== undefined && changes.base === before.head) {
+    throw new Error(
+      `base and head would both be '${changes.base}'. A pull request needs a different base, and #${number} ` +
+        `already proposes that branch.`,
+    );
+  }
+  // Only when it would actually change something: passing the draft status a merged
+  // pull request already has should not cost it an edit to its description.
+  const changesDraft = draft !== undefined && draft !== before.draft;
+  if (changesDraft && before.merged) {
+    throw new Error(`#${number} is merged, and a merged pull request cannot become a draft or leave draft.`);
+  }
+
+  // `after.draft` rather than `changesDraft` only so the compiler can see that a
+  // draft is being asked for here; a PATCH cannot have changed it in between.
+  let after = editsText ? await context.github.updatePullRequest(number, changes) : before;
+
+  if (draft !== undefined && draft !== after.draft) {
+    try {
+      after = { ...after, draft: await context.github.setDraft(after.nodeId, draft) };
+    } catch (err) {
+      if (!editsText) throw err;
+      throw new Error(
+        `${(err as Error).message}\n\nThe rest of the edit went through and does not need sending again:\n` +
+          renderUpdate(before, after),
+      );
+    }
+  }
+
+  return renderUpdate(before, after);
 }
 
 function textResult(text: string) {
@@ -166,6 +274,57 @@ export function buildServer(context: Context): McpServer {
         return textResult(await createPr(context, input));
       } catch (err) {
         return errorResult("create_pr", err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_pr",
+    {
+      title: "get_pr",
+      description:
+        "Read one pull request of this workspace's repository: its title, its description, the branches it " +
+        "goes between, and whether it is open, draft, closed, or merged. The repository is not a parameter " +
+        "-- only pull requests of the pinned one are readable.",
+      inputSchema: {
+        number: prNumber.describe("Pull request number, as it appears in the repository."),
+      },
+    },
+    async (input) => {
+      try {
+        return textResult(await getPr(context, input));
+      } catch (err) {
+        return errorResult("get_pr", err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "update_pr",
+    {
+      title: "update_pr",
+      description:
+        "Edit an open pull request of this workspace's repository. Every field is optional and only the ones " +
+        "you pass change; each one you do pass replaces its current value outright, so call get_pr first and " +
+        "send the whole new text rather than the part you are adding. The head branch cannot be changed -- " +
+        "push to it instead.",
+      inputSchema: {
+        number: prNumber.describe("Pull request number, as it appears in the repository."),
+        title: z.string().min(1).max(MAX_TITLE).optional().describe("Replacement title."),
+        body: z.string().max(MAX_BODY).optional().describe("Replacement description, in Markdown."),
+        base: branchName.optional().describe("Branch to merge into, to move this pull request onto another base."),
+        state: z.enum(["open", "closed"]).optional().describe("Close the pull request, or reopen a closed one."),
+        draft: z
+          .boolean()
+          .optional()
+          .describe("true converts the pull request to a draft; false marks it ready for review."),
+      },
+    },
+    async (input) => {
+      try {
+        return textResult(await updatePr(context, input));
+      } catch (err) {
+        return errorResult("update_pr", err);
       }
     },
   );

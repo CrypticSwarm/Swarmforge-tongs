@@ -191,7 +191,7 @@ export type FakeResponse = { status: number; json: unknown };
 export class FakeGitHubApi {
   readonly calls: FetchCall[] = [];
 
-  constructor(private readonly routes: Record<string, FakeResponse | (() => FakeResponse)> = {}) {}
+  constructor(private readonly routes: Record<string, FakeResponse | ((call: FetchCall) => FakeResponse)> = {}) {}
 
   get lastBody(): unknown {
     return this.calls[this.calls.length - 1]?.body;
@@ -200,19 +200,20 @@ export class FakeGitHubApi {
   readonly fetch: Fetch = async (input, init) => {
     const url = String(input);
     const method = init?.method ?? "GET";
-    this.calls.push({
+    const call: FetchCall = {
       url,
       method,
       headers: (init?.headers ?? {}) as Record<string, string>,
       body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
-    });
+    };
+    this.calls.push(call);
 
     const key = `${method} ${new URL(url).pathname}`;
     const route = this.routes[key];
     if (!route) {
       return new Response(JSON.stringify({ message: `no fake route for ${key}` }), { status: 500 });
     }
-    const { status, json } = typeof route === "function" ? route() : route;
+    const { status, json } = typeof route === "function" ? route(call) : route;
     return new Response(JSON.stringify(json), { status });
   };
 }
@@ -232,6 +233,67 @@ export function prRoute(number: number, base: string, head: string, draft = fals
         base: { ref: base },
         head: { ref: head },
       },
+    },
+  };
+}
+
+export type PrState = {
+  number: number;
+  title: string;
+  body: string | null;
+  base: string;
+  head: string;
+  draft?: boolean;
+  state?: "open" | "closed";
+  merged?: boolean;
+};
+
+/** A pull request as GitHub reports it, for the read and edit paths. */
+export function prJson(pr: PrState) {
+  return {
+    number: pr.number,
+    node_id: `PR_node_${pr.number}`,
+    html_url: `https://github.com/acme/widgets/pull/${pr.number}`,
+    title: pr.title,
+    body: pr.body,
+    draft: pr.draft ?? false,
+    state: pr.state ?? "open",
+    merged: pr.merged ?? false,
+    base: { ref: pr.base },
+    head: { ref: pr.head },
+  };
+}
+
+export function getPrRoute(pr: PrState) {
+  return { [`GET /repos/acme/widgets/pulls/${pr.number}`]: { status: 200, json: prJson(pr) } };
+}
+
+/**
+ * GET and PATCH over one mutable pull request, so an edit is visible to the read
+ * that follows it -- which is what lets a test tell "GitHub changed it" apart from
+ * "the tong said it did".
+ */
+export function editablePrRoutes(initial: PrState) {
+  const state: PrState = { ...initial };
+  const path = `/repos/acme/widgets/pulls/${initial.number}`;
+  return {
+    [`GET ${path}`]: () => ({ status: 200, json: prJson(state) }),
+    [`PATCH ${path}`]: (call: FetchCall) => {
+      Object.assign(state, call.body as Partial<PrState>);
+      return { status: 200, json: prJson(state) };
+    },
+    // Draft lives behind GraphQL, which addresses the pull request by node id and
+    // reports failure as an `errors` array inside a 200.
+    "POST /graphql": (call: FetchCall) => {
+      const { query, variables } = call.body as { query: string; variables: { id?: string } };
+      if (variables?.id !== `PR_node_${state.number}`) {
+        return { status: 200, json: { errors: [{ message: "Could not resolve to a node with the global id" }] } };
+      }
+      const field = query.includes("convertPullRequestToDraft")
+        ? "convertPullRequestToDraft"
+        : "markPullRequestReadyForReview";
+      state.draft = field === "convertPullRequestToDraft";
+      return { status: 200, json: { data: { [field]: { pullRequest: { isDraft: state.draft } } } } };
     },
   };
 }
