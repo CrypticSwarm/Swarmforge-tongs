@@ -19,48 +19,40 @@ Reached at `http://github:8080/mcp` on the session network.
 | --- | --- | --- |
 | `push_branch` | none | Pushes the branch you have checked out to its GitHub repository and moves the local `refs/remotes/origin/<branch>` to match. Never force-pushes. |
 | `create_pr` | `title`, `body?`, `base?`, `draft?` | Pushes the branch as above, then opens a pull request from it. `base` defaults to the repository's default branch. |
-| `get_pr` | `number` | Reads one pull request: title, description, the branches it goes between, and whether it is open, draft, closed, or merged. |
-| `update_pr` | `number`, `title?`, `body?`, `base?`, `state?`, `draft?` | Edits an open pull request. Only the fields you pass change; each one you pass replaces its current value. |
+| `get_pr` | `number` | Reads one pull request: its title, description, branches, and whether it is open, draft, closed, or merged. |
+| `update_pr` | `number`, `title?`, `body?`, `base?`, `state?`, `draft?` | Edits an open pull request. Only the fields you pass change, and each replaces its current value. |
 
 `create_pr` pushes for you; there is no need to call `push_branch` first.
 
 ## Editing a pull request
 
-`update_pr` addresses a pull request by number — the repository half of the
-address is the pinned one, as everywhere else here, so there is nothing to pass
-and nothing to get wrong.
+Every field of `update_pr` is optional, and **each one you pass replaces its value
+outright**. There is no append mode: adding a paragraph to a description means
+reading the current one with `get_pr` and sending the whole new text.
 
-Every field is optional, and **each one you pass replaces its value outright**.
-There is no append mode: adding a paragraph to a description means reading the
-current one with `get_pr` and sending the whole new text. That is also why `get_pr`
-exists — the agent holds no token, so without a read verb it could only overwrite
-blind.
-
-An edit that would change nothing says so rather than reporting an update. GitHub
-accepts a `PATCH` that sets a field to the value it already held, and calling that
-an edit would tell the agent its text landed when nothing moved.
+An edit that moves nothing says so rather than reporting an update — GitHub accepts
+a `PATCH` setting a field to the value it already held.
 
 What cannot be edited:
 
 - **The head branch.** Push to it instead; that is what changes the commits a pull
   request proposes.
-- **A `base` equal to the head branch.** Refused locally, for the same reason
-  `create_pr` refuses it.
-- **Draft on a merged pull request.** Refused locally too — GitHub's own error for
-  this names neither the pull request nor the reason.
+- **A `base` equal to the head branch.** Refused locally, as `create_pr` refuses it.
+- **Draft on a merged pull request.** Refused locally too: GitHub's own error names
+  neither the pull request nor the reason.
 
-### `draft` is two calls, and they are not atomic
+### `draft` is a second call, and not an atomic one
 
 Draft status is the one pull request field GitHub's REST API will not change: the
 `PATCH` endpoint has no `draft` key, only the GraphQL `convertPullRequestToDraft`
-and `markPullRequestReadyForReview` mutations, which address a pull request by node
-id rather than by number. The tong reads the pull request to get that id.
+and `markPullRequestReadyForReview` mutations, which take a node id rather than a
+number.
 
-So an `update_pr` that changes both text and draft status is two requests. They run
-text-first, and if the draft half fails the error says the text edit landed — a
-caller told only "it failed" would send the description again and overwrite whatever
-landed in between. The mutation is skipped entirely when the pull request is already
-in the state asked for.
+So an `update_pr` touching both text and draft is two requests. They run text-first,
+and if the draft half fails the error says the text edit landed — a caller told only
+"it failed" would send the description again and overwrite whatever arrived in
+between. The mutation is skipped when the pull request already has the status asked
+for.
 
 ## It only ever touches the workspace's own repository
 
@@ -68,12 +60,11 @@ At startup the tong reads `remote.origin.url` from the mounted workspace, parses
 it into `<owner>/<repo>`, and holds that for the life of the container. There is
 no verb parameter and no configuration key for the repository.
 
-A pull request number is the only value a caller supplies that becomes part of a
-URL rather than part of a request body, so it is bounded to a positive integer
-twice: once at the MCP surface and again in the API client, which will not build a
-path out of anything else. The GraphQL draft mutations never see a caller value at
-all — the node id they address is the one GitHub just returned for a pull request
-of the pinned repository.
+A pull request number is the only value a caller supplies that reaches a URL rather
+than a request body, so it is bounded to a positive integer at the MCP surface and
+again in the API client, which builds a path out of nothing else. The GraphQL draft
+mutations see no caller value at all — the node id they address is the one GitHub
+just returned for a pull request of this repository.
 
 Two things follow from that:
 
@@ -173,7 +164,7 @@ Use a **fine-grained personal access token scoped to this one repository**, with
 
 - **Contents: read and write** — pushing
 - **Pull requests: read and write** — opening, reading, and editing pull requests,
-  over both the REST API and the GraphQL draft mutations
+  over REST and the GraphQL draft mutations
 
 A classic `repo` token also works but is account-wide, which throws away the
 containment the rest of this design is built on. An SSH deploy key is not an
@@ -261,10 +252,9 @@ commit could move, the config hardening, the remote-tracking ref update, that
 a rejected push opens no pull request, the signed-commit gate: which commits
 it asks about, that a signature in a commit message does not satisfy it, and that
 a commit it cannot read is a refusal rather than a pass, and the edit path: that a
-pull request number reaching a URL is bounded on both sides of the seam, that an
-edit sends only the keys it was given, that what is reported is what moved rather
-than what was asked for, and that a failed draft mutation still says the text edit
-landed. It drives a fake `git` through the single
+pull request number is bounded on both sides of the client seam, that an edit sends
+only the keys it was given, and that a failed draft mutation still says the text
+edit landed. It drives a fake `git` through the single
 `Run` seam in `src/exec.ts` and a fake `fetch` through `src/github.ts`, so it
 needs no git and no credential; the only real subprocesses spawned are the test
 runner's own `node`, exercising `realRun`'s exit, signal, and truncation paths.
