@@ -124,6 +124,115 @@ describe("update_pr", () => {
     }
   });
 
+});
+
+describe("update_pr draft status", () => {
+  const graphqlCalls = (api: FakeGitHubApi) => api.calls.filter((call) => call.url.endsWith("/graphql"));
+
+  it("converts an open pull request to a draft", async () => {
+    const api = apiWithPr();
+
+    const text = await updatePr(contextFor(api), { number: 7, draft: true });
+
+    const [call] = graphqlCalls(api);
+    assert.match((call.body as { query: string }).query, /convertPullRequestToDraft/);
+    assert.match(text, /converted it to a draft/);
+  });
+
+  it("marks a draft ready for review", async () => {
+    const api = apiWithPr({ draft: true });
+
+    const text = await updatePr(contextFor(api), { number: 7, draft: false });
+
+    assert.match((graphqlCalls(api)[0].body as { query: string }).query, /markPullRequestReadyForReview/);
+    assert.match(text, /marked it ready for review/);
+  });
+
+  it("mutates the node id GitHub just reported, not anything a caller supplied", async () => {
+    const api = apiWithPr();
+
+    await updatePr(contextFor(api), { number: 7, draft: true });
+
+    assert.deepEqual((graphqlCalls(api)[0].body as { variables: unknown }).variables, { id: "PR_node_7" });
+  });
+
+  it("changes nothing when the pull request is already in that state", async () => {
+    const api = apiWithPr({ draft: true });
+
+    const text = await updatePr(contextFor(api), { number: 7, draft: true });
+
+    assert.equal(graphqlCalls(api).length, 0);
+    assert.match(text, /already matched what you asked for; nothing changed/);
+  });
+
+  it("edits the text and the draft status in one call", async () => {
+    const api = apiWithPr({ draft: true });
+
+    const text = await updatePr(contextFor(api), { number: 7, body: "ready now", draft: false });
+
+    const patch = api.calls.find((call) => call.method === "PATCH");
+    assert.deepEqual(patch?.body, { body: "ready now" });
+    assert.equal(graphqlCalls(api).length, 1);
+    assert.match(text, /Updated pull request #7: description, marked it ready for review/);
+  });
+
+  it("refuses on a merged pull request rather than let GraphQL explain it", async () => {
+    const api = apiWithPr({ state: "closed", merged: true });
+
+    await assert.rejects(() => updatePr(contextFor(api), { number: 7, draft: true }), /#7 is merged/);
+    assert.equal(graphqlCalls(api).length, 0);
+  });
+
+  it("still edits a merged pull request asked for the draft status it already has", async () => {
+    // The refusal is about a change, not about the field appearing in the call.
+    const api = apiWithPr({ state: "closed", merged: true });
+
+    const text = await updatePr(contextFor(api), { number: 7, body: "a postscript", draft: false });
+
+    assert.match(text, /Updated pull request #7: description/);
+    assert.equal(graphqlCalls(api).length, 0);
+  });
+
+  it("surfaces a GraphQL error, which arrives inside a 200", async () => {
+    const api = new FakeGitHubApi({
+      ...editablePrRoutes(OPEN_PR),
+      "POST /graphql": { status: 200, json: { errors: [{ message: "Resource not accessible" }] } },
+    });
+
+    await assert.rejects(
+      () => updatePr(contextFor(api), { number: 7, draft: true }),
+      /GitHub refused the request: Resource not accessible/,
+    );
+  });
+
+  it("says the text edit landed when only the draft change fails", async () => {
+    // The two halves cannot be one request, so a caller told merely "it failed"
+    // would send the description again and overwrite whatever landed meanwhile.
+    const api = new FakeGitHubApi({
+      ...editablePrRoutes(OPEN_PR),
+      "POST /graphql": { status: 200, json: { errors: [{ message: "Resource not accessible" }] } },
+    });
+
+    await assert.rejects(
+      () => updatePr(contextFor(api), { number: 7, body: "new body", draft: true }),
+      /does not need sending again:\nUpdated pull request #7: description/,
+    );
+  });
+
+  it("does not claim a text edit landed when there was none", async () => {
+    const api = new FakeGitHubApi({
+      ...editablePrRoutes(OPEN_PR),
+      "POST /graphql": { status: 200, json: { errors: [{ message: "Resource not accessible" }] } },
+    });
+
+    await assert.rejects(
+      () => updatePr(contextFor(api), { number: 7, draft: true }),
+      (err: Error) => !/does not need sending again/.test(err.message),
+    );
+  });
+});
+
+describe("update_pr failures", () => {
   it("blames the number, not the repository, for a 404 on a pull request", async () => {
     // Startup already proved the token can see the repository, so the generic
     // "maybe the repo does not exist" would send a caller after the wrong thing.

@@ -282,5 +282,18 @@ export function editablePrRoutes(initial: PrState) {
       Object.assign(state, call.body as Partial<PrState>);
       return { status: 200, json: prJson(state) };
     },
+    // Draft lives behind GraphQL, which addresses the pull request by node id and
+    // reports failure as an `errors` array inside a 200.
+    "POST /graphql": (call: FetchCall) => {
+      const { query, variables } = call.body as { query: string; variables: { id?: string } };
+      if (variables?.id !== `PR_node_${state.number}`) {
+        return { status: 200, json: { errors: [{ message: "Could not resolve to a node with the global id" }] } };
+      }
+      const field = query.includes("convertPullRequestToDraft")
+        ? "convertPullRequestToDraft"
+        : "markPullRequestReadyForReview";
+      state.draft = field === "convertPullRequestToDraft";
+      return { status: 200, json: { data: { [field]: { pullRequest: { isDraft: state.draft } } } } };
+    },
   };
 }

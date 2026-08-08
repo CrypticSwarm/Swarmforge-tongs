@@ -152,6 +152,53 @@ export class GitHub {
       `accepted the edit to pull request ${number}`,
     );
   }
+
+  /**
+   * Draft is the one pull request field REST will not edit -- there is no `draft`
+   * key on the PATCH endpoint, only a pair of GraphQL mutations, which address the
+   * pull request by node id rather than by number.
+   *
+   * Returns the status GitHub reports afterwards rather than the one that was asked
+   * for, so a mutation that quietly did nothing cannot be reported as a change.
+   */
+  async setDraft(nodeId: string, draft: boolean): Promise<boolean> {
+    if (!nodeId) {
+      throw new GitHubError(
+        "GitHub returned no node id for that pull request, so its draft status cannot be changed",
+        0,
+      );
+    }
+
+    const field = draft ? "convertPullRequestToDraft" : "markPullRequestReadyForReview";
+    const data = (await this.graphql(
+      `mutation($id: ID!) { ${field}(input: { pullRequestId: $id }) { pullRequest { isDraft } } }`,
+      { id: nodeId },
+    )) as Record<string, { pullRequest?: { isDraft?: boolean } } | undefined>;
+
+    const isDraft = data[field]?.pullRequest?.isDraft;
+    if (typeof isDraft !== "boolean") {
+      throw new GitHubError("GitHub did not report the pull request's draft status after changing it", 0);
+    }
+    return isDraft;
+  }
+
+  /**
+   * A failed GraphQL request is a 200 carrying an `errors` array, so unlike REST it
+   * has to be inspected rather than trusted: `request` sees only a successful call.
+   */
+  private async graphql(query: string, variables: Record<string, unknown>): Promise<unknown> {
+    const data = (await this.request("POST", "/graphql", { query, variables })) as {
+      data?: Record<string, unknown>;
+      errors?: Array<{ message?: string }>;
+    };
+
+    if (data?.errors?.length) {
+      const detail = data.errors.map((error) => error.message ?? "unspecified error").join("; ");
+      throw new GitHubError(`GitHub refused the request: ${detail}`, 0);
+    }
+    if (!data?.data) throw new GitHubError("GitHub answered the request with neither data nor an error", 0);
+    return data.data;
+  }
 }
 
 function parsePullRequest(data: unknown, context: string): PullRequest {

@@ -138,6 +138,7 @@ export type UpdatePrInput = {
   body?: string;
   base?: string;
   state?: "open" | "closed";
+  draft?: boolean;
 };
 
 /**
@@ -151,6 +152,9 @@ function renderUpdate(before: PullRequest, after: PullRequest): string {
   if (after.body !== before.body) changed.push("description");
   if (after.base !== before.base) changed.push(`base ${before.base} -> ${after.base}`);
   if (after.state !== before.state) changed.push(after.state === "closed" ? "closed it" : "reopened it");
+  if (after.draft !== before.draft) {
+    changed.push(after.draft ? "converted it to a draft" : "marked it ready for review");
+  }
 
   if (changed.length === 0) {
     return `Pull request #${after.number} already matched what you asked for; nothing changed.\n${after.url}`;
@@ -158,14 +162,21 @@ function renderUpdate(before: PullRequest, after: PullRequest): string {
   return `Updated pull request #${after.number}: ${changed.join(", ")}\n${after.url}`;
 }
 
+/**
+ * Draft is not part of the PATCH, so an edit that changes it as well as the text is
+ * two calls to GitHub and cannot be atomic. They run text-first, and a failure in
+ * the second leaves the first applied -- which the error says, because a caller that
+ * assumed the whole edit was rolled back would send the text a second time.
+ */
 export async function updatePr(context: Context, input: UpdatePrInput): Promise<string> {
-  const { number, ...changes } = input;
-  if (Object.values(changes).every((value) => value === undefined)) {
-    throw new Error("nothing to change: pass at least one of 'title', 'body', 'base', or 'state'.");
+  const { number, draft, ...changes } = input;
+  const editsText = Object.values(changes).some((value) => value !== undefined);
+  if (!editsText && draft === undefined) {
+    throw new Error("nothing to change: pass at least one of 'title', 'body', 'base', 'state', or 'draft'.");
   }
 
-  // Read first, both to say afterwards what actually changed and to catch the one
-  // edit GitHub would take that leaves an impossible pull request.
+  // Read first, for three things: the base==head guard create_pr already has, the
+  // node id the draft mutation needs, and a summary of what actually moved.
   const before = await context.github.pullRequest(number);
   if (changes.base !== undefined && changes.base === before.head) {
     throw new Error(
@@ -173,8 +184,30 @@ export async function updatePr(context: Context, input: UpdatePrInput): Promise<
         `already proposes that branch.`,
     );
   }
+  // Only when it would actually change something: passing the draft status a merged
+  // pull request already has should not cost it an edit to its description.
+  const changesDraft = draft !== undefined && draft !== before.draft;
+  if (changesDraft && before.merged) {
+    throw new Error(`#${number} is merged, and a merged pull request cannot become a draft or leave draft.`);
+  }
 
-  return renderUpdate(before, await context.github.updatePullRequest(number, changes));
+  // `after.draft` rather than `changesDraft` only so the compiler can see that a
+  // draft is being asked for here; a PATCH cannot have changed it in between.
+  let after = editsText ? await context.github.updatePullRequest(number, changes) : before;
+
+  if (draft !== undefined && draft !== after.draft) {
+    try {
+      after = { ...after, draft: await context.github.setDraft(after.nodeId, draft) };
+    } catch (err) {
+      if (!editsText) throw err;
+      throw new Error(
+        `${(err as Error).message}\n\nThe rest of the edit went through and does not need sending again:\n` +
+          renderUpdate(before, after),
+      );
+    }
+  }
+
+  return renderUpdate(before, after);
 }
 
 function textResult(text: string) {
@@ -281,6 +314,10 @@ export function buildServer(context: Context): McpServer {
         body: z.string().max(MAX_BODY).optional().describe("Replacement description, in Markdown."),
         base: branchName.optional().describe("Branch to merge into, to move this pull request onto another base."),
         state: z.enum(["open", "closed"]).optional().describe("Close the pull request, or reopen a closed one."),
+        draft: z
+          .boolean()
+          .optional()
+          .describe("true converts the pull request to a draft; false marks it ready for review."),
       },
     },
     async (input) => {
