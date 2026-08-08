@@ -132,6 +132,51 @@ export async function getPr(context: Context, input: { number: number }): Promis
   return renderPr(await context.github.pullRequest(input.number));
 }
 
+export type UpdatePrInput = {
+  number: number;
+  title?: string;
+  body?: string;
+  base?: string;
+  state?: "open" | "closed";
+};
+
+/**
+ * What actually moved, rather than what was asked for. GitHub accepts an edit that
+ * changes nothing, and reporting that as an edit would leave a caller believing a
+ * description it never managed to send is now on the pull request.
+ */
+function renderUpdate(before: PullRequest, after: PullRequest): string {
+  const changed: string[] = [];
+  if (after.title !== before.title) changed.push("title");
+  if (after.body !== before.body) changed.push("description");
+  if (after.base !== before.base) changed.push(`base ${before.base} -> ${after.base}`);
+  if (after.state !== before.state) changed.push(after.state === "closed" ? "closed it" : "reopened it");
+
+  if (changed.length === 0) {
+    return `Pull request #${after.number} already matched what you asked for; nothing changed.\n${after.url}`;
+  }
+  return `Updated pull request #${after.number}: ${changed.join(", ")}\n${after.url}`;
+}
+
+export async function updatePr(context: Context, input: UpdatePrInput): Promise<string> {
+  const { number, ...changes } = input;
+  if (Object.values(changes).every((value) => value === undefined)) {
+    throw new Error("nothing to change: pass at least one of 'title', 'body', 'base', or 'state'.");
+  }
+
+  // Read first, both to say afterwards what actually changed and to catch the one
+  // edit GitHub would take that leaves an impossible pull request.
+  const before = await context.github.pullRequest(number);
+  if (changes.base !== undefined && changes.base === before.head) {
+    throw new Error(
+      `base and head would both be '${changes.base}'. A pull request needs a different base, and #${number} ` +
+        `already proposes that branch.`,
+    );
+  }
+
+  return renderUpdate(before, await context.github.updatePullRequest(number, changes));
+}
+
 function textResult(text: string) {
   return { content: [{ type: "text" as const, text }] };
 }
@@ -217,6 +262,32 @@ export function buildServer(context: Context): McpServer {
         return textResult(await getPr(context, input));
       } catch (err) {
         return errorResult("get_pr", err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "update_pr",
+    {
+      title: "update_pr",
+      description:
+        "Edit an open pull request of this workspace's repository. Every field is optional and only the ones " +
+        "you pass change; each one you do pass replaces its current value outright, so call get_pr first and " +
+        "send the whole new text rather than the part you are adding. The head branch cannot be changed -- " +
+        "push to it instead.",
+      inputSchema: {
+        number: prNumber.describe("Pull request number, as it appears in the repository."),
+        title: z.string().min(1).max(MAX_TITLE).optional().describe("Replacement title."),
+        body: z.string().max(MAX_BODY).optional().describe("Replacement description, in Markdown."),
+        base: branchName.optional().describe("Branch to merge into, to move this pull request onto another base."),
+        state: z.enum(["open", "closed"]).optional().describe("Close the pull request, or reopen a closed one."),
+      },
+    },
+    async (input) => {
+      try {
+        return textResult(await updatePr(context, input));
+      } catch (err) {
+        return errorResult("update_pr", err);
       }
     },
   );

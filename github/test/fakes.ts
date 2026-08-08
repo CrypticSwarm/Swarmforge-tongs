@@ -191,7 +191,7 @@ export type FakeResponse = { status: number; json: unknown };
 export class FakeGitHubApi {
   readonly calls: FetchCall[] = [];
 
-  constructor(private readonly routes: Record<string, FakeResponse | (() => FakeResponse)> = {}) {}
+  constructor(private readonly routes: Record<string, FakeResponse | ((call: FetchCall) => FakeResponse)> = {}) {}
 
   get lastBody(): unknown {
     return this.calls[this.calls.length - 1]?.body;
@@ -200,19 +200,20 @@ export class FakeGitHubApi {
   readonly fetch: Fetch = async (input, init) => {
     const url = String(input);
     const method = init?.method ?? "GET";
-    this.calls.push({
+    const call: FetchCall = {
       url,
       method,
       headers: (init?.headers ?? {}) as Record<string, string>,
       body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
-    });
+    };
+    this.calls.push(call);
 
     const key = `${method} ${new URL(url).pathname}`;
     const route = this.routes[key];
     if (!route) {
       return new Response(JSON.stringify({ message: `no fake route for ${key}` }), { status: 500 });
     }
-    const { status, json } = typeof route === "function" ? route() : route;
+    const { status, json } = typeof route === "function" ? route(call) : route;
     return new Response(JSON.stringify(json), { status });
   };
 }
@@ -265,4 +266,21 @@ export function prJson(pr: PrState) {
 
 export function getPrRoute(pr: PrState) {
   return { [`GET /repos/acme/widgets/pulls/${pr.number}`]: { status: 200, json: prJson(pr) } };
+}
+
+/**
+ * GET and PATCH over one mutable pull request, so an edit is visible to the read
+ * that follows it -- which is what lets a test tell "GitHub changed it" apart from
+ * "the tong said it did".
+ */
+export function editablePrRoutes(initial: PrState) {
+  const state: PrState = { ...initial };
+  const path = `/repos/acme/widgets/pulls/${initial.number}`;
+  return {
+    [`GET ${path}`]: () => ({ status: 200, json: prJson(state) }),
+    [`PATCH ${path}`]: (call: FetchCall) => {
+      Object.assign(state, call.body as Partial<PrState>);
+      return { status: 200, json: prJson(state) };
+    },
+  };
 }

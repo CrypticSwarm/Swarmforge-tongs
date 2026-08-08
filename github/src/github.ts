@@ -45,6 +45,14 @@ export type CreatePullRequest = {
   draft?: boolean;
 };
 
+/** Every field omitted here is one GitHub leaves as it is. `head` is not editable. */
+export type UpdatePullRequest = {
+  title?: string;
+  body?: string;
+  base?: string;
+  state?: "open" | "closed";
+};
+
 export class GitHub {
   constructor(
     private readonly fetchImpl: Fetch,
@@ -79,7 +87,7 @@ export class GitHub {
     const parsed = text.length > 0 ? safeJson(text) : undefined;
 
     if (!response.ok) {
-      throw new GitHubError(describeFailure(response.status, parsed, this.repoPath), response.status);
+      throw new GitHubError(describeFailure(response.status, parsed, this.repoPath, path), response.status);
     }
     return parsed;
   }
@@ -126,6 +134,23 @@ export class GitHub {
 
   async pullRequest(number: number): Promise<PullRequest> {
     return parsePullRequest(await this.request("GET", this.pullPath(number)), `returned pull request ${number}`);
+  }
+
+  /**
+   * The body is built key by key rather than passed through, so a field the caller
+   * did not ask to change cannot appear in the request at all.
+   */
+  async updatePullRequest(number: number, changes: UpdatePullRequest): Promise<PullRequest> {
+    const body: Record<string, unknown> = {};
+    if (changes.title !== undefined) body.title = changes.title;
+    if (changes.body !== undefined) body.body = changes.body;
+    if (changes.base !== undefined) body.base = changes.base;
+    if (changes.state !== undefined) body.state = changes.state;
+
+    return parsePullRequest(
+      await this.request("PATCH", this.pullPath(number), body),
+      `accepted the edit to pull request ${number}`,
+    );
   }
 }
 
@@ -189,7 +214,7 @@ function safeJson(text: string): unknown {
  * A token not scoped to this repository and a repository that does not exist both
  * come back 404, so say what the operator most likely needs to change.
  */
-function describeFailure(status: number, parsed: unknown, repoPath: string): string {
+function describeFailure(status: number, parsed: unknown, repoPath: string, path: string): string {
   const payload = parsed as { message?: string; errors?: Array<{ message?: string; field?: string }> } | undefined;
   const detail = [payload?.message, ...(payload?.errors ?? []).map((e) => e.message ?? e.field)]
     .filter((part): part is string => Boolean(part))
@@ -201,6 +226,14 @@ function describeFailure(status: number, parsed: unknown, repoPath: string): str
     case 403:
       return `GitHub refused the request (403)${detail ? `: ${detail}` : ""}. The token most likely lacks the permission this needs.`;
     case 404:
+      // A wrong pull request number is by far the likelier cause once the tong has
+      // started, since startup already proved the token can see the repository.
+      if (/\/pulls\/\d+$/.test(path)) {
+        return (
+          `GitHub cannot see that pull request in ${repoPath} (404). Either the number names no pull ` +
+          `request, or the token is no longer scoped to this repository.`
+        );
+      }
       return (
         `GitHub cannot see ${repoPath} (404). Either the repository does not exist, or the token is not ` +
         `scoped to it -- a fine-grained token must list this repository and grant Contents and Pull requests.`
