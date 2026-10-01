@@ -52,6 +52,7 @@ root, that is a design change to raise rather than do.
 | Directory name | `kebab-case`, names the capability (`git-signing`, not `git-tong`) |
 | Definition file | `<dir-name>.tong.yaml` |
 | Image tag | `swarmforge-tong-<dir-name>:latest` |
+| Published repository | `crypticswarm/<dir-name>-tong` on Docker Hub, if the tong publishes at all |
 | MCP `interface.name` | the capability, unprefixed (`github`) — it is a DNS alias on the session network |
 | Default stack | TypeScript on Node, `@modelcontextprotocol/sdk` over HTTP, `node --test` |
 
@@ -84,6 +85,8 @@ to resolve.
    it.
 6. Add a row to the tong table in the root `README.md`.
 7. Add `.github/workflows/<tong-name>.yml` — see CI below.
+8. Optionally publish it: a `publish` target in the `Makefile` and a `publish`
+   job in the workflow — see CI below.
 
 ## Tong definitions
 
@@ -160,6 +163,32 @@ root tooling. It has no bearing on tong discovery, which reads only top-level
 
 Run the tong's `test-e2e` target in CI even when it is out of `make test`: the
 runner has the binaries a developer laptop may not.
+
+A tong with a Docker Hub repository publishes from that same workflow: a
+`publish` job, gated on a push to `master` and `needs:` the test jobs, that runs
+`make -C <tong-name> publish REPO=<namespace>/<repository> TAGS="latest sha-<12>"`
+and records the pushed digest in the run summary. The repository name lives in
+the job's `env:`; a tong with no repository simply has no `publish` job.
+`publish` in a tong's `Makefile` refuses a `REPO` that was not given on the
+command line.
+
+Publishing credentials live only in the `docker-hub` GitHub environment, never in
+repository-level secrets. Setting up publishing, once per repository:
+
+1. Create each Docker Hub repository before the first push, so its visibility is
+   chosen rather than defaulted.
+2. Create a Docker Hub access token with Read & Write scope — no Delete.
+3. Create the `docker-hub` environment with its deployment branches restricted
+   to `master`, and add `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` to it.
+4. Protect `master` so it changes only through reviewed pull requests.
+
+Steps 3 and 4 together are the control: the environment admits only `master`,
+and only a review admits code to `master`. The job's `if:` keeps the job from
+running anywhere else but guards nothing — a branch can edit it away.
+
+Every `uses:` is pinned to a full commit SHA with its release in a trailing
+comment, and every `FROM` to a digest. `.github/dependabot.yml` proposes the
+bumps; give a new tong its own `docker` entry there, scoped to its directory.
 
 ---
 

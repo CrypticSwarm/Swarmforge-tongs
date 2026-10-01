@@ -80,6 +80,9 @@ make image TONG=<tong-name>                                  # builds swarmforge
 cp <tong-name>/<tong-name>.tong.yaml ~/.swarmforge/tongs/<tong-name>.yaml
 ```
 
+A tong that publishes to Docker Hub can be pulled instead of built; its README's
+"Enabling it" section names the repository and how to pin it by digest.
+
 Then start the anvil as usual. The user layer (`~/.swarmforge/tongs/`) is trusted
 and skips the approval gate; a workspace-sourced copy prompts on first run.
 

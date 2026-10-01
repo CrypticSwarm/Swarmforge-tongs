@@ -1,0 +1,29 @@
+# Proposes bumps for the pins the published images depend on: the action SHAs
+# in .github/workflows/ and each tong's node base-image digest.
+#
+# GitHub reads only this one file, so it cannot live inside a tong. It is the
+# same allowed exception as the workflows: one `docker` entry per tong, scoped
+# to that tong's directory, so a tong lifted into its own repo takes its entry
+# along and nothing here recurses over every tong.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # One pull request a week for routine bumps. A major version is left out of
+    # the group and arrives on its own, since it can change an action's inputs.
+    groups:
+      actions:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: docker
+    directory: /github
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /git-signing
+    schedule:
+      interval: weekly

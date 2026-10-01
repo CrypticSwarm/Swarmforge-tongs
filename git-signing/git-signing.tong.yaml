@@ -6,6 +6,7 @@
 #
 # To enable it:
 #   1. make image TONG=git-signing         # builds swarmforge-tong-git-signing:latest
+#      (or pull crypticswarm/git-signing-tong, pinned by digest -- see the README)
 #   2. cp git-signing/git-signing.tong.yaml ~/.swarmforge/tongs/git-signing.yaml
 #   3. edit the copy's ${secret:...} references to point at your own vault
 #

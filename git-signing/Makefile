@@ -3,7 +3,7 @@ SHELL := /bin/bash
 
 IMG ?= swarmforge-tong-git-signing:latest
 
-.PHONY: build test test-e2e image clean
+.PHONY: build test test-e2e image publish clean
 
 # `npm ci` needs a lockfile, so a clone without one falls back to `npm install`.
 # The touch is what stops make re-running this on every target.
@@ -24,6 +24,20 @@ test-e2e: node_modules
 
 image:
 	docker build -t $(IMG) .
+
+# Multi-arch build pushed straight to a registry; nothing is loaded locally.
+# Needs `docker login` and a buildx builder that can target every platform in
+# PLATFORMS, both of which CI sets up. REPO must be given on the command line:
+# one inherited from the environment is refused, so an unrelated exported REPO
+# cannot send a bare `make publish` somewhere by accident.
+TAGS ?= latest
+PLATFORMS ?= linux/amd64,linux/arm64
+
+publish:
+	@if [ "$(origin REPO)" != "command line" ] || [ -z "$(REPO)" ]; then \
+		echo "publish: pass REPO=<namespace>/<repository> on the command line" >&2; exit 1; \
+	fi
+	docker buildx build --platform $(PLATFORMS) $(foreach t,$(TAGS),--tag $(REPO):$(t)) --push .
 
 clean:
 	rm -rf dist node_modules

@@ -5,6 +5,7 @@
 #
 # To enable it:
 #   1. make image TONG=github            # builds swarmforge-tong-github:latest
+#      (or pull crypticswarm/github-tong, pinned by digest -- see the README)
 #   2. cp github/github.tong.yaml ~/.swarmforge/tongs/github.yaml
 #   3. edit the copy's ${secret:...} reference to point at your own vault
 #
