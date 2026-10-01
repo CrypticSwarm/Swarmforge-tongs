@@ -106,6 +106,20 @@ The user layer (`~/.swarmforge/tongs/`) is trusted and skips the approval gate. 
 workspace-sourced copy prompts on first run. For anything you publish, pin the
 image by digest rather than `:latest`.
 
+Instead of building it, you can pull the published image,
+[`crypticswarm/git-signing-tong`](https://hub.docker.com/r/crypticswarm/git-signing-tong), built for
+`linux/amd64` and `linux/arm64`. Look up the current digest, pull it, and pin the
+copy's `image:` to it:
+
+```sh
+docker buildx imagetools inspect crypticswarm/git-signing-tong:latest --format '{{.Manifest.Digest}}'
+docker pull crypticswarm/git-signing-tong@sha256:<digest>
+```
+
+```yaml
+image: crypticswarm/git-signing-tong@sha256:<digest>
+```
+
 ## Where the key lives at runtime
 
 GPG cannot sign without a keyring on a filesystem. `entrypoint.sh` creates

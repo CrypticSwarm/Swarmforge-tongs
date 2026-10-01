@@ -226,6 +226,20 @@ The user layer (`~/.swarmforge/tongs/`) is trusted and skips the approval gate. 
 workspace-sourced copy prompts on first run. For anything you publish, pin the
 image by digest rather than `:latest`.
 
+Instead of building it, you can pull the published image,
+[`crypticswarm/github-tong`](https://hub.docker.com/r/crypticswarm/github-tong), built for
+`linux/amd64` and `linux/arm64`. Look up the current digest, pull it, and pin the
+copy's `image:` to it:
+
+```sh
+docker buildx imagetools inspect crypticswarm/github-tong:latest --format '{{.Manifest.Digest}}'
+docker pull crypticswarm/github-tong@sha256:<digest>
+```
+
+```yaml
+image: crypticswarm/github-tong@sha256:<digest>
+```
+
 ## Stacked pull requests
 
 Out of scope for now, but reachable: a stack is pull requests whose bases point at
