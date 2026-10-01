@@ -18,16 +18,19 @@ concurrency:
   group: github-${{ github.ref }}
   cancel-in-progress: true
 
+# Every action is pinned to a full commit SHA, with the release it was taken
+# from in a trailing comment: a tag can be moved to new code, a SHA cannot.
+# Dependabot proposes the bumps (.github/dependabot.yml).
 jobs:
   test:
     name: make test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          # Tracks the Dockerfile's NODE_TAG.
+          # Tracks the Dockerfile's node:24-alpine.
           node-version: '24'
           cache: npm
           cache-dependency-path: github/package-lock.json
@@ -49,13 +52,13 @@ jobs:
     env:
       REPO: crypticswarm/github-tong
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       # arm64 is built under emulation on the amd64 runner.
-      - uses: docker/setup-qemu-action@v4
-      - uses: docker/setup-buildx-action@v4
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - uses: docker/login-action@v4
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
