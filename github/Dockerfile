@@ -1,7 +1,9 @@
 # Both stages pin the same node:24-alpine index by digest, so a published image
 # is built from exactly what was reviewed; Dependabot proposes the bumps.
 
-FROM node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1 AS build
+# The build stage runs on the builder's own platform: its output is plain
+# JavaScript, so only the runtime stage has to be built per target platform.
+FROM --platform=$BUILDPLATFORM node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1 AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci

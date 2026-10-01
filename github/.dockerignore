@@ -1,0 +1,9 @@
+# Allowlist: only what the Dockerfile COPYs reaches the builder, so a local
+# `make image` or `make publish` cannot ship a stray .env or key file.
+*
+!package.json
+!package-lock.json
+!tsconfig.json
+!src
+!entrypoint.sh
+!askpass.sh
