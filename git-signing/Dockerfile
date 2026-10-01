@@ -4,7 +4,7 @@
 # --- build: needs the dev toolchain the runtime stage does not ---------------
 # Runs on the builder's own platform: its output is plain JavaScript, so only
 # the runtime stage has to be built per target platform.
-FROM --platform=$BUILDPLATFORM node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1 AS build
+FROM --platform=$BUILDPLATFORM node:26-alpine@sha256:0b36e8c136b94cd4fcf02188228e76c31ad5872eef3fec8cbd2eee500cfd9e80 AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
@@ -13,7 +13,7 @@ COPY src ./src
 RUN npm run build
 
 # --- runtime -----------------------------------------------------------------
-FROM node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1 AS runtime
+FROM node:26-alpine@sha256:0b36e8c136b94cd4fcf02188228e76c31ad5872eef3fec8cbd2eee500cfd9e80 AS runtime
 # su-exec is the non-obvious one: entrypoint.sh uses it to drop to the workspace
 # owner's uid, so objects written into .git are not left root-owned for the anvil.
 RUN apk add --no-cache git gnupg su-exec
