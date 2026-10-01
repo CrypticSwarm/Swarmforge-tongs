@@ -33,3 +33,38 @@ jobs:
           cache-dependency-path: github/package-lock.json
 
       - run: make -C github test
+
+  publish:
+    # Only a push to master publishes, and only after the suite passes. The
+    # paths filter above already limits that to changes touching this tong, so
+    # a merge that leaves it alone pushes nothing.
+    name: publish to Docker Hub
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    needs: test
+    runs-on: ubuntu-latest
+    # Holds DOCKERHUB_USERNAME and DOCKERHUB_TOKEN. Restricting the environment's
+    # deployment branches to master keeps the push token away from workflows
+    # running on any other branch, including a PR branch that edits this file.
+    environment: docker-hub
+    env:
+      REPO: crypticswarm/github-tong
+    steps:
+      - uses: actions/checkout@v5
+
+      # arm64 is built under emulation on the amd64 runner.
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # `latest` moves; the sha tag names exactly which commit an image is.
+      - run: make -C github publish REPO="$REPO" TAGS="latest sha-${GITHUB_SHA::12}"
+
+      # The digest is what a tong definition should pin, so surface it.
+      - name: Record the digest
+        run: |
+          digest=$(docker buildx imagetools inspect "$REPO:sha-${GITHUB_SHA::12}" --format '{{.Manifest.Digest}}')
+          echo "Published \`$REPO@$digest\`" >> "$GITHUB_STEP_SUMMARY"
