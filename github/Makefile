@@ -23,14 +23,16 @@ image:
 
 # Multi-arch build pushed straight to a registry; nothing is loaded locally.
 # Needs `docker login` and a buildx builder that can target every platform in
-# PLATFORMS, both of which CI sets up. REPO has no default, so a bare
-# `make publish` refuses rather than pushing somewhere by accident.
-REPO ?=
+# PLATFORMS, both of which CI sets up. REPO must be given on the command line:
+# one inherited from the environment is refused, so an unrelated exported REPO
+# cannot send a bare `make publish` somewhere by accident.
 TAGS ?= latest
 PLATFORMS ?= linux/amd64,linux/arm64
 
 publish:
-	@if [ -z "$(REPO)" ]; then echo "publish: set REPO=<namespace>/<repository>" >&2; exit 1; fi
+	@if [ "$(origin REPO)" != "command line" ] || [ -z "$(REPO)" ]; then \
+		echo "publish: pass REPO=<namespace>/<repository> on the command line" >&2; exit 1; \
+	fi
 	docker buildx build --platform $(PLATFORMS) $(foreach t,$(TAGS),--tag $(REPO):$(t)) --push .
 
 clean:
