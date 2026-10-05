@@ -5,7 +5,8 @@
 // from the repository and the key it was given. There is nothing here for a
 // caller to inject into.
 
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer } from "@modelcontextprotocol/server";
+import * as z from "zod";
 import type { Run } from "./exec.js";
 import type { SigningKey } from "./gpg.js";
 import type { Repo } from "./repo.js";
@@ -80,10 +81,32 @@ function renderOutcome(outcome: SignOutcome): string {
   return lines.join("\n");
 }
 
+/**
+ * Strict, so an argument a caller invents is refused rather than silently
+ * dropped, and the listed schema says `additionalProperties: false` to match.
+ */
+const NO_ARGUMENTS = z.strictObject({});
+
+/**
+ * The cap on array elements plus object members in a `tools/call` `arguments`
+ * payload, checked before schema validation runs. No verb takes an argument, so
+ * any member at all is already refused by NO_ARGUMENTS; the cap only makes an
+ * oversized payload fail on a bounded count instead of a full walk. 1 is the
+ * smallest value the SDK accepts. A verb that ever does take parameters must
+ * raise it deliberately.
+ */
+export const MAX_TOOL_INPUT_ELEMENTS = 1;
+
 export function buildServer(context: Context): McpServer {
   const server = new McpServer(
     { name: "git-signing", version: "0.1.0" },
-    { instructions: INSTRUCTIONS },
+    {
+      instructions: INSTRUCTIONS,
+      // The tool set is fixed for the life of the process; registerTool would
+      // otherwise advertise `listChanged: true`.
+      capabilities: { tools: { listChanged: false } },
+      maxToolInputElements: MAX_TOOL_INPUT_ELEMENTS,
+    },
   );
 
   server.registerTool(
@@ -93,7 +116,7 @@ export function buildServer(context: Context): McpServer {
       description:
         "Report which commits in the workspace are not yet on origin, which of them already carry a " +
         "signature, which would be signed, and anything currently blocking signing. Read-only.",
-      inputSchema: {},
+      inputSchema: NO_ARGUMENTS,
     },
     async () => {
       try {
@@ -116,7 +139,7 @@ export function buildServer(context: Context): McpServer {
         "re-created with a signature, so its SHA changes; the branch is moved and the previous head is " +
         "saved to a backup ref. The working tree and index are not modified. No-op if everything is " +
         "already signed.",
-      inputSchema: {},
+      inputSchema: NO_ARGUMENTS,
     },
     async () => {
       try {

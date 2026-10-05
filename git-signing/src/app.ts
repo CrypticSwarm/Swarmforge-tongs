@@ -1,48 +1,43 @@
 // The tong's HTTP surface, split from the process entrypoint so tests can start it
-// against a stubbed repository and key. Serves a stateless Streamable-HTTP MCP
-// endpoint at /mcp (a fresh server per request) plus a /healthz liveness endpoint
-// for the launcher's TCP readiness probe.
+// against a stubbed repository and key. Serves a stateless MCP endpoint at /mcp
+// plus a /healthz liveness endpoint for the launcher's TCP readiness probe.
+//
+// /mcp is the SDK's `createMcpHandler`, which serves the 2026-07-28 protocol
+// revision and falls back to stateless 2025-era serving for clients that still
+// open with `initialize`. Either way every request gets a fresh server from the
+// factory: an MCP server instance connects to one transport only, and a
+// stateless transport serves one request. GET and DELETE (2025 session
+// operations) are answered 405 by the handler itself -- there is no session.
+//
+// The body is read by the SDK, not by an express body parser, so a malformed,
+// non-object, empty, or oversized body gets a JSON-RPC error rather than an
+// express HTML error page.
 
-import express, { type Express, type Request, type Response } from "express";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import express, { type Express } from "express";
+import { toNodeHandler } from "@modelcontextprotocol/node";
+import { createMcpHandler } from "@modelcontextprotocol/server";
 import { buildServer, type Context } from "./server.js";
 
-function methodNotAllowed(_req: Request, res: Response): void {
-  res.status(405).json({
-    jsonrpc: "2.0",
-    error: { code: -32000, message: "Method not allowed." },
-    id: null,
-  });
-}
+/**
+ * Sized for the client's envelope, not for our verbs: on 2026-07-28 every
+ * request carries the client's full `clientInfo`, whose icons may be inline
+ * `data:` URIs, so a legitimate request can run to tens of kilobytes. Argument
+ * size needs no allowance here; `maxToolInputElements` bounds that walk.
+ */
+export const MAX_REQUEST_BODY_BYTES = 1024 * 1024;
 
 export function createApp(context: Context): Express {
-  const app = express();
-  app.use(express.json());
-
-  app.post("/mcp", async (req: Request, res: Response) => {
-    const server = buildServer(context);
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-    res.on("close", () => {
-      transport.close();
-      server.close();
-    });
-    try {
-      await server.connect(transport);
-      await transport.handleRequest(req, res, req.body);
-    } catch (err) {
-      console.error("mcp POST failed", err);
-      if (!res.headersSent) {
-        res.status(500).json({
-          jsonrpc: "2.0",
-          error: { code: -32603, message: "Internal server error" },
-          id: null,
-        });
-      }
-    }
+  const onerror = (err: Error) => console.error("mcp request rejected or failed", err);
+  const handler = createMcpHandler(() => buildServer(context), {
+    onerror,
+    maxRequestBodySize: MAX_REQUEST_BODY_BYTES,
   });
+  // The adapter buffers the body first, so it needs the same bound.
+  const mcp = toNodeHandler(handler, { onerror, maxRequestBodySize: MAX_REQUEST_BODY_BYTES });
 
-  app.get("/mcp", methodNotAllowed);
-  app.delete("/mcp", methodNotAllowed);
+  const app = express();
+
+  app.all("/mcp", (req, res) => mcp(req, res));
 
   app.get("/healthz", (_req, res) => {
     res.json({ ok: true });
