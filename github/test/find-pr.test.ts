@@ -66,13 +66,25 @@ describe("find_pr", () => {
     assert.doesNotMatch(text, /SECRET/);
   });
 
-  it("says when the list was cut short", async () => {
-    const many = Array.from({ length: MAX_FIND_RESULTS }, (_, i) => pr(100 - i));
+  it("says when the list was cut short, and shows only the most recent", async () => {
+    const many = Array.from({ length: MAX_FIND_RESULTS + 1 }, (_, i) => pr(100 - i));
     const api = new FakeGitHubApi(listPrsRoute(many));
 
     const text = await findPr(contextFor(api), { head: "feature" });
 
-    assert.match(text, new RegExp(`showing the ${MAX_FIND_RESULTS} most recent`));
+    assert.match(text, new RegExp(`^${MAX_FIND_RESULTS} pull requests .*showing the ${MAX_FIND_RESULTS} most recent`));
+    assert.match(text, new RegExp(`#${100 - MAX_FIND_RESULTS + 1} `));
+    assert.doesNotMatch(text, new RegExp(`#${100 - MAX_FIND_RESULTS} `), "the oldest is left out");
+  });
+
+  it("does not claim a cut when exactly the cap exists", async () => {
+    const exactly = Array.from({ length: MAX_FIND_RESULTS }, (_, i) => pr(100 - i));
+    const api = new FakeGitHubApi(listPrsRoute(exactly));
+
+    const text = await findPr(contextFor(api), { head: "feature" });
+
+    assert.match(text, new RegExp(`^${MAX_FIND_RESULTS} pull requests `));
+    assert.doesNotMatch(text, /most recent/);
   });
 
   it("asks GitHub only for this repository's pull requests from the pinned owner's branch", async () => {
@@ -86,7 +98,7 @@ describe("find_pr", () => {
     assert.equal(url.origin + url.pathname, "https://api.github.com/repos/acme/widgets/pulls");
     assert.equal(url.searchParams.get("head"), "acme:feature/x");
     assert.equal(url.searchParams.get("state"), "all");
-    assert.equal(url.searchParams.get("per_page"), String(MAX_FIND_RESULTS));
+    assert.equal(url.searchParams.get("per_page"), String(MAX_FIND_RESULTS + 1), "one extra, so `more` is exact");
   });
 
   it("keeps a hostile branch name one query value", async () => {

@@ -111,11 +111,7 @@ export class GitHub {
     return { defaultBranch: data.default_branch, permissions: data.permissions };
   }
 
-  /**
-   * The one caller-supplied value in this tong that becomes part of a URL rather
-   * than part of a request body. Checked here as well as at the MCP surface, so
-   * nothing but a positive integer can ever be interpolated into a path.
-   */
+  /** The only caller value in a URL path, so bounded here as well as at the MCP surface. */
   private pullPath(number: number): string {
     if (!Number.isSafeInteger(number) || number < 1) {
       throw new GitHubError(`'${String(number).slice(0, 40)}' is not a pull request number`, 0);
@@ -153,7 +149,7 @@ export class GitHub {
    * cut the URL short. The owner half of `head` is the pinned owner, never the
    * caller's, so this only ever matches branches of the repository itself.
    */
-  async findPullRequests(branch: string): Promise<PullRequest[]> {
+  async findPullRequests(branch: string): Promise<{ pullRequests: PullRequest[]; more: boolean }> {
     if (typeof branch !== "string" || branch.length === 0 || branch.length > 255) {
       throw new GitHubError(`'${String(branch).slice(0, 40)}' is not a branch name`, 0);
     }
@@ -162,13 +158,16 @@ export class GitHub {
       state: "all",
       sort: "created",
       direction: "desc",
-      per_page: String(MAX_FIND_RESULTS),
+      per_page: String(MAX_FIND_RESULTS + 1), // one extra, so `more` is exact
     });
     const data = await this.request("GET", `/repos/${this.repoPath}/pulls?${query}`);
     if (!Array.isArray(data)) {
       throw new GitHubError("GitHub answered the pull request lookup with something other than a list", 0);
     }
-    return data.map((item) => parsePullRequest(item, "listed a pull request"));
+    return {
+      pullRequests: data.slice(0, MAX_FIND_RESULTS).map((item) => parsePullRequest(item, "listed a pull request")),
+      more: data.length > MAX_FIND_RESULTS,
+    };
   }
 
   /**
