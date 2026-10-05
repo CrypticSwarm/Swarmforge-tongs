@@ -12,7 +12,9 @@ never sees it, and no verb accepts or returns key material.
 
 ## MCP verbs
 
-Reached at `http://git-signing:8080/mcp` on the session network.
+Reached at `http://git-signing:8080/mcp` on the session network. Serves MCP
+revision 2026-07-28, and falls back to stateless 2025-era serving for clients that
+open with `initialize`.
 
 | Verb | Params | What it does |
 | --- | --- | --- |
@@ -20,7 +22,8 @@ Reached at `http://git-signing:8080/mcp` on the session network.
 | `sign_commits` | none | Signs every unpublished commit that needs it, moves the branch, and saves the previous head to a backup ref. No-op when everything is already signed. |
 
 **Neither verb takes a parameter.** No ref, path, or key id crosses the boundary,
-so there is nothing for a caller to inject — the tong derives all three itself.
+so there is nothing for a caller to inject — the tong derives all three itself. A
+parameter sent anyway is refused, not ignored.
 
 ## What gets signed
 
@@ -147,7 +150,10 @@ make clean
 `gpgsig` header layout against git's own `do_sign_commit`, candidate selection,
 every refusal above, and that the passphrase never reaches argv. It drives a fake
 `git`/`gpg` through the single `Run` seam in `src/exec.ts`, so it needs no
-binaries.
+binaries. It also runs the real HTTP app in-process against the SDK client in both
+protocol eras: a fresh server per request under sequential and concurrent load,
+refusal of oversized or invented arguments and of malformed bodies, and the `405`
+and `/healthz` answers.
 
 `make test-e2e` generates a throwaway key in a temp `GNUPGHOME`, builds a real
 repository with a real `origin`, signs it, and checks the result with real
