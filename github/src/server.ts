@@ -5,8 +5,8 @@
 // request of the pinned repository it is talking about; the head branch and the
 // repository itself stay derived.
 
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { z } from "zod";
+import { McpServer } from "@modelcontextprotocol/server";
+import * as z from "zod";
 import { MAX_BODY, MAX_TITLE, type GitHub, type PullRequest } from "./github.js";
 import type { Origin } from "./origin.js";
 import type { PushOutcome, Repo } from "./repo.js";
@@ -48,13 +48,25 @@ function describe(base: string, context: Context): string {
   return context.repo.requiresSignedCommits ? `${base} ${SIGNED_COMMITS_SENTENCE}` : base;
 }
 
-/** Never reaches git, but rejecting a nonsense ref here beats a 422 from GitHub. */
+/**
+ * Never reaches git, but rejecting a nonsense ref here beats a 422 from GitHub.
+ *
+ * One regex rather than refinements so the rule is listed to clients as the
+ * schema's `pattern`: no leading '-', and no code unit that is whitespace (JS
+ * `\s`, which includes NBSP, U+2028, and U+FEFF) or a C0 control or DEL. No `u`
+ * flag, so the class tests UTF-16 code units exactly as a `.test()` over the
+ * string would. No lookahead, only `\xHH` escapes, and an escaped hyphen, so the
+ * listed pattern also compiles under the `u` and `v` flags and in RE2/Go, Python,
+ * Java, and .NET. Their `\s` differs from JS's -- Python's adds U+0085 and omits
+ * U+FEFF, and Go's and Java's are ASCII-only -- and Python's `$` also matches
+ * before a final newline, so a client checking the listed pattern can disagree
+ * in either direction; the server's own check is the authoritative one.
+ */
 export const branchName = z
   .string()
   .min(1)
   .max(255)
-  .refine((value) => !/[\s\u0000-\u001f\u007f]/.test(value), "must not contain whitespace or control characters")
-  .refine((value) => !value.startsWith("-"), "must not start with '-'");
+  .regex(/^[^\-\s\x00-\x1f\x7f][^\s\x00-\x1f\x7f]*$/, "must not start with '-' or contain whitespace or control characters");
 
 /**
  * The repository is pinned, so a number is the whole address of a pull request.
@@ -62,6 +74,17 @@ export const branchName = z
  * parameter this one ends up in a URL path.
  */
 export const prNumber = z.number().int().positive();
+
+/**
+ * The cap on array elements plus object members in a `tools/call` `arguments`
+ * payload, checked before schema validation runs. The schemas below take only
+ * scalars, so a call's count is its number of keys, and the fullest legal call
+ * is `update_pr` with all six of `number`, `title`, `body`, `base`, `state`, and
+ * `draft`. Any more is a key the strict schemas would refuse anyway; the cap
+ * makes an oversized payload fail on a bounded count instead of a full walk.
+ * Adding a parameter means raising this.
+ */
+export const MAX_TOOL_INPUT_ELEMENTS = 6;
 
 export type CreatePrInput = {
   title: string;
@@ -228,7 +251,16 @@ export function buildServer(context: Context): McpServer {
   const instructions = context.repo.requiresSignedCommits
     ? `${INSTRUCTIONS}\n\n${SIGNED_COMMITS_INSTRUCTIONS}`
     : INSTRUCTIONS;
-  const server = new McpServer({ name: "github", version: "0.1.0" }, { instructions });
+  const server = new McpServer(
+    { name: "github", version: "0.1.0" },
+    {
+      instructions,
+      // The tool set is fixed for the life of the process; registerTool would
+      // otherwise advertise `listChanged: true`.
+      capabilities: { tools: { listChanged: false } },
+      maxToolInputElements: MAX_TOOL_INPUT_ELEMENTS,
+    },
+  );
 
   server.registerTool(
     "push_branch",
@@ -240,7 +272,7 @@ export function buildServer(context: Context): McpServer {
           "non-fast-forward. No parameters: the branch and the repository are both derived from the workspace.",
         context,
       ),
-      inputSchema: {},
+      inputSchema: z.strictObject({}),
     },
     async () => {
       try {
@@ -262,12 +294,12 @@ export function buildServer(context: Context): McpServer {
           "repository's default branch.",
         context,
       ),
-      inputSchema: {
+      inputSchema: z.strictObject({
         title: z.string().min(1).max(MAX_TITLE).describe("Pull request title."),
         body: z.string().max(MAX_BODY).optional().describe("Pull request description, in Markdown."),
         base: branchName.optional().describe("Branch to merge into. Defaults to the repository's default branch."),
         draft: z.boolean().optional().describe("Open the pull request as a draft."),
-      },
+      }),
     },
     async (input) => {
       try {
@@ -286,9 +318,9 @@ export function buildServer(context: Context): McpServer {
         "Read one pull request of this workspace's repository: its title, its description, the branches it " +
         "goes between, and whether it is open, draft, closed, or merged. The repository is not a parameter " +
         "-- only pull requests of the pinned one are readable.",
-      inputSchema: {
+      inputSchema: z.strictObject({
         number: prNumber.describe("Pull request number, as it appears in the repository."),
-      },
+      }),
     },
     async (input) => {
       try {
@@ -308,7 +340,7 @@ export function buildServer(context: Context): McpServer {
         "you pass change; each one you do pass replaces its current value outright, so call get_pr first and " +
         "send the whole new text rather than the part you are adding. The head branch cannot be changed -- " +
         "push to it instead.",
-      inputSchema: {
+      inputSchema: z.strictObject({
         number: prNumber.describe("Pull request number, as it appears in the repository."),
         title: z.string().min(1).max(MAX_TITLE).optional().describe("Replacement title."),
         body: z.string().max(MAX_BODY).optional().describe("Replacement description, in Markdown."),
@@ -318,7 +350,7 @@ export function buildServer(context: Context): McpServer {
           .boolean()
           .optional()
           .describe("true converts the pull request to a draft; false marks it ready for review."),
-      },
+      }),
     },
     async (input) => {
       try {
