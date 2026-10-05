@@ -13,7 +13,9 @@ returns it.
 
 ## MCP verbs
 
-Reached at `http://github:8080/mcp` on the session network.
+Reached at `http://github:8080/mcp` on the session network. Serves MCP revision
+2026-07-28, and falls back to stateless 2025-era serving for clients that open
+with `initialize`.
 
 | Verb | Params | What it does |
 | --- | --- | --- |
@@ -23,6 +25,11 @@ Reached at `http://github:8080/mcp` on the session network.
 | `update_pr` | `number`, `title?`, `body?`, `base?`, `state?`, `draft?` | Edits an open pull request. Only the fields you pass change, and each replaces its current value. |
 
 `create_pr` pushes for you; there is no need to call `push_branch` first.
+
+An unknown parameter is never passed through to a verb: it is refused (or, for a
+key the JSON-RPC layer discards, dropped), as is a call carrying more parameters
+than the fullest legal one. A refused call never runs its verb, and nothing
+reaches git or GitHub.
 
 ## Editing a pull request
 
@@ -272,3 +279,8 @@ edit landed. It drives a fake `git` through the single
 `Run` seam in `src/exec.ts` and a fake `fetch` through `src/github.ts`, so it
 needs no git and no credential; the only real subprocesses spawned are the test
 runner's own `node`, exercising `realRun`'s exit, signal, and truncation paths.
+It also runs the real HTTP app in-process against the SDK client in both protocol
+eras: a fresh server per request under sequential and concurrent load, the largest
+schema-legal call fitting through the body cap, refusal of oversized or invented
+arguments and of malformed bodies before anything reaches git or GitHub, and the
+`405` and `/healthz` answers.

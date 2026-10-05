@@ -158,4 +158,20 @@ describe("base branch validation", () => {
       assert.equal(branchName.safeParse(value).success, false, JSON.stringify(value));
     }
   });
+
+  it("refuses every kind of whitespace and control character, anywhere", () => {
+    // JS `\s` is wider than ASCII space: no-break space, line and paragraph
+    // separators, the BOM, and the ideographic space all count.
+    for (const char of ["\u0000", "\u001b", "\u001f", "\u007f", "\u00a0", "\u2028", "\u2029", "\ufeff", "\u3000"]) {
+      for (const value of [char, `a${char}`, `a${char}b`]) {
+        assert.equal(branchName.safeParse(value).success, false, JSON.stringify(value));
+      }
+    }
+  });
+
+  it("allows '-' and non-ASCII anywhere but the start", () => {
+    for (const value of ["a-", "a-b", "x/-y", "caf\u00e9", "\u{1F600}", "\u{1F600}".repeat(255)]) {
+      assert.equal(branchName.safeParse(value).success, true, JSON.stringify(value));
+    }
+  });
 });

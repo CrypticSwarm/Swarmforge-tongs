@@ -18,7 +18,11 @@ export class GitHubError extends Error {
 
 export type Fetch = typeof globalThis.fetch;
 
-/** Long enough for any reasonable PR, short enough that nothing enormous is sent. */
+/**
+ * Long enough for any reasonable PR, short enough that nothing enormous is sent.
+ * Counted in Unicode code points, as zod 4's `.max()` and JSON Schema's
+ * `maxLength` both count them -- so an emoji is one, not two.
+ */
 export const MAX_TITLE = 256;
 export const MAX_BODY = 65536;
 
