@@ -7,7 +7,7 @@
 
 import { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod";
-import { MAX_BODY, MAX_TITLE, type GitHub, type PullRequest } from "./github.js";
+import { MAX_BODY, MAX_FIND_RESULTS, MAX_TITLE, type GitHub, type PullRequest } from "./github.js";
 import type { Origin } from "./origin.js";
 import type { PushOutcome, Repo } from "./repo.js";
 
@@ -31,7 +31,11 @@ opens the pull request, so there is no need to call both. Neither ever force-pus
 
 get_pr and update_pr work on an already-open pull request, by number. Read one
 before editing it: update_pr replaces the fields you pass outright, so an edit that
-means to add to a description has to send the whole new description.`;
+means to add to a description has to send the whole new description.
+
+find_pr is for when you have a branch name and no number: it lists the pull requests
+opened from that branch, open or not, so you can tell whether one exists and whether
+it has already merged.`;
 
 // Only when the gate is on: a tong that describes a rule it is not enforcing is
 // worse than one that says nothing, because the agent has no way to tell which.
@@ -138,10 +142,13 @@ export async function createPr(context: Context, input: CreatePrInput): Promise<
 }
 
 /** What a caller needs before editing: the current text, verbatim, and where it points. */
+function statusOf(pr: PullRequest): string {
+  return pr.merged ? "merged" : pr.draft ? "draft" : pr.state;
+}
+
 function renderPr(pr: PullRequest): string {
-  const status = pr.merged ? "merged" : pr.draft ? "draft" : pr.state;
   return [
-    `#${pr.number} ${pr.head} -> ${pr.base} (${status})`,
+    `#${pr.number} ${pr.head} -> ${pr.base} (${statusOf(pr)})`,
     pr.url,
     "",
     `title: ${pr.title}`,
@@ -153,6 +160,25 @@ function renderPr(pr: PullRequest): string {
 
 export async function getPr(context: Context, input: { number: number }): Promise<string> {
   return renderPr(await context.github.pullRequest(input.number));
+}
+
+/**
+ * Number, branches, and state per match: what the caller needs to decide whether to
+ * stack on a pull request or to ask for it by number. Never the text, which is what
+ * get_pr is for.
+ */
+export async function findPr(context: Context, input: { head: string }): Promise<string> {
+  const matches = await context.github.findPullRequests(input.head);
+  if (matches.length === 0) {
+    return `No pull request in ${context.origin.owner}/${context.origin.repo} has '${input.head}' as its head branch.`;
+  }
+
+  const capped = matches.length >= MAX_FIND_RESULTS ? `; showing the ${MAX_FIND_RESULTS} most recent` : "";
+  return [
+    `${matches.length} pull request${matches.length === 1 ? "" : "s"} with head branch '${input.head}', newest first${capped}:`,
+    "",
+    ...matches.map((pr) => `#${pr.number} ${pr.head} -> ${pr.base} (${statusOf(pr)})\n${pr.url}`),
+  ].join("\n");
 }
 
 export type UpdatePrInput = {
@@ -327,6 +353,29 @@ export function buildServer(context: Context): McpServer {
         return textResult(await getPr(context, input));
       } catch (err) {
         return errorResult("get_pr", err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "find_pr",
+    {
+      title: "find_pr",
+      description:
+        "List the pull requests of this workspace's repository that were opened from a given head branch, " +
+        "newest first, including closed and merged ones: each with its number, URL, base branch, and whether " +
+        "it is open, draft, closed, or merged. Use it when you have a branch name and no number -- for example " +
+        "to find the pull request to stack on, or to check that it has not already merged. Only branches of " +
+        "this repository itself are matched, not branches of forks. Read one match in full with get_pr.",
+      inputSchema: z.strictObject({
+        head: branchName.describe("Name of the head branch, without any owner prefix."),
+      }),
+    },
+    async (input) => {
+      try {
+        return textResult(await findPr(context, input));
+      } catch (err) {
+        return errorResult("find_pr", err);
       }
     },
   );

@@ -264,6 +264,19 @@ export function prJson(pr: PrState) {
   };
 }
 
+/**
+ * A pull request as the list endpoint reports it: no `merged` key, only `merged_at`.
+ * Reusing prJson here would hide exactly the difference the tong has to cope with.
+ */
+export function listedPrJson(pr: PrState) {
+  const { merged, ...rest } = prJson(pr);
+  return { ...rest, merged_at: merged ? "2026-10-01T12:00:00Z" : null };
+}
+
+export function listPrsRoute(prs: PrState[]) {
+  return { "GET /repos/acme/widgets/pulls": { status: 200, json: prs.map(listedPrJson) } };
+}
+
 export function getPrRoute(pr: PrState) {
   return { [`GET /repos/acme/widgets/pulls/${pr.number}`]: { status: 200, json: prJson(pr) } };
 }

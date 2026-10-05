@@ -21,7 +21,7 @@ import { GitHub, MAX_BODY, MAX_TITLE } from "../src/github.js";
 import { pushUrl, type Origin } from "../src/origin.js";
 import { Repo } from "../src/repo.js";
 import { MAX_TOOL_INPUT_ELEMENTS, type Context } from "../src/server.js";
-import { ASKPASS, FakeGit, FakeGitHubApi, REPO_ROUTE, WORKSPACE, editablePrRoutes, prRoute } from "./fakes.js";
+import { ASKPASS, FakeGit, FakeGitHubApi, REPO_ROUTE, WORKSPACE, editablePrRoutes, listPrsRoute, prRoute } from "./fakes.js";
 
 const ORIGIN: Origin = { owner: "acme", repo: "widgets" };
 const TOKEN = "ghp_thisIsTheSecretTokenValue";
@@ -128,7 +128,12 @@ before(async () => {
 
 beforeEach(() => {
   git = new FakeGit();
-  api = new FakeGitHubApi({ ...REPO_ROUTE, ...prRoute(7, "main", "feature"), ...editablePrRoutes(OPEN_PR) });
+  api = new FakeGitHubApi({
+    ...REPO_ROUTE,
+    ...prRoute(7, "main", "feature"),
+    ...editablePrRoutes(OPEN_PR),
+    ...listPrsRoute([OPEN_PR, { ...OPEN_PR, number: 3, state: "closed", merged: true }]),
+  });
   requests = [];
 });
 
@@ -158,13 +163,14 @@ describe("protocol eras", () => {
 
       const { tools } = await client.listTools();
       const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool.inputSchema]));
-      assert.deepEqual(Object.keys(byName).sort(), ["create_pr", "get_pr", "push_branch", "update_pr"]);
+      assert.deepEqual(Object.keys(byName).sort(), ["create_pr", "find_pr", "get_pr", "push_branch", "update_pr"]);
 
       // What the strict zod 4 schemas list: no extra keys, the right required set,
       // and every parameter still described.
       const expected: Record<string, { properties: string[]; required: string[] | undefined }> = {
         push_branch: { properties: [], required: undefined },
         create_pr: { properties: ["base", "body", "draft", "title"], required: ["title"] },
+        find_pr: { properties: ["head"], required: ["head"] },
         get_pr: { properties: ["number"], required: ["number"] },
         update_pr: { properties: ["base", "body", "draft", "number", "state", "title"], required: ["number"] },
       };
@@ -214,7 +220,7 @@ describe("protocol eras", () => {
   it("a 2025-era client still connects through the stateless fallback", async () => {
     const client = await connect("legacy");
     assert.equal(client.getProtocolEra(), "legacy");
-    assert.equal((await client.listTools()).tools.length, 4);
+    assert.equal((await client.listTools()).tools.length, 5);
     const result = await client.callTool({ name: "get_pr", arguments: { number: 7 } });
     assert.notEqual(result.isError, true, text(result));
     assert.match(text(result), /#7 feature -> main \(open\)/);
@@ -260,6 +266,22 @@ describe("tool calls over HTTP", () => {
     const result = await client.callTool({ name: "update_pr", arguments: { number: 7, title: "Better" } });
     assert.match(text(result), /Updated pull request #7: title/);
     assert.match(text(await client.callTool({ name: "get_pr", arguments: { number: 7 } })), /title: Better/);
+  });
+});
+
+describe("find_pr over HTTP", () => {
+  it("finds pull requests by head branch, merged ones included", async () => {
+    const client = await connect();
+    const result = await client.callTool({ name: "find_pr", arguments: { head: "feature" } });
+    assert.notEqual(result.isError, true, text(result));
+    assert.match(text(result), /#7 feature -> main \(open\)/);
+    assert.match(text(result), /#3 feature -> main \(merged\)/);
+    assert.equal(git.pushCall, undefined, "a lookup pushes nothing");
+    assert.deepEqual(
+      api.calls.map((call) => call.method),
+      ["GET"],
+      "a lookup only reads",
+    );
   });
 });
 
@@ -389,7 +411,7 @@ describe("per-request server construction", () => {
   it("sequential connections in every negotiation mode each succeed", async () => {
     for (const mode of [...MODES, ...MODES]) {
       const client = await connect(mode);
-      assert.equal((await client.listTools()).tools.length, 4);
+      assert.equal((await client.listTools()).tools.length, 5);
     }
   });
 
@@ -409,7 +431,7 @@ describe("per-request server construction", () => {
     );
     assert.equal(results.length, modes.length * 5);
     for (const result of results) {
-      if (typeof result === "number") assert.equal(result, 4);
+      if (typeof result === "number") assert.equal(result, 5);
       else assert.match(result, /#7 feature -> main \(open\)/);
     }
   });
@@ -485,6 +507,11 @@ describe("untrusted arguments", () => {
       ["create_pr", { title: "" }],
       ["get_pr", { number: 1.5 }],
       ["get_pr", { number: Number.MAX_SAFE_INTEGER + 2 }],
+      ["find_pr", { head: "-x" }],
+      ["find_pr", { head: "a b" }],
+      ["find_pr", { head: "" }],
+      ["find_pr", { head: "x", repo: "evil/elsewhere" }],
+      ["find_pr", {}],
       ["update_pr", { number: 7, state: "merged" }],
     ];
     for (const [name, args] of refused) {

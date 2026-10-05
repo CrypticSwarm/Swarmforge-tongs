@@ -22,6 +22,7 @@ with `initialize`.
 | `push_branch` | none | Pushes the branch you have checked out to its GitHub repository and moves the local `refs/remotes/origin/<branch>` to match. Never force-pushes. |
 | `create_pr` | `title`, `body?`, `base?`, `draft?` | Pushes the branch as above, then opens a pull request from it. `base` defaults to the repository's default branch. |
 | `get_pr` | `number` | Reads one pull request: its title, description, branches, and whether it is open, draft, closed, or merged. |
+| `find_pr` | `head` | Lists the pull requests opened from a branch of this repository, newest first and up to 10, closed and merged ones included: each with its number, URL, branches, and whether it is open, draft, closed, or merged. For when you have a branch name and no number. Read one in full with `get_pr`. |
 | `update_pr` | `number`, `title?`, `body?`, `base?`, `state?`, `draft?` | Edits an open pull request. Only the fields you pass change, and each replaces its current value. |
 
 `create_pr` pushes for you; there is no need to call `push_branch` first.
@@ -67,9 +68,13 @@ At startup the tong reads `remote.origin.url` from the mounted workspace, parses
 it into `<owner>/<repo>`, and holds that for the life of the container. There is
 no verb parameter and no configuration key for the repository.
 
-A pull request number is the only value a caller supplies that reaches a URL rather
-than a request body, so it is bounded to a positive integer at the MCP surface and
-again in the API client, which builds a path out of nothing else. The GraphQL draft
+Two caller values reach a URL rather than a request body. A pull request number is
+bounded to a positive integer at the MCP surface and again in the API client, which
+builds a path out of nothing else. The `head` branch name of `find_pr` is a query
+value, so it is encoded as one: a name containing `&`, `#`, or `=` stays a single
+value and cannot add or override a parameter. The owner half of the lookup is always
+the pinned owner, so `find_pr` matches only branches of the repository itself, not
+of forks. The GraphQL draft
 mutations see no caller value at all — the node id they address is the one GitHub
 just returned for a pull request of this repository.
 
