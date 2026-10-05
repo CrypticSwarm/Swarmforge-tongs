@@ -26,6 +26,9 @@ export type Fetch = typeof globalThis.fetch;
 export const MAX_TITLE = 256;
 export const MAX_BODY = 65536;
 
+/** The most pull requests one lookup by head branch returns, newest first. */
+export const MAX_FIND_RESULTS = 10;
+
 export type PullRequest = {
   number: number;
   /** GraphQL's identifier for the same pull request; empty if GitHub omitted it. */
@@ -141,6 +144,34 @@ export class GitHub {
   }
 
   /**
+   * The pull requests of the pinned repository whose head is `branch`, open or not,
+   * newest first.
+   *
+   * The branch name is the second caller-supplied value that reaches a URL, here as
+   * a query value, so it goes through URLSearchParams rather than into a template:
+   * a name containing `&`, `#`, or `=` stays one value and cannot add a parameter or
+   * cut the URL short. The owner half of `head` is the pinned owner, never the
+   * caller's, so this only ever matches branches of the repository itself.
+   */
+  async findPullRequests(branch: string): Promise<PullRequest[]> {
+    if (typeof branch !== "string" || branch.length === 0 || branch.length > 255) {
+      throw new GitHubError(`'${String(branch).slice(0, 40)}' is not a branch name`, 0);
+    }
+    const query = new URLSearchParams({
+      head: `${this.origin.owner}:${branch}`,
+      state: "all",
+      sort: "created",
+      direction: "desc",
+      per_page: String(MAX_FIND_RESULTS),
+    });
+    const data = await this.request("GET", `/repos/${this.repoPath}/pulls?${query}`);
+    if (!Array.isArray(data)) {
+      throw new GitHubError("GitHub answered the pull request lookup with something other than a list", 0);
+    }
+    return data.map((item) => parsePullRequest(item, "listed a pull request"));
+  }
+
+  /**
    * The body is built key by key rather than passed through, so a field the caller
    * did not ask to change cannot appear in the request at all.
    */
@@ -214,6 +245,7 @@ function parsePullRequest(data: unknown, context: string): PullRequest {
     body?: string | null;
     draft?: boolean;
     merged?: boolean;
+    merged_at?: string | null;
     state?: string;
     base?: { ref?: string };
     head?: { ref?: string };
@@ -234,7 +266,10 @@ function parsePullRequest(data: unknown, context: string): PullRequest {
     head: pr.head?.ref ?? "",
     draft: pr.draft === true,
     state: pr.state === "closed" ? "closed" : "open",
-    merged: pr.merged === true,
+    // The list endpoint omits `merged` and reports `merged_at` instead; the single
+    // pull request endpoint sends both. Reading either keeps a merged pull request
+    // from showing up as merely closed in a lookup by branch.
+    merged: pr.merged === true || (typeof pr.merged_at === "string" && pr.merged_at.length > 0),
   };
 }
 
