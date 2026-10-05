@@ -141,11 +141,11 @@ export async function createPr(context: Context, input: CreatePrInput): Promise<
   ].join("\n");
 }
 
-/** What a caller needs before editing: the current text, verbatim, and where it points. */
 function statusOf(pr: PullRequest): string {
   return pr.merged ? "merged" : pr.draft ? "draft" : pr.state;
 }
 
+/** What a caller needs before editing: the current text, verbatim, and where it points. */
 function renderPr(pr: PullRequest): string {
   return [
     `#${pr.number} ${pr.head} -> ${pr.base} (${statusOf(pr)})`,
@@ -168,12 +168,12 @@ export async function getPr(context: Context, input: { number: number }): Promis
  * get_pr is for.
  */
 export async function findPr(context: Context, input: { head: string }): Promise<string> {
-  const matches = await context.github.findPullRequests(input.head);
+  const { pullRequests: matches, more } = await context.github.findPullRequests(input.head);
   if (matches.length === 0) {
     return `No pull request in ${context.origin.owner}/${context.origin.repo} has '${input.head}' as its head branch.`;
   }
 
-  const capped = matches.length >= MAX_FIND_RESULTS ? `; showing the ${MAX_FIND_RESULTS} most recent` : "";
+  const capped = more ? `; showing the ${MAX_FIND_RESULTS} most recent` : "";
   return [
     `${matches.length} pull request${matches.length === 1 ? "" : "s"} with head branch '${input.head}', newest first${capped}:`,
     "",
