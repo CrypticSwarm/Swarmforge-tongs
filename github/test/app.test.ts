@@ -163,12 +163,20 @@ describe("protocol eras", () => {
 
       const { tools } = await client.listTools();
       const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool.inputSchema]));
-      assert.deepEqual(Object.keys(byName).sort(), ["create_pr", "find_pr", "get_pr", "push_branch", "update_pr"]);
+      assert.deepEqual(Object.keys(byName).sort(), [
+        "create_pr",
+        "fetch_origin",
+        "find_pr",
+        "get_pr",
+        "push_branch",
+        "update_pr",
+      ]);
 
       // What the strict zod 4 schemas list: no extra keys, the right required set,
       // and every parameter still described.
       const expected: Record<string, { properties: string[]; required: string[] | undefined }> = {
         push_branch: { properties: [], required: undefined },
+        fetch_origin: { properties: [], required: undefined },
         create_pr: { properties: ["base", "body", "draft", "title"], required: ["title"] },
         find_pr: { properties: ["head"], required: ["head"] },
         get_pr: { properties: ["number"], required: ["number"] },
@@ -220,7 +228,7 @@ describe("protocol eras", () => {
   it("a 2025-era client still connects through the stateless fallback", async () => {
     const client = await connect("legacy");
     assert.equal(client.getProtocolEra(), "legacy");
-    assert.equal((await client.listTools()).tools.length, 5);
+    assert.equal((await client.listTools()).tools.length, 6);
     const result = await client.callTool({ name: "get_pr", arguments: { number: 7 } });
     assert.notEqual(result.isError, true, text(result));
     assert.match(text(result), /#7 feature -> main \(open\)/);
@@ -250,6 +258,16 @@ describe("tool calls over HTTP", () => {
     assert.notEqual(result.isError, true, text(result));
     assert.match(text(result), /Pushed feature to acme\/widgets/);
     assert.ok(git.pushCall);
+  });
+
+  it("fetch_origin fetches through the fake git", async () => {
+    git.fetchOutput = `  ${"a".repeat(40)} ${"b".repeat(40)} refs/remotes/origin/main\n`;
+    const client = await connect();
+    const result = await client.callTool({ name: "fetch_origin", arguments: {} });
+    assert.notEqual(result.isError, true, text(result));
+    assert.match(text(result), /Fetched acme\/widgets; 1 ref updated:\n\norigin\/main a{12}\.\.b{12} \(fast-forward\)/);
+    assert.ok(git.fetchCall);
+    assert.equal(git.pushCall, undefined);
   });
 
   it("create_pr pushes and opens the pull request", async () => {
@@ -411,7 +429,7 @@ describe("per-request server construction", () => {
   it("sequential connections in every negotiation mode each succeed", async () => {
     for (const mode of [...MODES, ...MODES]) {
       const client = await connect(mode);
-      assert.equal((await client.listTools()).tools.length, 5);
+      assert.equal((await client.listTools()).tools.length, 6);
     }
   });
 
@@ -431,7 +449,7 @@ describe("per-request server construction", () => {
     );
     assert.equal(results.length, modes.length * 5);
     for (const result of results) {
-      if (typeof result === "number") assert.equal(result, 5);
+      if (typeof result === "number") assert.equal(result, 6);
       else assert.match(result, /#7 feature -> main \(open\)/);
     }
   });

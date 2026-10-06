@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { GitHub } from "../src/github.js";
 import { pushUrl, type Origin } from "../src/origin.js";
 import { Repo, RepoError } from "../src/repo.js";
-import { ASKPASS, FakeGit, WORKSPACE, configPairs, type GitFailure } from "./fakes.js";
+import { fetchOrigin, type Context } from "../src/server.js";
+import { ASKPASS, FakeGit, FakeGitHubApi, WORKSPACE, configPairs, type GitFailure } from "./fakes.js";
 
 const ORIGIN: Origin = { owner: "acme", repo: "widgets" };
 const URL = pushUrl(ORIGIN);
@@ -20,6 +22,16 @@ const PARTIAL: GitFailure = {
 
 function repoFor(git: FakeGit): Repo {
   return new Repo(git.run, WORKSPACE, ASKPASS, false);
+}
+
+function contextFor(git: FakeGit): Context {
+  return {
+    repo: repoFor(git),
+    github: new GitHub(new FakeGitHubApi().fetch, ORIGIN, TOKEN),
+    origin: ORIGIN,
+    pushUrl: URL,
+    token: TOKEN,
+  };
 }
 
 describe("fetch argv", () => {
@@ -116,5 +128,49 @@ describe("fetch outcome", () => {
       ],
       failure: PARTIAL.stderr,
     });
+  });
+});
+
+describe("fetch_origin", () => {
+  it("names each ref the way git branch -r and git tag do", async () => {
+    const git = new FakeGit({
+      fetchOutput: `+ ${B} ${A} refs/remotes/origin/rewritten\n* ${Z} ${B} refs/tags/v1\n`,
+    });
+
+    assert.equal(
+      await fetchOrigin(contextFor(git)),
+      [
+        "Fetched acme/widgets; 2 refs updated:",
+        "",
+        `origin/rewritten ${B.slice(0, 12)}..${A.slice(0, 12)} (forced update)`,
+        `tag v1 ${B.slice(0, 12)} (new)`,
+      ].join("\n"),
+    );
+  });
+
+  it("says so when nothing changed", async () => {
+    assert.equal(await fetchOrigin(contextFor(new FakeGit())), "Fetched acme/widgets; nothing changed.");
+  });
+
+  it("fails a partial fetch, naming both the rejected refs and the ones that moved", async () => {
+    const git = new FakeGit({ fetchFails: PARTIAL });
+
+    await assert.rejects(() => fetchOrigin(contextFor(git)), (err: Error) => {
+      assert.match(err.message, /^fetching acme\/widgets failed partway: error: cannot lock ref/);
+      assert.match(err.message, new RegExp(`origin/foo/bar ${A.slice(0, 12)} \\(rejected\\)`));
+      assert.match(err.message, /git update-ref -d/);
+      assert.match(err.message, /went through; 1 ref updated:\n\norigin\/main a{12}\.\.b{12} \(fast-forward\)$/);
+      return true;
+    });
+  });
+
+  it("caps the list, and says by how much", async () => {
+    const lines = Array.from({ length: 60 }, (_, i) => `* ${Z} ${A} refs/remotes/origin/b${i}`);
+    const text = await fetchOrigin(contextFor(new FakeGit({ fetchOutput: lines.join("\n") })));
+
+    assert.match(text, /^Fetched acme\/widgets; 60 refs updated:/);
+    assert.match(text, /origin\/b49 /);
+    assert.doesNotMatch(text, /origin\/b50 /);
+    assert.match(text, /\.\.\.and 10 more$/);
   });
 });

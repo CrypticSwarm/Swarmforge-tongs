@@ -9,7 +9,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod";
 import { MAX_BODY, MAX_FIND_RESULTS, MAX_TITLE, type GitHub, type PullRequest } from "./github.js";
 import type { Origin } from "./origin.js";
-import type { PushOutcome, Repo } from "./repo.js";
+import type { FetchedRef, PushOutcome, Repo } from "./repo.js";
 
 export type Context = {
   repo: Repo;
@@ -19,7 +19,7 @@ export type Context = {
   token: string;
 };
 
-const INSTRUCTIONS = `Pushes branches and opens pull requests for the repository checked out in this workspace.
+const INSTRUCTIONS = `Fetches and pushes branches and opens pull requests for the repository checked out in this workspace.
 
 The GitHub token lives only in this tong and is never exposed to the caller. The
 repository is fixed at startup from the workspace's own 'origin' remote -- no verb
@@ -28,6 +28,8 @@ repository.
 
 push_branch pushes the branch you have checked out. create_pr pushes it and then
 opens the pull request, so there is no need to call both. Neither ever force-pushes.
+
+fetch_origin is \`git fetch origin\` for that same repository.
 
 get_pr and update_pr work on an already-open pull request, by number. Read one
 before editing it: update_pr replaces the fields you pass outright, so an edit that
@@ -139,6 +141,45 @@ export async function createPr(context: Context, input: CreatePrInput): Promise<
     "",
     renderPush(outcome, context.origin),
   ].join("\n");
+}
+
+/** Enough to see what moved without flooding a repository with thousands of branches. */
+const MAX_FETCH_LINES = 50;
+
+function renderFetchedRefs(refs: readonly FetchedRef[]): string[] {
+  const lines = refs.slice(0, MAX_FETCH_LINES).map(({ ref, change, from, to }) => {
+    const name = ref.replace(/^refs\/remotes\//, "").replace(/^refs\/tags\//, "tag ");
+    const range =
+      change === "new" || change === "rejected" ? to.slice(0, 12) : `${from.slice(0, 12)}..${to.slice(0, 12)}`;
+    return `${name} ${range} (${change})`;
+  });
+  const rest = refs.length - lines.length;
+  return rest > 0 ? [...lines, `...and ${rest} more`] : lines;
+}
+
+export async function fetchOrigin(context: Context): Promise<string> {
+  const { refs, failure } = await context.repo.fetch(context.origin, context.pushUrl, context.token);
+  const target = `${context.origin.owner}/${context.origin.repo}`;
+  const updated = refs.filter((ref) => ref.change !== "rejected");
+  const summary =
+    updated.length === 0
+      ? "nothing changed."
+      : `${updated.length} ref${updated.length === 1 ? "" : "s"} updated:\n\n${renderFetchedRefs(updated).join("\n")}`;
+  if (failure === null) return `Fetched ${target}; ${summary}`;
+
+  // Thrown, but naming what did move.
+  throw new Error(
+    [
+      `fetching ${target} failed partway: ${failure}`,
+      "",
+      ...renderFetchedRefs(refs.filter((ref) => ref.change === "rejected")),
+      "",
+      "A rejected ref is usually blocked by a stale origin/ ref this tong never prunes; delete it with " +
+        "`git update-ref -d` and fetch again.",
+      "",
+      `The rest of the fetch went through; ${summary}`,
+    ].join("\n"),
+  );
 }
 
 function statusOf(pr: PullRequest): string {
@@ -305,6 +346,25 @@ export function buildServer(context: Context): McpServer {
         return textResult(await pushBranch(context));
       } catch (err) {
         return errorResult("push_branch", err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "fetch_origin",
+    {
+      title: "fetch_origin",
+      description:
+        "Fetch every branch of this workspace's GitHub repository into refs/remotes/origin/*, plus new tags, " +
+        "as `git fetch origin` does. Never prunes, and writes no FETCH_HEAD: use origin/<branch>. Local " +
+        "branches and the working tree are untouched. No parameters: the repository is the pinned one.",
+      inputSchema: z.strictObject({}),
+    },
+    async () => {
+      try {
+        return textResult(await fetchOrigin(context));
+      } catch (err) {
+        return errorResult("fetch_origin", err);
       }
     },
   );
