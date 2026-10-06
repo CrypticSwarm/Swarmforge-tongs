@@ -1,6 +1,6 @@
 // Every git invocation the tong makes against the mounted workspace.
 
-import { type Run, runOrThrow } from "./exec.js";
+import { type Run, type RunResult, runOrThrow } from "./exec.js";
 import type { Origin } from "./origin.js";
 
 export class RepoError extends Error {}
@@ -121,6 +121,15 @@ function assertUsableBranch(branch: string): void {
   if (bad) throw new RepoError(`branch name '${branch}' is not one this tong will build a refspec from`);
 }
 
+/**
+ * Both streams, because with --porcelain they carry different halves of the reason:
+ * the per-ref verdict is on stdout, git's generic summary on stderr.
+ */
+function failureDetail(result: RunResult): string {
+  const detail = [result.stdout.toString("utf8").trim(), result.stderr.trim()].filter(Boolean).join("\n");
+  return detail || `git exited ${result.exitCode}`;
+}
+
 export type PushOutcome = {
   branch: string;
   sha: string;
@@ -158,6 +167,11 @@ export class Repo {
       GIT_TERMINAL_PROMPT: "0",
       ...extra,
     };
+  }
+
+  /** The only git calls that get the token. */
+  private runWithToken(args: readonly string[], token: string): Promise<RunResult> {
+    return this.run("git", this.git(args), { env: this.env({ GIT_ASKPASS: this.askpass, GITHUB_TONG_TOKEN: token }) });
   }
 
   private async capture(args: readonly string[], stdin?: Buffer): Promise<Buffer> {
@@ -293,21 +307,14 @@ export class Repo {
     // could push unsigned commits past.
     if (this.requireSignedCommits) await this.assertPushIsSigned(origin, sha);
 
-    const result = await this.run(
-      "git",
-      this.git(["push", "--no-verify", "--porcelain", url, `${sha}:refs/heads/${branch}`]),
-      { env: this.env({ GIT_ASKPASS: this.askpass, GITHUB_TONG_TOKEN: token }) },
+    const result = await this.runWithToken(
+      ["push", "--no-verify", "--porcelain", url, `${sha}:refs/heads/${branch}`],
+      token,
     );
 
     const stdout = result.stdout.toString("utf8");
     if (result.exitCode !== 0) {
-      // Both streams, because they carry different halves of the reason: with
-      // --porcelain the per-ref verdict ("[remote rejected] ... permission denied")
-      // is on stdout, while stderr has only the generic "failed to push some refs".
-      const detail = [stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n");
-      throw new RepoError(
-        `pushing ${branch} to ${origin.owner}/${origin.repo} failed: ${detail || `git exited ${result.exitCode}`}`,
-      );
+      throw new RepoError(`pushing ${branch} to ${origin.owner}/${origin.repo} failed: ${failureDetail(result)}`);
     }
 
     const alreadyUpToDate = stdout.includes("[up to date]");
