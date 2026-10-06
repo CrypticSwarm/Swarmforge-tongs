@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { GitHub, MAX_FIND_RESULTS } from "../src/github.js";
-import { pushUrl, type Origin } from "../src/origin.js";
+import { remoteUrl, type Origin } from "../src/origin.js";
 import { Repo } from "../src/repo.js";
 import { findPr, type Context } from "../src/server.js";
 import { ASKPASS, FakeGit, FakeGitHubApi, WORKSPACE, listPrsRoute, type PrState } from "./fakes.js";
@@ -14,7 +14,7 @@ function contextFor(api: FakeGitHubApi): Context {
     repo: new Repo(new FakeGit().run, WORKSPACE, ASKPASS, false),
     github: new GitHub(api.fetch, ORIGIN, TOKEN),
     origin: ORIGIN,
-    pushUrl: pushUrl(ORIGIN),
+    remoteUrl: remoteUrl(ORIGIN),
     token: TOKEN,
   };
 }

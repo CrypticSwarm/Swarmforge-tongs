@@ -15,7 +15,7 @@ export type Context = {
   repo: Repo;
   github: GitHub;
   origin: Origin;
-  pushUrl: string;
+  remoteUrl: string;
   token: string;
 };
 
@@ -112,12 +112,12 @@ function renderPush(outcome: PushOutcome, origin: Origin): string {
 }
 
 export async function pushBranch(context: Context): Promise<string> {
-  const outcome = await context.repo.push(context.origin, context.pushUrl, context.token);
+  const outcome = await context.repo.push(context.origin, context.remoteUrl, context.token);
   return renderPush(outcome, context.origin);
 }
 
 export async function createPr(context: Context, input: CreatePrInput): Promise<string> {
-  const outcome = await context.repo.push(context.origin, context.pushUrl, context.token);
+  const outcome = await context.repo.push(context.origin, context.remoteUrl, context.token);
   const base = input.base ?? (await context.github.repository()).defaultBranch;
 
   if (base === outcome.branch) {
@@ -158,7 +158,7 @@ function renderFetchedRefs(refs: readonly FetchedRef[]): string[] {
 }
 
 export async function fetchOrigin(context: Context): Promise<string> {
-  const { refs, failure } = await context.repo.fetch(context.origin, context.pushUrl, context.token);
+  const { refs, failure } = await context.repo.fetch(context.origin, context.remoteUrl, context.token);
   const target = `${context.origin.owner}/${context.origin.repo}`;
   const updated = refs.filter((ref) => ref.change !== "rejected");
   const summary =

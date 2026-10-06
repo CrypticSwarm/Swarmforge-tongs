@@ -8,7 +8,7 @@
 import { booleanFromEnv } from "./config.js";
 import { realRun } from "./exec.js";
 import { GitHub, pushBlocker } from "./github.js";
-import { parseOrigin, pushUrl } from "./origin.js";
+import { parseOrigin, remoteUrl } from "./origin.js";
 import { Repo } from "./repo.js";
 import { createApp } from "./app.js";
 
@@ -82,7 +82,7 @@ if (requireSignedCommits) {
   console.log("github: every commit a push would add to the repository must carry a signature");
 }
 
-const httpServer = createApp({ repo, github, origin, pushUrl: pushUrl(origin), token }).listen(port, () => {
+const httpServer = createApp({ repo, github, origin, remoteUrl: remoteUrl(origin), token }).listen(port, () => {
   console.log(`github listening on :${port} (${origin.owner}/${origin.repo}, workspace ${workspace})`);
 });
 

@@ -18,7 +18,7 @@ import { after, before, beforeEach, describe, it } from "node:test";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { createApp } from "../src/app.js";
 import { GitHub, MAX_BODY, MAX_TITLE } from "../src/github.js";
-import { pushUrl, type Origin } from "../src/origin.js";
+import { remoteUrl, type Origin } from "../src/origin.js";
 import { Repo } from "../src/repo.js";
 import { MAX_TOOL_INPUT_ELEMENTS, type Context } from "../src/server.js";
 import { ASKPASS, FakeGit, FakeGitHubApi, REPO_ROUTE, WORKSPACE, editablePrRoutes, listPrsRoute, prRoute } from "./fakes.js";
@@ -118,7 +118,7 @@ before(async () => {
       return new GitHub(api.fetch, ORIGIN, TOKEN);
     },
     origin: ORIGIN,
-    pushUrl: pushUrl(ORIGIN),
+    remoteUrl: remoteUrl(ORIGIN),
     token: TOKEN,
   };
   httpServer = createApp(context).listen(0, "127.0.0.1");
