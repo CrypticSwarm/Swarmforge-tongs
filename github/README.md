@@ -225,18 +225,20 @@ The rest of `.git` stays writable, which is all the agent and this tong need.
 
 Every git invocation here also overrides the dangerous keys on the command line —
 `core.hooksPath`, `core.fsmonitor`, `core.gitProxy`, `credential.helper`,
-`protocol.ext.allow`, `push.recurseSubmodules`, `push.followTags`, and
-`fetch.bundleURI` — the push passes `--no-verify`, and the fetch
-`--no-recurse-submodules`.
+`protocol.ext.allow`, `push.recurseSubmodules`, `push.followTags`,
+`fetch.bundleURI`, and `core.alternateRefsCommand`. The push and the fetch also
+clear `remote.<url>.url` and `remote.<url>.pushurl` for the pinned URL, since a
+remote named after it would redirect both. `GIT_NO_LAZY_FETCH=1` stops a partial
+clone fetching from its promisor remote. The push passes `--no-verify`, and the
+fetch `--no-recurse-submodules`.
 
 Treat that list as a second layer rather than as the boundary. It cannot be
 exhaustive, and two gaps are structural rather than oversights: git resolves
 `http.<url>.*` by longest URL match, so a workspace `http.https://github.com/.proxy`
-outranks a generic `-c http.proxy=` no matter what this tong passes; and `-c` can
-add config but never remove it, so an existing `url.<base>.insteadOf` entry —
-which rewrites even a command-line push URL, aiming the askpass-supplied token at
-whatever host the rewrite names — cannot be neutralized from the command line at
-all. Containment lives in the mount.
+outranks a generic `-c http.proxy=` no matter what this tong passes; and `-c`
+cannot remove an existing `url.<base>.insteadOf` entry, which rewrites even a
+command-line URL and aims the askpass-supplied token at whatever host the rewrite
+names. Containment lives in the mount.
 
 ## Enabling it
 

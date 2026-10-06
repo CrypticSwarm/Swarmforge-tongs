@@ -20,15 +20,16 @@ export class RepoError extends Error {}
  * URL match, so a workspace `http.https://github.com/.proxy` outranks any generic
  * `-c http.proxy=` given here.
  *
- *   safe.directory         git refuses a repository owned by another uid without it
- *   core.hooksPath         a directory with no hooks in it
- *   core.fsmonitor         an arbitrary command git would otherwise run
- *   core.gitProxy          the same, for any URL an `insteadOf` rewrote to git://
- *   credential.helper      empty, so no helper can intercept or persist the token
- *   protocol.ext.allow     `ext::` transports execute their URL
- *   push.recurseSubmodules a submodule push carries GIT_ASKPASS to its own remote
- *   push.followTags        tags are outside what this tong is asked to push
- *   fetch.bundleURI        askpass would hand the token to the bundle's host
+ *   safe.directory             git refuses a repository owned by another uid without it
+ *   core.hooksPath             a directory with no hooks in it
+ *   core.fsmonitor             an arbitrary command git would otherwise run
+ *   core.gitProxy              the same, for any URL an `insteadOf` rewrote to git://
+ *   credential.helper          empty, so no helper can intercept or persist the token
+ *   protocol.ext.allow         `ext::` transports execute their URL
+ *   push.recurseSubmodules     a submodule push carries GIT_ASKPASS to its own remote
+ *   push.followTags            tags are outside what this tong is asked to push
+ *   fetch.bundleURI            askpass would hand the token to the bundle's host
+ *   core.alternateRefsCommand  a command fetch runs when objects/info/alternates exists
  */
 function hardening(workspace: string): string[] {
   return [
@@ -50,6 +51,8 @@ function hardening(workspace: string): string[] {
     "push.followTags=false",
     "-c",
     "fetch.bundleURI=",
+    "-c",
+    "core.alternateRefsCommand=true",
   ];
 }
 
@@ -204,13 +207,22 @@ export class Repo {
       HOME: process.env.HOME ?? "/tmp",
       LC_ALL: "C",
       GIT_TERMINAL_PROMPT: "0",
+      // A partial clone would otherwise fetch missing objects from its promisor remote.
+      GIT_NO_LAZY_FETCH: "1",
       ...extra,
     };
   }
 
-  /** The only git calls that get the token. */
-  private runWithToken(args: readonly string[], token: string): Promise<RunResult> {
-    return this.run("git", this.git(args), { env: this.env({ GIT_ASKPASS: this.askpass, GITHUB_TONG_TOKEN: token }) });
+  /**
+   * The only git calls that get the token. A remote named after `url` would redirect
+   * it; an empty value clears that remote's URLs (git 2.46+).
+   */
+  private runWithToken(args: readonly string[], url: string, refspec: string, token: string): Promise<RunResult> {
+    return this.run(
+      "git",
+      ["-c", `remote.${url}.url=`, "-c", `remote.${url}.pushurl=`, ...this.git([...args, url, refspec])],
+      { env: this.env({ GIT_ASKPASS: this.askpass, GITHUB_TONG_TOKEN: token }) },
+    );
   }
 
   private async capture(args: readonly string[], stdin?: Buffer): Promise<Buffer> {
@@ -333,9 +345,9 @@ export class Repo {
         "--no-prune",
         "--no-write-fetch-head",
         "--no-auto-maintenance",
-        url,
-        FETCH_REFSPEC,
       ],
+      url,
+      FETCH_REFSPEC,
       token,
     );
     const refs = parseFetch(result.stdout);
@@ -378,7 +390,9 @@ export class Repo {
     if (this.requireSignedCommits) await this.assertPushIsSigned(origin, sha);
 
     const result = await this.runWithToken(
-      ["push", "--no-verify", "--porcelain", url, `${sha}:refs/heads/${branch}`],
+      ["push", "--no-verify", "--porcelain"],
+      url,
+      `${sha}:refs/heads/${branch}`,
       token,
     );
 

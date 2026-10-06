@@ -115,6 +115,9 @@ describe("push argv", () => {
     // `on-demand` would push submodules to their own remotes, carrying GIT_ASKPASS.
     assert.equal(pairs.get("push.recurseSubmodules"), "no");
     assert.equal(pairs.get("push.followTags"), "false");
+    // A workspace remote named after the URL would redirect the push.
+    assert.equal(pairs.get(`remote.${URL}.url`), "");
+    assert.equal(pairs.get(`remote.${URL}.pushurl`), "");
   });
 });
 

@@ -72,6 +72,10 @@ describe("fetch argv", () => {
     await repoFor(git).fetch(ORIGIN, URL, TOKEN);
 
     const pairs = configPairs(git.fetchCall!.args);
+    assert.equal(pairs.get(`remote.${URL}.url`), "");
+    assert.equal(pairs.get(`remote.${URL}.pushurl`), "");
+    assert.equal(pairs.get("core.alternateRefsCommand"), "true");
+    assert.equal(git.fetchCall!.env.GIT_NO_LAZY_FETCH, "1");
     assert.equal(pairs.get("core.hooksPath"), "/dev/null");
     assert.equal(pairs.get("fetch.bundleURI"), "");
   });
