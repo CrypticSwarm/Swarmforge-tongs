@@ -28,6 +28,7 @@ export class RepoError extends Error {}
  *   protocol.ext.allow     `ext::` transports execute their URL
  *   push.recurseSubmodules a submodule push carries GIT_ASKPASS to its own remote
  *   push.followTags        tags are outside what this tong is asked to push
+ *   fetch.bundleURI        askpass would hand the token to the bundle's host
  */
 function hardening(workspace: string): string[] {
   return [
@@ -47,6 +48,8 @@ function hardening(workspace: string): string[] {
     "push.recurseSubmodules=no",
     "-c",
     "push.followTags=false",
+    "-c",
+    "fetch.bundleURI=",
   ];
 }
 
@@ -129,6 +132,42 @@ function failureDetail(result: RunResult): string {
   const detail = [result.stdout.toString("utf8").trim(), result.stderr.trim()].filter(Boolean).join("\n");
   return detail || `git exited ${result.exitCode}`;
 }
+
+/** `git fetch origin`'s default refspec. */
+const FETCH_REFSPEC = "+refs/heads/*:refs/remotes/origin/*";
+
+const FETCH_FLAGS = {
+  " ": "fast-forward",
+  "+": "forced update",
+  "*": "new",
+  t: "tag update",
+  "!": "rejected",
+} as const;
+
+export type FetchedRef = {
+  ref: string;
+  change: (typeof FETCH_FLAGS)[keyof typeof FETCH_FLAGS];
+  from: string;
+  to: string;
+};
+
+/** `fetch --porcelain`: `<flag> <old> <new> <ref>` per updated ref. */
+function parseFetch(output: Buffer): FetchedRef[] {
+  const refs: FetchedRef[] = [];
+  for (const line of output.toString("utf8").split("\n")) {
+    const match = /^(.) ([0-9a-f]{40,64}) ([0-9a-f]{40,64}) (\S+)$/.exec(line);
+    if (!match || !Object.hasOwn(FETCH_FLAGS, match[1])) continue;
+    const [, flag, from, to, ref] = match;
+    refs.push({ ref, change: FETCH_FLAGS[flag as keyof typeof FETCH_FLAGS], from, to });
+  }
+  return refs;
+}
+
+/** `failure` is git's stderr when it exited non-zero after moving some refs. */
+export type FetchOutcome = {
+  refs: FetchedRef[];
+  failure: string | null;
+};
 
 export type PushOutcome = {
   branch: string;
@@ -275,6 +314,37 @@ export class Repo {
         `configured with GITHUB_TONG_REQUIRE_SIGNED_COMMITS=true. Sign them and push again -- the ` +
         `git-signing tong's sign_commits verb signs exactly this set of commits. Nothing has been pushed.`,
     );
+  }
+
+  /**
+   * `git fetch origin`, from the pinned URL rather than the workspace's remote.
+   *
+   * Never prunes, whatever the workspace config says, so a deleted branch's commits
+   * stay published to git-signing. No FETCH_HEAD: with a URL and refspec git marks
+   * every branch for merge, unlike `git fetch origin`.
+   */
+  async fetch(origin: Origin, url: string, token: string): Promise<FetchOutcome> {
+    const result = await this.runWithToken(
+      [
+        "fetch",
+        "--porcelain",
+        // A submodule fetch would carry GIT_ASKPASS to its own remote.
+        "--no-recurse-submodules",
+        "--no-prune",
+        "--no-write-fetch-head",
+        "--no-auto-maintenance",
+        url,
+        FETCH_REFSPEC,
+      ],
+      token,
+    );
+    const refs = parseFetch(result.stdout);
+    if (result.exitCode === 0) return { refs, failure: null };
+    // Refs git reported on had already moved before it gave up.
+    if (refs.length === 0) {
+      throw new RepoError(`fetching from ${origin.owner}/${origin.repo} failed: ${failureDetail(result)}`);
+    }
+    return { refs, failure: result.stderr.trim() || `git exited ${result.exitCode}` };
   }
 
   /**
