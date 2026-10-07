@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import { GitHub } from "../src/github.js";
 import { remoteUrl, type Origin } from "../src/origin.js";
 import { Repo } from "../src/repo.js";
-import { getPr, prNumber, type Context } from "../src/server.js";
+import { getPr, positiveId, type Context } from "../src/server.js";
 import { ASKPASS, FakeGit, FakeGitHubApi, WORKSPACE, getPrRoute } from "./fakes.js";
 
 const ORIGIN: Origin = { owner: "acme", repo: "widgets" };
@@ -70,13 +70,13 @@ describe("get_pr", () => {
 describe("pull request number validation", () => {
   it("accepts a number GitHub could have issued", () => {
     for (const value of [1, 7, 123456]) {
-      assert.equal(prNumber.safeParse(value).success, true, String(value));
+      assert.equal(positiveId.safeParse(value).success, true, String(value));
     }
   });
 
   it("rejects anything that is not one", () => {
     for (const value of [0, -1, 1.5, NaN, Infinity, "7", null]) {
-      assert.equal(prNumber.safeParse(value).success, false, JSON.stringify(value));
+      assert.equal(positiveId.safeParse(value).success, false, JSON.stringify(value));
     }
   });
 
