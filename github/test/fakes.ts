@@ -206,14 +206,16 @@ export type FetchCall = {
   method: string;
   headers: Record<string, string>;
   body: unknown;
+  redirect: RequestRedirect | undefined;
 };
 
-export type FakeResponse = { status: number; json: unknown };
+/** `text` is sent as is; otherwise `json`, serialized. */
+export type FakeResponse = { status: number; json?: unknown; text?: string; headers?: Record<string, string> };
 
 export class FakeGitHubApi {
   readonly calls: FetchCall[] = [];
 
-  constructor(private readonly routes: Record<string, FakeResponse | ((call: FetchCall) => FakeResponse)> = {}) {}
+  constructor(readonly routes: Record<string, FakeResponse | ((call: FetchCall) => FakeResponse)> = {}) {}
 
   get lastBody(): unknown {
     return this.calls[this.calls.length - 1]?.body;
@@ -227,16 +229,19 @@ export class FakeGitHubApi {
       method,
       headers: (init?.headers ?? {}) as Record<string, string>,
       body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
+      redirect: init?.redirect,
     };
     this.calls.push(call);
 
-    const key = `${method} ${new URL(url).pathname}`;
+    const parsed = new URL(url);
+    // Off api.github.com, the host is part of the route.
+    const key = `${method} ${parsed.host === "api.github.com" ? "" : parsed.host}${parsed.pathname}`;
     const route = this.routes[key];
     if (!route) {
       return new Response(JSON.stringify({ message: `no fake route for ${key}` }), { status: 500 });
     }
-    const { status, json } = typeof route === "function" ? route(call) : route;
-    return new Response(JSON.stringify(json), { status });
+    const { status, json, text, headers } = typeof route === "function" ? route(call) : route;
+    return new Response(text ?? JSON.stringify(json), { status, headers });
   };
 }
 
@@ -268,6 +273,7 @@ export type PrState = {
   draft?: boolean;
   state?: "open" | "closed";
   merged?: boolean;
+  headSha?: string;
 };
 
 /** A pull request as GitHub reports it, for the read and edit paths. */
@@ -282,7 +288,7 @@ export function prJson(pr: PrState) {
     state: pr.state ?? "open",
     merged: pr.merged ?? false,
     base: { ref: pr.base },
-    head: { ref: pr.head },
+    head: { ref: pr.head, sha: pr.headSha ?? "2222222222222222222222222222222222222222" },
   };
 }
 
@@ -330,5 +336,94 @@ export function editablePrRoutes(initial: PrState) {
       state.draft = field === "convertPullRequestToDraft";
       return { status: 200, json: { data: { [field]: { pullRequest: { isDraft: state.draft } } } } };
     },
+  };
+}
+
+export const ACTIONS = "/repos/acme/widgets/actions";
+export const LOG_HOST = "results-receiver.example";
+
+export type RunState = { id: number; name?: string; status?: string; conclusion?: string | null; attempt?: number };
+
+export function runJson(run: RunState) {
+  return {
+    id: run.id,
+    name: run.name ?? "CI",
+    event: "push",
+    status: run.status ?? "completed",
+    conclusion: run.conclusion === undefined ? "success" : run.conclusion,
+    run_attempt: run.attempt ?? 1,
+    html_url: `https://github.com/acme/widgets/actions/runs/${run.id}`,
+    run_started_at: "2026-10-07T12:00:00Z",
+    updated_at: "2026-10-07T12:03:12Z",
+  };
+}
+
+export type StepState = {
+  name: string;
+  conclusion?: string | null;
+  status?: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+};
+
+export type JobState = {
+  id: number;
+  runId?: number;
+  name?: string;
+  status?: string;
+  conclusion?: string | null;
+  steps?: StepState[];
+};
+
+export function jobJson(job: JobState) {
+  return {
+    id: job.id,
+    run_id: job.runId ?? 100,
+    run_attempt: 1,
+    name: job.name ?? "test",
+    status: job.status ?? "completed",
+    conclusion: job.conclusion === undefined ? "success" : job.conclusion,
+    html_url: `https://github.com/acme/widgets/actions/runs/${job.runId ?? 100}/job/${job.id}`,
+    created_at: "2026-10-07T12:00:00Z",
+    started_at: "2026-10-07T12:00:04Z",
+    completed_at: job.status && job.status !== "completed" ? null : "2026-10-07T12:02:54Z",
+    runner_name: "GitHub Actions 12",
+    labels: ["ubuntu-latest"],
+    steps: (job.steps ?? []).map((step, i) => ({
+      number: i + 1,
+      name: step.name,
+      status: step.status ?? "completed",
+      conclusion: step.conclusion === undefined ? "success" : step.conclusion,
+      started_at: step.started_at === undefined ? "2026-10-07T12:00:04Z" : step.started_at,
+      completed_at: step.completed_at === undefined ? "2026-10-07T12:00:05Z" : step.completed_at,
+    })),
+  };
+}
+
+export function runsRoute(runs: RunState[]) {
+  return { [`GET ${ACTIONS}/runs`]: { status: 200, json: { total_count: runs.length, workflow_runs: runs.map(runJson) } } };
+}
+
+export function jobsRoute(runId: number, jobs: JobState[]) {
+  return {
+    [`GET ${ACTIONS}/runs/${runId}/jobs`]: {
+      status: 200,
+      json: { total_count: jobs.length, jobs: jobs.map((job) => jobJson({ runId, ...job })) },
+    },
+  };
+}
+
+export function jobRoute(job: JobState) {
+  return { [`GET ${ACTIONS}/jobs/${job.id}`]: { status: 200, json: jobJson(job) } };
+}
+
+/** The API's redirect, and the signed URL it points at. */
+export function logRoutes(jobId: number, text: string) {
+  return {
+    [`GET ${ACTIONS}/jobs/${jobId}/logs`]: {
+      status: 302,
+      headers: { location: `https://${LOG_HOST}/logs/${jobId}?sig=signed` },
+    },
+    [`GET ${LOG_HOST}/logs/${jobId}`]: { status: 200, text },
   };
 }

@@ -29,6 +29,25 @@ export const MAX_BODY = 65536;
 /** The most pull requests one lookup by head branch returns, newest first. */
 export const MAX_FIND_RESULTS = 10;
 
+/** The most workflow runs reported for one commit, newest first. */
+export const MAX_RUNS = 10;
+
+/** GitHub's page size cap; a run with more jobs than this is reported as cut short. */
+export const MAX_JOBS = 100;
+
+/** Kept from the end of a job's log, where a failure usually is. */
+export const MAX_LOG_BYTES = 8 * 1024 * 1024;
+
+/** A log bigger than this is refused rather than read to its end. */
+export const MAX_LOG_READ_BYTES = 256 * 1024 * 1024;
+
+const LOG_TIMEOUT_MS = 60_000;
+
+/** GitHub has no SHA-256 repositories, so a commit id is 40 hex digits. */
+export const COMMIT_SHA = /^[0-9a-f]{40}$/;
+
+const USER_AGENT = "swarmforge-tong-github";
+
 export type PullRequest = {
   number: number;
   /** GraphQL's identifier for the same pull request; empty if GitHub omitted it. */
@@ -38,6 +57,8 @@ export type PullRequest = {
   body: string;
   base: string;
   head: string;
+  /** The head branch's commit; empty if GitHub omitted it. */
+  headSha: string;
   draft: boolean;
   state: "open" | "closed";
   /** A merged pull request is also `closed`, but almost nothing about it can change. */
@@ -50,6 +71,40 @@ export type CreatePullRequest = {
   head: string;
   base: string;
   draft?: boolean;
+};
+
+/** Actions' `status` until it completes, then its `conclusion`. */
+export type Progress = { state: string; completed: boolean };
+
+export type WorkflowRun = Progress & {
+  id: number;
+  name: string;
+  event: string;
+  attempt: number;
+  url: string;
+  startedAt: string | null;
+  updatedAt: string | null;
+};
+
+export type JobStep = Progress & {
+  number: number;
+  name: string;
+  startedAt: string | null;
+  completedAt: string | null;
+};
+
+export type Job = Progress & {
+  id: number;
+  runId: number;
+  attempt: number;
+  name: string;
+  url: string;
+  createdAt: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  runner: string;
+  labels: string[];
+  steps: JobStep[];
 };
 
 /** Every field omitted here is one GitHub leaves as it is. `head` is not editable. */
@@ -72,16 +127,16 @@ export class GitHub {
     return `${this.origin.owner}/${this.origin.repo}`;
   }
 
-  private async request(method: string, path: string, body?: unknown): Promise<unknown> {
-    let response: Response;
+  private async send(method: string, path: string, body?: unknown, redirect?: RequestRedirect): Promise<Response> {
     try {
-      response = await this.fetchImpl(`${this.apiBase}${path}`, {
+      return await this.fetchImpl(`${this.apiBase}${path}`, {
         method,
+        redirect,
         headers: {
           authorization: `Bearer ${this.token}`,
           accept: "application/vnd.github+json",
           "x-github-api-version": "2022-11-28",
-          "user-agent": "swarmforge-tong-github",
+          "user-agent": USER_AGENT,
           ...(body === undefined ? {} : { "content-type": "application/json" }),
         },
         body: body === undefined ? undefined : JSON.stringify(body),
@@ -89,14 +144,19 @@ export class GitHub {
     } catch (err) {
       throw new GitHubError(`cannot reach ${this.apiBase}: ${(err as Error).message}`, 0);
     }
+  }
 
+  private async fail(response: Response, path: string): Promise<never> {
     const text = await response.text();
     const parsed = text.length > 0 ? safeJson(text) : undefined;
+    throw new GitHubError(describeFailure(response.status, parsed, this.repoPath, path), response.status);
+  }
 
-    if (!response.ok) {
-      throw new GitHubError(describeFailure(response.status, parsed, this.repoPath, path), response.status);
-    }
-    return parsed;
+  private async request(method: string, path: string, body?: unknown): Promise<unknown> {
+    const response = await this.send(method, path, body);
+    if (!response.ok) return this.fail(response, path);
+    const text = await response.text();
+    return text.length > 0 ? safeJson(text) : undefined;
   }
 
   /** Also the startup reachability check: it fails loudly on a token that cannot see the repo. */
@@ -111,12 +171,12 @@ export class GitHub {
     return { defaultBranch: data.default_branch, permissions: data.permissions };
   }
 
-  /** The only caller value in a URL path, so bounded here as well as at the MCP surface. */
   private pullPath(number: number): string {
-    if (!Number.isSafeInteger(number) || number < 1) {
-      throw new GitHubError(`'${String(number).slice(0, 40)}' is not a pull request number`, 0);
-    }
-    return `/repos/${this.repoPath}/pulls/${number}`;
+    return `/repos/${this.repoPath}/pulls/${assertId(number, "pull request number")}`;
+  }
+
+  private jobPath(id: number): string {
+    return `/repos/${this.repoPath}/actions/jobs/${assertId(id, "job id")}`;
   }
 
   async createPullRequest(input: CreatePullRequest): Promise<PullRequest> {
@@ -187,6 +247,70 @@ export class GitHub {
     );
   }
 
+  /** The Actions runs for `sha`, newest first, each at its latest attempt. */
+  async workflowRuns(sha: string): Promise<{ runs: WorkflowRun[]; more: boolean }> {
+    if (!COMMIT_SHA.test(sha)) throw new GitHubError(`'${sha.slice(0, 40)}' is not a commit sha`, 0);
+    const query = new URLSearchParams({ head_sha: sha, per_page: String(MAX_RUNS + 1) });
+    const data = (await this.request("GET", `/repos/${this.repoPath}/actions/runs?${query}`)) as {
+      workflow_runs?: unknown;
+    };
+    if (!Array.isArray(data?.workflow_runs)) {
+      throw new GitHubError("GitHub answered the workflow run lookup without a list of runs", 0);
+    }
+    return { runs: data.workflow_runs.slice(0, MAX_RUNS).map(parseRun), more: data.workflow_runs.length > MAX_RUNS };
+  }
+
+  /** The jobs of a run's latest attempt. */
+  async runJobs(runId: number): Promise<{ jobs: Job[]; more: boolean }> {
+    const path = `/repos/${this.repoPath}/actions/runs/${assertId(runId, "run id")}/jobs`;
+    const data = (await this.request("GET", `${path}?per_page=${MAX_JOBS}`)) as {
+      jobs?: unknown;
+      total_count?: number;
+    };
+    if (!Array.isArray(data?.jobs)) {
+      throw new GitHubError(`GitHub answered the job lookup for run ${runId} without a list of jobs`, 0);
+    }
+    return { jobs: data.jobs.map(parseJob), more: (data.total_count ?? 0) > data.jobs.length };
+  }
+
+  async job(id: number): Promise<Job> {
+    return parseJob(await this.request("GET", this.jobPath(id)));
+  }
+
+  /** Follows the redirect to a signed URL by hand, without the token, and never reports the URL. */
+  async jobLog(id: number): Promise<{ text: string; truncated: boolean }> {
+    const path = `${this.jobPath(id)}/logs`;
+    const response = await this.send("GET", path, undefined, "manual");
+    if (response.ok) return readLog(id, response);
+    if (response.status < 300 || response.status >= 400) return this.fail(response, path);
+    await response.body?.cancel();
+
+    let target: URL;
+    try {
+      target = new URL(response.headers.get("location") ?? "");
+    } catch {
+      throw new GitHubError(`GitHub redirected the log of job ${id} nowhere usable`, 0);
+    }
+    if (target.protocol !== "https:") {
+      throw new GitHubError(`GitHub redirected the log of job ${id} to a non-https URL`, 0);
+    }
+
+    let download: Response;
+    try {
+      download = await this.fetchImpl(target, {
+        headers: { "user-agent": USER_AGENT },
+        redirect: "error",
+        signal: AbortSignal.timeout(LOG_TIMEOUT_MS),
+      });
+    } catch (err) {
+      throw downloadError(id, err);
+    }
+    if (!download.ok) {
+      throw new GitHubError(`downloading the log of job ${id} failed (${download.status})`, download.status);
+    }
+    return readLog(id, download);
+  }
+
   /**
    * Draft is the one pull request field REST will not edit -- there is no `draft`
    * key on the PATCH endpoint, only a pair of GraphQL mutations, which address the
@@ -247,7 +371,7 @@ function parsePullRequest(data: unknown, context: string): PullRequest {
     merged_at?: string | null;
     state?: string;
     base?: { ref?: string };
-    head?: { ref?: string };
+    head?: { ref?: string; sha?: string };
   };
 
   if (typeof pr?.number !== "number" || !pr.html_url) {
@@ -263,6 +387,7 @@ function parsePullRequest(data: unknown, context: string): PullRequest {
     body: pr.body ?? "",
     base: pr.base?.ref ?? "",
     head: pr.head?.ref ?? "",
+    headSha: pr.head?.sha ?? "",
     draft: pr.draft === true,
     state: pr.state === "closed" ? "closed" : "open",
     // The list endpoint omits `merged` and reports `merged_at` instead; the single
@@ -270,6 +395,137 @@ function parsePullRequest(data: unknown, context: string): PullRequest {
     // from showing up as merely closed in a lookup by branch.
     merged: pr.merged === true || (typeof pr.merged_at === "string" && pr.merged_at.length > 0),
   };
+}
+
+function progress(item: { status?: string; conclusion?: string | null }): Progress {
+  const completed = item.status === "completed";
+  return { state: (completed ? item.conclusion : item.status) ?? item.status ?? "unknown", completed };
+}
+
+function parseRun(data: unknown): WorkflowRun {
+  const run = data as {
+    id?: number;
+    name?: string | null;
+    event?: string;
+    status?: string;
+    conclusion?: string | null;
+    run_attempt?: number;
+    html_url?: string;
+    run_started_at?: string;
+    updated_at?: string;
+  };
+  if (typeof run?.id !== "number") throw new GitHubError("GitHub listed a workflow run with no id", 0);
+  return {
+    ...progress(run),
+    id: run.id,
+    name: run.name ?? "",
+    event: run.event ?? "",
+    attempt: run.run_attempt ?? 1,
+    url: run.html_url ?? "",
+    startedAt: run.run_started_at ?? null,
+    updatedAt: run.updated_at ?? null,
+  };
+}
+
+function parseJob(data: unknown): Job {
+  const job = data as {
+    id?: number;
+    run_id?: number;
+    run_attempt?: number;
+    name?: string;
+    status?: string;
+    conclusion?: string | null;
+    html_url?: string | null;
+    created_at?: string;
+    started_at?: string | null;
+    completed_at?: string | null;
+    runner_name?: string | null;
+    labels?: string[];
+    steps?: Array<{
+      number?: number;
+      name?: string;
+      status?: string;
+      conclusion?: string | null;
+      started_at?: string | null;
+      completed_at?: string | null;
+    }>;
+  };
+  if (typeof job?.id !== "number") throw new GitHubError("GitHub returned a job with no id", 0);
+  return {
+    ...progress(job),
+    id: job.id,
+    runId: job.run_id ?? 0,
+    attempt: job.run_attempt ?? 1,
+    name: job.name ?? "",
+    url: job.html_url ?? "",
+    createdAt: job.created_at ?? null,
+    startedAt: job.started_at ?? null,
+    completedAt: job.completed_at ?? null,
+    runner: job.runner_name ?? "",
+    labels: Array.isArray(job.labels) ? job.labels : [],
+    steps: (job.steps ?? []).map((step, index) => ({
+      ...progress(step),
+      number: step.number ?? index + 1,
+      name: step.name ?? "",
+      startedAt: step.started_at ?? null,
+      completedAt: step.completed_at ?? null,
+    })),
+  };
+}
+
+/** Caller-supplied, and the only kind of caller value that reaches a URL path. */
+function assertId(value: number, what: string): number {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new GitHubError(`'${String(value).slice(0, 40)}' is not a ${what}`, 0);
+  }
+  return value;
+}
+
+async function readLog(id: number, response: Response): Promise<{ text: string; truncated: boolean }> {
+  try {
+    return await readTail(response, MAX_LOG_BYTES, MAX_LOG_READ_BYTES);
+  } catch (err) {
+    throw downloadError(id, err);
+  }
+}
+
+/** A fetch error's message may carry the signed URL, so only its kind is kept. */
+function downloadError(id: number, err: unknown): GitHubError {
+  if (err instanceof GitHubError) return err;
+  const { name, cause } = (err ?? {}) as { name?: string; cause?: { code?: unknown } };
+  const kind = name === "TimeoutError" ? "timed out" : typeof cause?.code === "string" ? cause.code : "network error";
+  return new GitHubError(`cannot download the log of job ${id}: ${kind}`, 0);
+}
+
+/** At most `max` bytes from the end of the body, reading at most `limit`; a partial first line is dropped. */
+async function readTail(response: Response, max: number, limit: number): Promise<{ text: string; truncated: boolean }> {
+  const chunks: Uint8Array[] = [];
+  let kept = 0;
+  let read = 0;
+  let lastDropped: number | undefined;
+  const reader = response.body?.getReader();
+  for (let next = await reader?.read(); next && !next.done; next = await reader?.read()) {
+    read += next.value.length;
+    if (read > limit) {
+      await reader?.cancel();
+      throw new GitHubError(`the log is over ${limit / 1024 / 1024} MiB, more than this tong will read`, 0);
+    }
+    chunks.push(next.value);
+    kept += next.value.length;
+    while (kept - chunks[0].length >= max) {
+      const dropped = chunks.shift()!;
+      kept -= dropped.length;
+      lastDropped = dropped[dropped.length - 1];
+    }
+  }
+  let bytes = Buffer.concat(chunks);
+  if (bytes.length > max) {
+    lastDropped = bytes[bytes.length - max - 1];
+    bytes = bytes.subarray(bytes.length - max);
+  }
+  const text = bytes.toString("utf8");
+  const midLine = lastDropped !== undefined && lastDropped !== 0x0a;
+  return { text: midLine ? text.slice(text.indexOf("\n") + 1) : text, truncated: lastDropped !== undefined };
 }
 
 /**
@@ -295,6 +551,14 @@ function safeJson(text: string): unknown {
   }
 }
 
+/** What a 404 on each numbered path most likely means. */
+const ADDRESSED: ReadonlyArray<[RegExp, string, string]> = [
+  [/\/pulls\/\d+$/, "pull request", "the number names no pull request"],
+  [/\/actions\/runs\/\d+\/jobs$/, "workflow run", "the id names no run"],
+  [/\/actions\/jobs\/\d+$/, "job", "the id names no job"],
+  [/\/actions\/jobs\/\d+\/logs$/, "job log", "the job has no log yet, as while it is running"],
+];
+
 /**
  * A token not scoped to this repository and a repository that does not exist both
  * come back 404, so say what the operator most likely needs to change.
@@ -309,20 +573,27 @@ function describeFailure(status: number, parsed: unknown, repoPath: string, path
     case 401:
       return `GitHub rejected the token (401). It is invalid, revoked, or expired.`;
     case 403:
-      return `GitHub refused the request (403)${detail ? `: ${detail}` : ""}. The token most likely lacks the permission this needs.`;
-    case 404:
-      // A wrong pull request number is by far the likelier cause once the tong has
-      // started, since startup already proved the token can see the repository.
-      if (/\/pulls\/\d+$/.test(path)) {
+      return (
+        `GitHub refused the request (403)${detail ? `: ${detail}` : ""}. The token most likely lacks the ` +
+        `permission this needs${path.includes("/actions/") ? ": Actions: read, on a fine-grained token" : ""}.`
+      );
+    case 404: {
+      // Startup proved the repository is visible, so blame the number.
+      const addressed = ADDRESSED.find(([pattern]) => pattern.test(path.split("?")[0]));
+      if (addressed) {
+        const [, noun, cause] = addressed;
         return (
-          `GitHub cannot see that pull request in ${repoPath} (404). Either the number names no pull ` +
-          `request, or the token is no longer scoped to this repository.`
+          `GitHub cannot see that ${noun} in ${repoPath} (404). Either ${cause}, or the token is no longer ` +
+          `scoped to this repository.`
         );
       }
       return (
         `GitHub cannot see ${repoPath} (404). Either the repository does not exist, or the token is not ` +
         `scoped to it -- a fine-grained token must list this repository and grant Contents and Pull requests.`
       );
+    }
+    case 410:
+      return `GitHub says that is gone (410). Actions logs expire, by default after 90 days.`;
     case 422:
       return `GitHub rejected the request (422)${detail ? `: ${detail}` : ""}.`;
     default:
