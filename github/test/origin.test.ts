@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { OriginError, parseOrigin, pushUrl } from "../src/origin.js";
+import { OriginError, parseOrigin, remoteUrl } from "../src/origin.js";
 
 describe("parseOrigin", () => {
   const accepted: Array<[string, string, string]> = [
@@ -51,9 +51,9 @@ describe("parseOrigin", () => {
   });
 });
 
-describe("pushUrl", () => {
+describe("remoteUrl", () => {
   it("is built from the pin, over https, with no token in it", () => {
-    const url = pushUrl({ owner: "acme", repo: "widgets" });
+    const url = remoteUrl({ owner: "acme", repo: "widgets" });
     assert.equal(url, "https://x-access-token@github.com/acme/widgets.git");
   });
 
@@ -61,8 +61,8 @@ describe("pushUrl", () => {
     // The point of building the URL rather than pushing to the remote named
     // `origin`: a later `git remote set-url` cannot redirect this.
     assert.equal(
-      pushUrl(parseOrigin("git@github.com:acme/widgets.git")),
-      pushUrl(parseOrigin("https://github.com/acme/widgets")),
+      remoteUrl(parseOrigin("git@github.com:acme/widgets.git")),
+      remoteUrl(parseOrigin("https://github.com/acme/widgets")),
     );
   });
 });

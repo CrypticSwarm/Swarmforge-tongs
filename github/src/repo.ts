@@ -1,6 +1,6 @@
 // Every git invocation the tong makes against the mounted workspace.
 
-import { type Run, runOrThrow } from "./exec.js";
+import { type Run, type RunResult, runOrThrow } from "./exec.js";
 import type { Origin } from "./origin.js";
 
 export class RepoError extends Error {}
@@ -20,14 +20,16 @@ export class RepoError extends Error {}
  * URL match, so a workspace `http.https://github.com/.proxy` outranks any generic
  * `-c http.proxy=` given here.
  *
- *   safe.directory         git refuses a repository owned by another uid without it
- *   core.hooksPath         a directory with no hooks in it
- *   core.fsmonitor         an arbitrary command git would otherwise run
- *   core.gitProxy          the same, for any URL an `insteadOf` rewrote to git://
- *   credential.helper      empty, so no helper can intercept or persist the token
- *   protocol.ext.allow     `ext::` transports execute their URL
- *   push.recurseSubmodules a submodule push carries GIT_ASKPASS to its own remote
- *   push.followTags        tags are outside what this tong is asked to push
+ *   safe.directory             git refuses a repository owned by another uid without it
+ *   core.hooksPath             a directory with no hooks in it
+ *   core.fsmonitor             an arbitrary command git would otherwise run
+ *   core.gitProxy              the same, for any URL an `insteadOf` rewrote to git://
+ *   credential.helper          empty, so no helper can intercept or persist the token
+ *   protocol.ext.allow         `ext::` transports execute their URL
+ *   push.recurseSubmodules     a submodule push carries GIT_ASKPASS to its own remote
+ *   push.followTags            tags are outside what this tong is asked to push
+ *   fetch.bundleURI            askpass would hand the token to the bundle's host
+ *   core.alternateRefsCommand  a command fetch runs when objects/info/alternates exists
  */
 function hardening(workspace: string): string[] {
   return [
@@ -47,6 +49,10 @@ function hardening(workspace: string): string[] {
     "push.recurseSubmodules=no",
     "-c",
     "push.followTags=false",
+    "-c",
+    "fetch.bundleURI=",
+    "-c",
+    "core.alternateRefsCommand=true",
   ];
 }
 
@@ -121,6 +127,51 @@ function assertUsableBranch(branch: string): void {
   if (bad) throw new RepoError(`branch name '${branch}' is not one this tong will build a refspec from`);
 }
 
+/**
+ * Both streams, because with --porcelain they carry different halves of the reason:
+ * the per-ref verdict is on stdout, git's generic summary on stderr.
+ */
+function failureDetail(result: RunResult): string {
+  const detail = [result.stdout.toString("utf8").trim(), result.stderr.trim()].filter(Boolean).join("\n");
+  return detail || `git exited ${result.exitCode}`;
+}
+
+/** `git fetch origin`'s default refspec. */
+const FETCH_REFSPEC = "+refs/heads/*:refs/remotes/origin/*";
+
+const FETCH_FLAGS = {
+  " ": "fast-forward",
+  "+": "forced update",
+  "*": "new",
+  t: "tag update",
+  "!": "rejected",
+} as const;
+
+export type FetchedRef = {
+  ref: string;
+  change: (typeof FETCH_FLAGS)[keyof typeof FETCH_FLAGS];
+  from: string;
+  to: string;
+};
+
+/** `fetch --porcelain`: `<flag> <old> <new> <ref>` per updated ref. */
+function parseFetch(output: Buffer): FetchedRef[] {
+  const refs: FetchedRef[] = [];
+  for (const line of output.toString("utf8").split("\n")) {
+    const match = /^(.) ([0-9a-f]{40,64}) ([0-9a-f]{40,64}) (\S+)$/.exec(line);
+    if (!match || !Object.hasOwn(FETCH_FLAGS, match[1])) continue;
+    const [, flag, from, to, ref] = match;
+    refs.push({ ref, change: FETCH_FLAGS[flag as keyof typeof FETCH_FLAGS], from, to });
+  }
+  return refs;
+}
+
+/** `failure` is git's stderr when it exited non-zero after moving some refs. */
+export type FetchOutcome = {
+  refs: FetchedRef[];
+  failure: string | null;
+};
+
 export type PushOutcome = {
   branch: string;
   sha: string;
@@ -156,8 +207,22 @@ export class Repo {
       HOME: process.env.HOME ?? "/tmp",
       LC_ALL: "C",
       GIT_TERMINAL_PROMPT: "0",
+      // A partial clone would otherwise fetch missing objects from its promisor remote.
+      GIT_NO_LAZY_FETCH: "1",
       ...extra,
     };
+  }
+
+  /**
+   * The only git calls that get the token. A remote named after `url` would redirect
+   * it; an empty value clears that remote's URLs (git 2.46+).
+   */
+  private runWithToken(args: readonly string[], url: string, refspec: string, token: string): Promise<RunResult> {
+    return this.run(
+      "git",
+      ["-c", `remote.${url}.url=`, "-c", `remote.${url}.pushurl=`, ...this.git([...args, url, refspec])],
+      { env: this.env({ GIT_ASKPASS: this.askpass, GITHUB_TONG_TOKEN: token }) },
+    );
   }
 
   private async capture(args: readonly string[], stdin?: Buffer): Promise<Buffer> {
@@ -264,6 +329,37 @@ export class Repo {
   }
 
   /**
+   * `git fetch origin`, from the pinned URL rather than the workspace's remote.
+   *
+   * Never prunes, whatever the workspace config says, so a deleted branch's commits
+   * stay published to git-signing. No FETCH_HEAD: with a URL and refspec git marks
+   * every branch for merge, unlike `git fetch origin`.
+   */
+  async fetch(origin: Origin, url: string, token: string): Promise<FetchOutcome> {
+    const result = await this.runWithToken(
+      [
+        "fetch",
+        "--porcelain",
+        // A submodule fetch would carry GIT_ASKPASS to its own remote.
+        "--no-recurse-submodules",
+        "--no-prune",
+        "--no-write-fetch-head",
+        "--no-auto-maintenance",
+      ],
+      url,
+      FETCH_REFSPEC,
+      token,
+    );
+    const refs = parseFetch(result.stdout);
+    if (result.exitCode === 0) return { refs, failure: null };
+    // Refs git reported on had already moved before it gave up.
+    if (refs.length === 0) {
+      throw new RepoError(`fetching from ${origin.owner}/${origin.repo} failed: ${failureDetail(result)}`);
+    }
+    return { refs, failure: result.stderr.trim() || `git exited ${result.exitCode}` };
+  }
+
+  /**
    * Push the branch to the pinned repository, then move `refs/remotes/origin/<branch>`
    * to match.
    *
@@ -293,21 +389,16 @@ export class Repo {
     // could push unsigned commits past.
     if (this.requireSignedCommits) await this.assertPushIsSigned(origin, sha);
 
-    const result = await this.run(
-      "git",
-      this.git(["push", "--no-verify", "--porcelain", url, `${sha}:refs/heads/${branch}`]),
-      { env: this.env({ GIT_ASKPASS: this.askpass, GITHUB_TONG_TOKEN: token }) },
+    const result = await this.runWithToken(
+      ["push", "--no-verify", "--porcelain"],
+      url,
+      `${sha}:refs/heads/${branch}`,
+      token,
     );
 
     const stdout = result.stdout.toString("utf8");
     if (result.exitCode !== 0) {
-      // Both streams, because they carry different halves of the reason: with
-      // --porcelain the per-ref verdict ("[remote rejected] ... permission denied")
-      // is on stdout, while stderr has only the generic "failed to push some refs".
-      const detail = [stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n");
-      throw new RepoError(
-        `pushing ${branch} to ${origin.owner}/${origin.repo} failed: ${detail || `git exited ${result.exitCode}`}`,
-      );
+      throw new RepoError(`pushing ${branch} to ${origin.owner}/${origin.repo} failed: ${failureDetail(result)}`);
     }
 
     const alreadyUpToDate = stdout.includes("[up to date]");

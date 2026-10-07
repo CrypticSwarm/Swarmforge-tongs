@@ -2,8 +2,8 @@
 //
 // There is no verb parameter for owner/repo and no configuration knob: the answer
 // is derived here, once, at startup, from what the human checked out. `owner` and
-// `repo` are interpolated into the push URL, so anything that is not a plain name
-// is rejected rather than escaped.
+// `repo` are interpolated into the fetch and push URL, so anything that is not a
+// plain name is rejected rather than escaped.
 
 export class OriginError extends Error {}
 
@@ -92,6 +92,6 @@ export function parseOrigin(rawUrl: string): Origin {
  *
  * `x-access-token` is a username. The token is not in this string.
  */
-export function pushUrl(origin: Origin): string {
+export function remoteUrl(origin: Origin): string {
   return `https://x-access-token@github.com/${origin.owner}/${origin.repo}.git`;
 }

@@ -4,13 +4,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { GitHub } from "../src/github.js";
-import { pushUrl, type Origin } from "../src/origin.js";
+import { remoteUrl, type Origin } from "../src/origin.js";
 import { Repo, RepoError } from "../src/repo.js";
 import { createPr, type Context } from "../src/server.js";
 import { ASKPASS, FakeGit, FakeGitHubApi, REPO_ROUTE, WORKSPACE, prRoute } from "./fakes.js";
 
 const ORIGIN: Origin = { owner: "acme", repo: "widgets" };
-const URL = pushUrl(ORIGIN);
+const URL = remoteUrl(ORIGIN);
 const TOKEN = "ghp_thisIsTheSecretTokenValue";
 
 const HEAD = "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111";
@@ -101,7 +101,7 @@ describe("requiring signed commits", () => {
       repo: strictRepo(git),
       github: new GitHub(api.fetch, ORIGIN, TOKEN),
       origin: ORIGIN,
-      pushUrl: URL,
+      remoteUrl: URL,
       token: TOKEN,
     };
 

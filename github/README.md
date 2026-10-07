@@ -1,8 +1,8 @@
 # github
 
-A [Swarmforge](https://github.com/CrypticSwarm/Swarmforge) tong that pushes
-branches and opens, reads, and edits pull requests for the repository checked out
-in your session workspace.
+A [Swarmforge](https://github.com/CrypticSwarm/Swarmforge) tong that fetches and
+pushes branches and opens, reads, and edits pull requests for the repository
+checked out in your session workspace.
 
 ## What it holds
 
@@ -19,6 +19,7 @@ with `initialize`.
 
 | Verb | Params | What it does |
 | --- | --- | --- |
+| `fetch_origin` | none | `git fetch origin` for the workspace's repository: every branch into `refs/remotes/origin/*`, plus new tags that point into them. Never prunes, and writes no `FETCH_HEAD`. |
 | `push_branch` | none | Pushes the branch you have checked out to its GitHub repository and moves the local `refs/remotes/origin/<branch>` to match. Never force-pushes. |
 | `create_pr` | `title`, `body?`, `base?`, `draft?` | Pushes the branch as above, then opens a pull request from it. `base` defaults to the repository's default branch. |
 | `get_pr` | `number` | Reads one pull request: its title, description, branches, and whether it is open, draft, closed, or merged. |
@@ -91,6 +92,24 @@ Two things follow from that:
 A remote pointing anywhere but `github.com` stops startup rather than aiming the
 token at an unknown server.
 
+## Fetching
+
+`fetch_origin` fetches the pinned URL a push uses, with `git fetch origin`'s
+refspec, `+refs/heads/*:refs/remotes/origin/*`, and the tags that follow. It
+differs from `git fetch origin` in three ways:
+
+- **It never prunes**, whatever the workspace config says, so a branch deleted on
+  GitHub stays published as far as [`git-signing`](../git-signing/) is concerned.
+  A force-pushed branch does move its `origin/` ref, and commits dropped from it
+  count as unpublished again.
+- **It writes no `FETCH_HEAD`**: with a URL and an explicit refspec, git marks
+  every branch for merge. Use `origin/<branch>`.
+- **It skips submodules**, whose fetch would carry the token to their remotes.
+
+A branch deleted on GitHub and recreated as `<name>/<more>` collides with the
+stale `origin/<name>`. The fetch fails but lists the refs that did move; delete
+the stale ref with `git update-ref -d` and fetch again.
+
 ## Push updates the remote-tracking ref, deliberately
 
 Pushing to a URL rather than to a named remote means git does not update
@@ -161,7 +180,7 @@ so a commit whose message opens with `gpgsig ` does not pass.
 
 | Grant | Why |
 | --- | --- |
-| `mounts: [workspace:rw]` | The tong reads `origin` to learn which repository it serves, and writes `refs/remotes/origin/<branch>` after a push. No working-tree file is touched. |
+| `mounts: [workspace:rw]` | The tong reads `origin` to learn which repository it serves, writes `refs/remotes/origin/<branch>` after a push, and writes fetched objects and refs on a fetch. No working-tree file is touched. |
 | `lifecycle: session` | It holds a credential and mounts the workspace. A `shared` tong outlives the session and cannot mount the workspace at all. |
 | `env: GITHUB_TOKEN` | The token itself. |
 | `env: GITHUB_TONG_REQUIRE_SIGNED_COMMITS` | Optional, not a credential. `"true"` refuses to push unsigned commits; see above. |
@@ -174,7 +193,7 @@ itself; actually restricting egress to those hosts is the launcher's job.
 
 Use a **fine-grained personal access token scoped to this one repository**, with:
 
-- **Contents: read and write** — pushing
+- **Contents: read and write** — fetching and pushing
 - **Pull requests: read and write** — opening, reading, and editing pull requests,
   over REST and the GraphQL draft mutations
 
@@ -186,10 +205,10 @@ single repository at all.
 Where it goes at runtime:
 
 - To the GitHub API, as an `Authorization: Bearer` header.
-- To `git push`, through `GIT_ASKPASS`, in the environment of that one child
-  process. Never on a command line — `/proc/<pid>/cmdline` is readable by any
-  process in the container, which rules out `http.extraheader` and a token in the
-  URL.
+- To `git push` and `git fetch`, through `GIT_ASKPASS`, in the environment of
+  that one child process. Never on a command line — `/proc/<pid>/cmdline` is
+  readable by any process in the container, which rules out `http.extraheader`
+  and a token in the URL.
 
 ## Hardening the workspace's git
 
@@ -206,17 +225,20 @@ The rest of `.git` stays writable, which is all the agent and this tong need.
 
 Every git invocation here also overrides the dangerous keys on the command line —
 `core.hooksPath`, `core.fsmonitor`, `core.gitProxy`, `credential.helper`,
-`protocol.ext.allow`, `push.recurseSubmodules`, and `push.followTags` — and the
-push passes `--no-verify`.
+`protocol.ext.allow`, `push.recurseSubmodules`, `push.followTags`,
+`fetch.bundleURI`, and `core.alternateRefsCommand`. The push and the fetch also
+clear `remote.<url>.url` and `remote.<url>.pushurl` for the pinned URL, since a
+remote named after it would redirect both. `GIT_NO_LAZY_FETCH=1` stops a partial
+clone fetching from its promisor remote. The push passes `--no-verify`, and the
+fetch `--no-recurse-submodules`.
 
 Treat that list as a second layer rather than as the boundary. It cannot be
 exhaustive, and two gaps are structural rather than oversights: git resolves
 `http.<url>.*` by longest URL match, so a workspace `http.https://github.com/.proxy`
-outranks a generic `-c http.proxy=` no matter what this tong passes; and `-c` can
-add config but never remove it, so an existing `url.<base>.insteadOf` entry —
-which rewrites even a command-line push URL, aiming the askpass-supplied token at
-whatever host the rewrite names — cannot be neutralized from the command line at
-all. Containment lives in the mount.
+outranks a generic `-c http.proxy=` no matter what this tong passes; and `-c`
+cannot remove an existing `url.<base>.insteadOf` entry, which rewrites even a
+command-line URL and aims the askpass-supplied token at whatever host the rewrite
+names. Containment lives in the mount.
 
 ## Enabling it
 
@@ -272,9 +294,10 @@ make clean
 
 `make test` covers the security boundary: origin parsing and everything it
 rejects, that the token never reaches argv and reaches git's environment only for
-the push, the exact push argv including the absence of any force flag and that
-the refspec pins the sha the tong read rather than a branch name a concurrent
-commit could move, the config hardening, the remote-tracking ref update, that
+the push and the fetch, the exact push and fetch argv including the absence of
+any force flag on the push and that the refspec pins the sha the tong read rather
+than a branch name a concurrent commit could move, that a partly failed fetch
+still reports what moved, the config hardening, the tracking-ref update, that
 a rejected push opens no pull request, the signed-commit gate: which commits
 it asks about, that a signature in a commit message does not satisfy it, and that
 a commit it cannot read is a refusal rather than a pass, and the edit path: that a

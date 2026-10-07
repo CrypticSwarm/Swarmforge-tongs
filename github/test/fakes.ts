@@ -16,14 +16,19 @@ export type GitCall = {
   verb: string[];
 };
 
+/** Output for a rejection path. `--porcelain` puts the per-ref verdict on stdout. */
+export type GitFailure = { stderr: string; stdout?: string };
+
 export type FakeGitOptions = {
   branch?: string | null;
   head?: string;
   originUrl?: string | null;
   isRepo?: boolean;
-  /** Output for the rejection paths. `--porcelain` puts the per-ref verdict on stdout. */
-  pushFails?: { stderr: string; stdout?: string };
+  pushFails?: GitFailure;
   pushUpToDate?: boolean;
+  /** `fetch --porcelain` stdout on success. */
+  fetchOutput?: string;
+  fetchFails?: GitFailure;
   updateRefFails?: boolean;
   /** What rev-list reports as reachable from HEAD but from no origin ref, oldest first. */
   unpushed?: string[];
@@ -43,8 +48,10 @@ export class FakeGit {
   head: string;
   originUrl: string | null;
   isRepo: boolean;
-  pushFails: { stderr: string; stdout?: string } | undefined;
+  pushFails: GitFailure | undefined;
   pushUpToDate: boolean;
+  fetchOutput: string;
+  fetchFails: GitFailure | undefined;
   updateRefFails: boolean;
   unpushed: string[];
   signed: Set<string>;
@@ -58,6 +65,8 @@ export class FakeGit {
     this.isRepo = options.isRepo ?? true;
     this.pushFails = options.pushFails;
     this.pushUpToDate = options.pushUpToDate ?? false;
+    this.fetchOutput = options.fetchOutput ?? "";
+    this.fetchFails = options.fetchFails;
     this.updateRefFails = options.updateRefFails ?? false;
     this.unpushed = options.unpushed ?? [];
     this.signed = new Set(options.signed ?? []);
@@ -70,6 +79,10 @@ export class FakeGit {
     return this.calls.find((call) => call.verb[0] === "push");
   }
 
+  get fetchCall(): GitCall | undefined {
+    return this.calls.find((call) => call.verb[0] === "fetch");
+  }
+
   callsTo(verb: string): GitCall[] {
     return this.calls.filter((call) => call.verb[0] === verb);
   }
@@ -78,8 +91,8 @@ export class FakeGit {
     return { exitCode: 0, stdout: Buffer.from(stdout, "utf8"), stderr: "" };
   }
 
-  private fail(message: string): RunResult {
-    return { exitCode: 1, stdout: Buffer.alloc(0), stderr: message };
+  private fail(message: string, stdout = ""): RunResult {
+    return { exitCode: 1, stdout: Buffer.from(stdout, "utf8"), stderr: message };
   }
 
   readonly run: Run = async (command, args, options) => {
@@ -153,18 +166,16 @@ export class FakeGit {
         return this.branch ? this.ok(`${this.branch}\n`) : this.fail("HEAD is detached");
 
       case "push":
-        if (this.pushFails) {
-          return {
-            exitCode: 1,
-            stdout: Buffer.from(this.pushFails.stdout ?? "", "utf8"),
-            stderr: this.pushFails.stderr,
-          };
-        }
+        if (this.pushFails) return this.fail(this.pushFails.stderr, this.pushFails.stdout);
         return this.ok(
           this.pushUpToDate
             ? `To github.com\n=\trefs/heads/x:refs/heads/x\t[up to date]\nDone\n`
             : `To github.com\n\trefs/heads/x:refs/heads/x\t0000000..${this.head.slice(0, 7)}\nDone\n`,
         );
+
+      case "fetch":
+        if (this.fetchFails) return this.fail(this.fetchFails.stderr, this.fetchFails.stdout);
+        return this.ok(this.fetchOutput);
 
       case "update-ref": {
         if (this.updateRefFails) return this.fail("cannot lock ref");
@@ -177,6 +188,17 @@ export class FakeGit {
         return this.fail(`unexpected git verb: ${name}`);
     }
   }
+}
+
+/** The `-c key=value` pairs of an argv. */
+export function configPairs(args: readonly string[]): Map<string, string> {
+  const pairs = new Map<string, string>();
+  for (let i = 0; i < args.length - 1; i++) {
+    if (args[i] !== "-c") continue;
+    const [key, ...rest] = args[i + 1].split("=");
+    pairs.set(key, rest.join("="));
+  }
+  return pairs;
 }
 
 export type FetchCall = {

@@ -1,25 +1,15 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { pushUrl, type Origin } from "../src/origin.js";
+import { remoteUrl, type Origin } from "../src/origin.js";
 import { Repo, RepoError } from "../src/repo.js";
-import { ASKPASS, FakeGit, WORKSPACE } from "./fakes.js";
+import { ASKPASS, FakeGit, WORKSPACE, configPairs } from "./fakes.js";
 
 const ORIGIN: Origin = { owner: "acme", repo: "widgets" };
-const URL = pushUrl(ORIGIN);
+const URL = remoteUrl(ORIGIN);
 const TOKEN = "ghp_thisIsTheSecretTokenValue";
 
 function repoFor(git: FakeGit): Repo {
   return new Repo(git.run, WORKSPACE, ASKPASS, false);
-}
-
-function configPairs(args: readonly string[]): Map<string, string> {
-  const pairs = new Map<string, string>();
-  for (let i = 0; i < args.length - 1; i++) {
-    if (args[i] !== "-c") continue;
-    const [key, ...rest] = args[i + 1].split("=");
-    pairs.set(key, rest.join("="));
-  }
-  return pairs;
 }
 
 describe("push argv", () => {
@@ -125,6 +115,9 @@ describe("push argv", () => {
     // `on-demand` would push submodules to their own remotes, carrying GIT_ASKPASS.
     assert.equal(pairs.get("push.recurseSubmodules"), "no");
     assert.equal(pairs.get("push.followTags"), "false");
+    // A workspace remote named after the URL would redirect the push.
+    assert.equal(pairs.get(`remote.${URL}.url`), "");
+    assert.equal(pairs.get(`remote.${URL}.pushurl`), "");
   });
 });
 
