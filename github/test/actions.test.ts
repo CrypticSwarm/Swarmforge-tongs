@@ -64,11 +64,12 @@ describe("workflow runs", () => {
   });
 
   it("says when there were more runs than it reports", async () => {
-    const api = new FakeGitHubApi(runsRoute(Array.from({ length: 11 }, (_, i) => ({ id: i + 1 }))));
+    const api = new FakeGitHubApi(runsRoute([{ id: 1 }], 11));
 
     const { runs, more } = await client(api).workflowRuns(SHA);
 
-    assert.equal(runs.length, 10);
+    assert.equal(new URL(api.calls[0].url).searchParams.get("per_page"), "10");
+    assert.equal(runs.length, 1);
     assert.equal(more, true);
   });
 
@@ -101,9 +102,7 @@ describe("jobs", () => {
   });
 
   it("says when a run has more jobs than one page", async () => {
-    const route = jobsRoute(100, [{ id: 7 }]);
-    const key = `GET ${ACTIONS}/runs/100/jobs`;
-    const api = new FakeGitHubApi({ [key]: { status: 200, json: { ...(route[key].json as object), total_count: 101 } } });
+    const api = new FakeGitHubApi(jobsRoute(100, [{ id: 7 }], 101));
 
     assert.equal((await client(api).runJobs(100)).more, true);
   });
@@ -158,14 +157,10 @@ describe("job logs", () => {
   });
 
   it("refuses a redirect to anywhere but an absolute https URL", async () => {
-    for (const [headers, expected] of [
-      [{ location: "http://evil.example/x" }, /non-https/],
-      [{ location: "/relative" }, /nowhere usable/],
-      [undefined, /nowhere usable/],
-    ] as const) {
+    for (const headers of [{ location: "http://evil.example/x" }, { location: "/relative" }, undefined]) {
       const api = new FakeGitHubApi({ [`GET ${ACTIONS}/jobs/7/logs`]: { status: 302, headers } });
 
-      await assert.rejects(() => client(api).jobLog(7), expected);
+      await assert.rejects(() => client(api).jobLog(7), /other than an https URL/);
       assert.equal(api.calls.length, 1);
     }
   });

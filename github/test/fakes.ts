@@ -400,15 +400,16 @@ export function jobJson(job: JobState) {
   };
 }
 
-export function runsRoute(runs: RunState[]) {
-  return { [`GET ${ACTIONS}/runs`]: { status: 200, json: { total_count: runs.length, workflow_runs: runs.map(runJson) } } };
+/** `total` is how many GitHub says there are, when that is more than it lists. */
+export function runsRoute(runs: RunState[], total = runs.length) {
+  return { [`GET ${ACTIONS}/runs`]: { status: 200, json: { total_count: total, workflow_runs: runs.map(runJson) } } };
 }
 
-export function jobsRoute(runId: number, jobs: JobState[]) {
+export function jobsRoute(runId: number, jobs: JobState[], total = jobs.length) {
   return {
     [`GET ${ACTIONS}/runs/${runId}/jobs`]: {
       status: 200,
-      json: { total_count: jobs.length, jobs: jobs.map((job) => jobJson({ runId, ...job })) },
+      json: { total_count: total, jobs: jobs.map((job) => jobJson({ runId, ...job })) },
     },
   };
 }

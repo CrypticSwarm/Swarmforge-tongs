@@ -215,18 +215,12 @@ export async function ciLog(context: Context, input: CiLogInput): Promise<string
   const forward = input.start !== undefined;
   let first = forward ? input.start! - 1 : Math.max(rangeStart, rangeEnd - limit);
   let end = forward ? Math.min(rangeEnd, first + limit) : rangeEnd;
-  const shown: string[] = [];
-  let budget = MAX_LOG_OUTPUT_CHARS;
-  for (let i = forward ? first : end - 1; forward ? i < end : i >= first; forward ? i++ : i--) {
-    const text = clip(lines[i].text);
-    budget -= text.length + 1;
-    if (budget < 0 && shown.length > 0) {
-      if (forward) end = i;
-      else first = i + 1;
-      break;
-    }
-    if (forward) shown.push(text);
-    else shown.unshift(text);
+  const shown = lines.slice(first, end).map((line) => clip(line.text));
+  let size = shown.reduce((sum, text) => sum + text.length + 1, 0);
+  while (size > MAX_LOG_OUTPUT_CHARS && shown.length > 1) {
+    size -= (forward ? shown.pop()! : shown.shift()!).length + 1;
+    if (forward) end--;
+    else first++;
   }
 
   const call = `call ci_log with ${step ? `step=${step.number}, ` : ""}start=`;

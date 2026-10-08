@@ -250,14 +250,15 @@ export class GitHub {
   /** The Actions runs for `sha`, newest first, each at its latest attempt. */
   async workflowRuns(sha: string): Promise<{ runs: WorkflowRun[]; more: boolean }> {
     if (!COMMIT_SHA.test(sha)) throw new GitHubError(`'${sha.slice(0, 40)}' is not a commit sha`, 0);
-    const query = new URLSearchParams({ head_sha: sha, per_page: String(MAX_RUNS + 1) });
+    const query = new URLSearchParams({ head_sha: sha, per_page: String(MAX_RUNS) });
     const data = (await this.request("GET", `/repos/${this.repoPath}/actions/runs?${query}`)) as {
       workflow_runs?: unknown;
+      total_count?: number;
     };
     if (!Array.isArray(data?.workflow_runs)) {
       throw new GitHubError("GitHub answered the workflow run lookup without a list of runs", 0);
     }
-    return { runs: data.workflow_runs.slice(0, MAX_RUNS).map(parseRun), more: data.workflow_runs.length > MAX_RUNS };
+    return { runs: data.workflow_runs.map(parseRun), more: (data.total_count ?? 0) > data.workflow_runs.length };
   }
 
   /** The jobs of a run's latest attempt. */
@@ -281,20 +282,14 @@ export class GitHub {
   async jobLog(id: number): Promise<{ text: string; truncated: boolean }> {
     const path = `${this.jobPath(id)}/logs`;
     const response = await this.send("GET", path, undefined, "manual");
-    if (response.ok) return readLog(id, response);
+    if (response.ok) return readTail(id, response);
     if (response.status < 300 || response.status >= 400) return this.fail(response, path);
     await response.body?.cancel();
 
-    let target: URL;
-    try {
-      target = new URL(response.headers.get("location") ?? "");
-    } catch {
-      throw new GitHubError(`GitHub redirected the log of job ${id} nowhere usable`, 0);
+    const target = URL.parse(response.headers.get("location") ?? "");
+    if (target?.protocol !== "https:") {
+      throw new GitHubError(`GitHub redirected the log of job ${id} somewhere other than an https URL`, 0);
     }
-    if (target.protocol !== "https:") {
-      throw new GitHubError(`GitHub redirected the log of job ${id} to a non-https URL`, 0);
-    }
-
     let download: Response;
     try {
       download = await this.fetchImpl(target, {
@@ -308,7 +303,7 @@ export class GitHub {
     if (!download.ok) {
       throw new GitHubError(`downloading the log of job ${id} failed (${download.status})`, download.status);
     }
-    return readLog(id, download);
+    return readTail(id, download);
   }
 
   /**
@@ -481,14 +476,6 @@ function assertId(value: number, what: string): number {
   return value;
 }
 
-async function readLog(id: number, response: Response): Promise<{ text: string; truncated: boolean }> {
-  try {
-    return await readTail(response, MAX_LOG_BYTES, MAX_LOG_READ_BYTES);
-  } catch (err) {
-    throw downloadError(id, err);
-  }
-}
-
 /** A fetch error's message may carry the signed URL, so only its kind is kept. */
 function downloadError(id: number, err: unknown): GitHubError {
   if (err instanceof GitHubError) return err;
@@ -497,31 +484,36 @@ function downloadError(id: number, err: unknown): GitHubError {
   return new GitHubError(`cannot download the log of job ${id}: ${kind}`, 0);
 }
 
-/** At most `max` bytes from the end of the body, reading at most `limit`; a partial first line is dropped. */
-async function readTail(response: Response, max: number, limit: number): Promise<{ text: string; truncated: boolean }> {
+/** The last MAX_LOG_BYTES of the body, reading at most MAX_LOG_READ_BYTES; a partial first line is dropped. */
+async function readTail(id: number, response: Response): Promise<{ text: string; truncated: boolean }> {
   const chunks: Uint8Array[] = [];
   let kept = 0;
   let read = 0;
   let lastDropped: number | undefined;
   const reader = response.body?.getReader();
-  for (let next = await reader?.read(); next && !next.done; next = await reader?.read()) {
-    read += next.value.length;
-    if (read > limit) {
-      await reader?.cancel();
-      throw new GitHubError(`the log is over ${limit / 1024 / 1024} MiB, more than this tong will read`, 0);
+  try {
+    for (let next = await reader?.read(); next && !next.done; next = await reader?.read()) {
+      read += next.value.length;
+      if (read > MAX_LOG_READ_BYTES) {
+        await reader?.cancel();
+        const mib = MAX_LOG_READ_BYTES / 1024 / 1024;
+        throw new GitHubError(`the log is over ${mib} MiB, more than this tong will read`, 0);
+      }
+      chunks.push(next.value);
+      kept += next.value.length;
+      while (kept - chunks[0].length >= MAX_LOG_BYTES) {
+        const dropped = chunks.shift()!;
+        kept -= dropped.length;
+        lastDropped = dropped[dropped.length - 1];
+      }
     }
-    chunks.push(next.value);
-    kept += next.value.length;
-    while (kept - chunks[0].length >= max) {
-      const dropped = chunks.shift()!;
-      kept -= dropped.length;
-      lastDropped = dropped[dropped.length - 1];
-    }
+  } catch (err) {
+    throw downloadError(id, err);
   }
   let bytes = Buffer.concat(chunks);
-  if (bytes.length > max) {
-    lastDropped = bytes[bytes.length - max - 1];
-    bytes = bytes.subarray(bytes.length - max);
+  if (bytes.length > MAX_LOG_BYTES) {
+    lastDropped = bytes[bytes.length - MAX_LOG_BYTES - 1];
+    bytes = bytes.subarray(bytes.length - MAX_LOG_BYTES);
   }
   const text = bytes.toString("utf8");
   const midLine = lastDropped !== undefined && lastDropped !== 0x0a;

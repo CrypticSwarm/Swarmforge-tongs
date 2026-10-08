@@ -6,7 +6,6 @@ import { remoteUrl, type Origin } from "../src/origin.js";
 import { Repo } from "../src/repo.js";
 import type { Context } from "../src/server.js";
 import {
-  ACTIONS,
   ASKPASS,
   FakeGit,
   FakeGitHubApi,
@@ -140,16 +139,15 @@ describe("ci_status", () => {
   });
 
   it("says when there are more runs or jobs than it shows", async () => {
-    const runs = Array.from({ length: 11 }, (_, i) => ({ id: i + 1 }));
-    const routes: Record<string, { status: number; json: unknown }> = runsRoute(runs);
-    for (const { id } of runs.slice(0, 10)) {
-      const key = `GET ${ACTIONS}/runs/${id}/jobs`;
-      routes[key] = { status: 200, json: { ...(jobsRoute(id, [{ id }])[key].json as object), total_count: id === 1 ? 2 : 1 } };
-    }
+    const api = new FakeGitHubApi({
+      ...runsRoute([{ id: 1 }, { id: 2 }], 11),
+      ...jobsRoute(1, [{ id: 1 }], 2),
+      ...jobsRoute(2, [{ id: 2 }]),
+    });
 
-    const text = await ciStatus(contextFor(new FakeGitHubApi(routes)), {});
+    const text = await ciStatus(contextFor(api), {});
 
-    assert.match(text, /: 10\+ workflow runs, newest first\./);
+    assert.match(text, /: 2\+ workflow runs, newest first\./);
     assert.equal(text.match(/\.\.\.and more jobs than the 1 shown/g)?.length, 1);
   });
 
