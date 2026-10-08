@@ -303,20 +303,6 @@ export async function updatePr(context: Context, input: UpdatePrInput): Promise<
   return renderUpdate(before, after);
 }
 
-function textResult(text: string) {
-  return { content: [{ type: "text" as const, text }] };
-}
-
-function errorResult(verb: string, err: unknown) {
-  // Also to the container log: an MCP client may truncate or reformat this, and
-  // the log is the only copy an operator can read after the fact.
-  console.error(`${verb} failed:`, err);
-  return {
-    content: [{ type: "text" as const, text: `${verb}: error: ${(err as Error).message}` }],
-    isError: true,
-  };
-}
-
 export function buildServer(context: Context): McpServer {
   const instructions = context.repo.requiresSignedCommits
     ? `${INSTRUCTIONS}\n\n${SIGNED_COMMITS_INSTRUCTIONS}`
@@ -332,10 +318,31 @@ export function buildServer(context: Context): McpServer {
     },
   );
 
-  server.registerTool(
+  // Registers a verb whose handler returns text; a throw becomes an `isError` result.
+  function verb<Schema extends z.ZodObject>(
+    name: string,
+    config: { description: string; inputSchema: Schema },
+    run: (context: Context, input: z.infer<Schema>) => Promise<string>,
+  ): void {
+    // Widened so the SDK's callback type resolves; the SDK has parsed `input` with this schema.
+    const inputSchema: z.ZodObject = config.inputSchema;
+    server.registerTool(name, { title: name, description: config.description, inputSchema }, async (input) => {
+      try {
+        return { content: [{ type: "text" as const, text: await run(context, input as z.infer<Schema>) }] };
+      } catch (err) {
+        // Also to the container log, the only copy an operator can read after the fact.
+        console.error(`${name} failed:`, err);
+        return {
+          content: [{ type: "text" as const, text: `${name}: error: ${(err as Error).message}` }],
+          isError: true,
+        };
+      }
+    });
+  }
+
+  verb(
     "push_branch",
     {
-      title: "push_branch",
       description: describe(
         "Push the branch currently checked out in the workspace to its origin repository on GitHub, and " +
           "update the local remote-tracking ref to match. Never force-pushes. Fails on a detached HEAD or a " +
@@ -344,38 +351,24 @@ export function buildServer(context: Context): McpServer {
       ),
       inputSchema: z.strictObject({}),
     },
-    async () => {
-      try {
-        return textResult(await pushBranch(context));
-      } catch (err) {
-        return errorResult("push_branch", err);
-      }
-    },
+    pushBranch,
   );
 
-  server.registerTool(
+  verb(
     "fetch_origin",
     {
-      title: "fetch_origin",
       description:
         "Fetch every branch of this workspace's GitHub repository into refs/remotes/origin/*, plus new tags, " +
         "as `git fetch origin` does. Never prunes, and writes no FETCH_HEAD: use origin/<branch>. Local " +
         "branches and the working tree are untouched. No parameters: the repository is the pinned one.",
       inputSchema: z.strictObject({}),
     },
-    async () => {
-      try {
-        return textResult(await fetchOrigin(context));
-      } catch (err) {
-        return errorResult("fetch_origin", err);
-      }
-    },
+    fetchOrigin,
   );
 
-  server.registerTool(
+  verb(
     "create_pr",
     {
-      title: "create_pr",
       description: describe(
         "Push the branch currently checked out and open a pull request from it. The head branch and the " +
           "repository come from the workspace; only the text and the base branch are yours to choose. Set " +
@@ -390,19 +383,12 @@ export function buildServer(context: Context): McpServer {
         draft: z.boolean().optional().describe("Open the pull request as a draft."),
       }),
     },
-    async (input) => {
-      try {
-        return textResult(await createPr(context, input));
-      } catch (err) {
-        return errorResult("create_pr", err);
-      }
-    },
+    createPr,
   );
 
-  server.registerTool(
+  verb(
     "get_pr",
     {
-      title: "get_pr",
       description:
         "Read one pull request of this workspace's repository: its title, its description, the branches it " +
         "goes between, and whether it is open, draft, closed, or merged. The repository is not a parameter " +
@@ -411,19 +397,12 @@ export function buildServer(context: Context): McpServer {
         number: positiveId.describe("Pull request number, as it appears in the repository."),
       }),
     },
-    async (input) => {
-      try {
-        return textResult(await getPr(context, input));
-      } catch (err) {
-        return errorResult("get_pr", err);
-      }
-    },
+    getPr,
   );
 
-  server.registerTool(
+  verb(
     "find_pr",
     {
-      title: "find_pr",
       description:
         "List the pull requests of this workspace's repository that were opened from a given head branch, " +
         "newest first, including closed and merged ones: each with its number, URL, base branch, and whether " +
@@ -434,19 +413,12 @@ export function buildServer(context: Context): McpServer {
         head: branchName.describe("Name of the head branch, without any owner prefix."),
       }),
     },
-    async (input) => {
-      try {
-        return textResult(await findPr(context, input));
-      } catch (err) {
-        return errorResult("find_pr", err);
-      }
-    },
+    findPr,
   );
 
-  server.registerTool(
+  verb(
     "update_pr",
     {
-      title: "update_pr",
       description:
         "Edit an open pull request of this workspace's repository. Every field is optional and only the ones " +
         "you pass change; each one you do pass replaces its current value outright, so call get_pr first and " +
@@ -464,19 +436,12 @@ export function buildServer(context: Context): McpServer {
           .describe("true converts the pull request to a draft; false marks it ready for review."),
       }),
     },
-    async (input) => {
-      try {
-        return textResult(await updatePr(context, input));
-      } catch (err) {
-        return errorResult("update_pr", err);
-      }
-    },
+    updatePr,
   );
 
-  server.registerTool(
+  verb(
     "ci_status",
     {
-      title: "ci_status",
       description:
         "Report the GitHub Actions workflow runs for one commit of this workspace's repository, newest first: " +
         "each run's state and duration, and each job's id, state, queue time, run time, and the step it " +
@@ -487,19 +452,12 @@ export function buildServer(context: Context): McpServer {
         pr: positiveId.optional().describe("Pull request number, to check its head commit. Not with 'sha'."),
       }),
     },
-    async (input) => {
-      try {
-        return textResult(await ciStatus(context, input));
-      } catch (err) {
-        return errorResult("ci_status", err);
-      }
-    },
+    ciStatus,
   );
 
-  server.registerTool(
+  verb(
     "ci_job",
     {
-      title: "ci_job",
       description:
         "List one GitHub Actions job's steps, each with its state, its start relative to the job's, and how " +
         "long it took, plus the job's runner, queue time, and run time.",
@@ -507,19 +465,12 @@ export function buildServer(context: Context): McpServer {
         job_id: positiveId.describe("Job id, as ci_status reports it."),
       }),
     },
-    async (input) => {
-      try {
-        return textResult(await ciJob(context, input));
-      } catch (err) {
-        return errorResult("ci_job", err);
-      }
-    },
+    ciJob,
   );
 
-  server.registerTool(
+  verb(
     "ci_log",
     {
-      title: "ci_log",
       description:
         "Read part of one GitHub Actions job's plain-text log, timestamps included. By default, the last " +
         "lines of the step that failed, or of the whole log if none did. 'step' limits it to one step; " +
@@ -537,13 +488,7 @@ export function buildServer(context: Context): McpServer {
           .describe(`Most lines to show. Defaults to ${DEFAULT_LOG_LINES}.`),
       }),
     },
-    async (input) => {
-      try {
-        return textResult(await ciLog(context, input));
-      } catch (err) {
-        return errorResult("ci_log", err);
-      }
-    },
+    ciLog,
   );
 
   return server;
