@@ -17,15 +17,30 @@ import type { AddressInfo } from "node:net";
 import { after, before, beforeEach, describe, it } from "node:test";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { createApp } from "../src/app.js";
+import { MAX_LOG_LINES } from "../src/ci.js";
 import { GitHub, MAX_BODY, MAX_TITLE } from "../src/github.js";
 import { remoteUrl, type Origin } from "../src/origin.js";
 import { Repo } from "../src/repo.js";
 import { MAX_TOOL_INPUT_ELEMENTS, type Context } from "../src/server.js";
-import { ASKPASS, FakeGit, FakeGitHubApi, REPO_ROUTE, WORKSPACE, editablePrRoutes, listPrsRoute, prRoute } from "./fakes.js";
+import {
+  ASKPASS,
+  FakeGit,
+  FakeGitHubApi,
+  REPO_ROUTE,
+  WORKSPACE,
+  editablePrRoutes,
+  jobRoute,
+  jobsRoute,
+  listPrsRoute,
+  logRoutes,
+  prRoute,
+  runsRoute,
+} from "./fakes.js";
 
 const ORIGIN: Origin = { owner: "acme", repo: "widgets" };
 const TOKEN = "ghp_thisIsTheSecretTokenValue";
 const OPEN_PR = { number: 7, title: "Add a thing", body: "why", base: "main", head: "feature" };
+const VERBS = ["ci_job", "ci_log", "ci_status", "create_pr", "fetch_origin", "find_pr", "get_pr", "push_branch", "update_pr"];
 
 /**
  * The body cap from src/app.ts, written out rather than imported so that moving
@@ -163,19 +178,15 @@ describe("protocol eras", () => {
 
       const { tools } = await client.listTools();
       const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool.inputSchema]));
-      assert.deepEqual(Object.keys(byName).sort(), [
-        "create_pr",
-        "fetch_origin",
-        "find_pr",
-        "get_pr",
-        "push_branch",
-        "update_pr",
-      ]);
+      assert.deepEqual(Object.keys(byName).sort(), VERBS);
 
       // What the strict zod 4 schemas list: no extra keys, the right required set,
       // and every parameter still described.
       const expected: Record<string, { properties: string[]; required: string[] | undefined }> = {
         push_branch: { properties: [], required: undefined },
+        ci_status: { properties: ["pr", "sha"], required: undefined },
+        ci_job: { properties: ["job_id"], required: ["job_id"] },
+        ci_log: { properties: ["job_id", "limit", "start", "step"], required: ["job_id"] },
         fetch_origin: { properties: [], required: undefined },
         create_pr: { properties: ["base", "body", "draft", "title"], required: ["title"] },
         find_pr: { properties: ["head"], required: ["head"] },
@@ -228,7 +239,7 @@ describe("protocol eras", () => {
   it("a 2025-era client still connects through the stateless fallback", async () => {
     const client = await connect("legacy");
     assert.equal(client.getProtocolEra(), "legacy");
-    assert.equal((await client.listTools()).tools.length, 6);
+    assert.equal((await client.listTools()).tools.length, VERBS.length);
     const result = await client.callTool({ name: "get_pr", arguments: { number: 7 } });
     assert.notEqual(result.isError, true, text(result));
     assert.match(text(result), /#7 feature -> main \(open\)/);
@@ -284,6 +295,20 @@ describe("tool calls over HTTP", () => {
     const result = await client.callTool({ name: "update_pr", arguments: { number: 7, title: "Better" } });
     assert.match(text(result), /Updated pull request #7: title/);
     assert.match(text(await client.callTool({ name: "get_pr", arguments: { number: 7 } })), /title: Better/);
+  });
+});
+
+describe("CI over HTTP", () => {
+  it("ci_status, ci_job, and ci_log read a failed run down to its log", async () => {
+    git.refs.set("refs/remotes/origin/feature", git.head);
+    const failing = { id: 7, conclusion: "failure", steps: [{ name: "Test", conclusion: "failure" }] };
+    Object.assign(api.routes, runsRoute([{ id: 100, conclusion: "failure" }]), jobsRoute(100, [failing]));
+    Object.assign(api.routes, jobRoute(failing), logRoutes(7, "2026-10-07T12:00:04.5000000Z boom\n"));
+    const client = await connect();
+
+    assert.match(text(await client.callTool({ name: "ci_status", arguments: {} })), /job 7 test: failure at step 1 \(Test\)/);
+    assert.match(text(await client.callTool({ name: "ci_job", arguments: { job_id: 7 } })), /1\. Test: failure/);
+    assert.match(text(await client.callTool({ name: "ci_log", arguments: { job_id: 7 } })), /Z boom$/);
   });
 });
 
@@ -429,7 +454,7 @@ describe("per-request server construction", () => {
   it("sequential connections in every negotiation mode each succeed", async () => {
     for (const mode of [...MODES, ...MODES]) {
       const client = await connect(mode);
-      assert.equal((await client.listTools()).tools.length, 6);
+      assert.equal((await client.listTools()).tools.length, VERBS.length);
     }
   });
 
@@ -449,7 +474,7 @@ describe("per-request server construction", () => {
     );
     assert.equal(results.length, modes.length * 5);
     for (const result of results) {
-      if (typeof result === "number") assert.equal(result, 6);
+      if (typeof result === "number") assert.equal(result, VERBS.length);
       else assert.match(result, /#7 feature -> main \(open\)/);
     }
   });
@@ -531,6 +556,17 @@ describe("untrusted arguments", () => {
       ["find_pr", { head: "x", repo: "evil/elsewhere" }],
       ["find_pr", {}],
       ["update_pr", { number: 7, state: "merged" }],
+      ["ci_status", { sha: "abc123" }],
+      ["ci_status", { sha: "A".repeat(40) }],
+      ["ci_status", { pr: 0 }],
+      ["ci_job", { job_id: -1 }],
+      ["ci_log", { job_id: 7, limit: 0 }],
+      ["ci_log", { job_id: 7, limit: MAX_LOG_LINES + 1 }],
+      ["ci_log", { job_id: 7, start: 0 }],
+      ["ci_log", { job_id: 7, step: 0 }],
+      ["ci_log", {}],
+      ["ci_job", { job_id: 7, repo: "evil/elsewhere" }],
+      ["ci_status", { ref: "main" }],
     ];
     for (const [name, args] of refused) {
       const result = await client.callTool({ name, arguments: args });

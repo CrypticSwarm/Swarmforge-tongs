@@ -1,8 +1,8 @@
 # github
 
 A [Swarmforge](https://github.com/CrypticSwarm/Swarmforge) tong that fetches and
-pushes branches and opens, reads, and edits pull requests for the repository
-checked out in your session workspace.
+pushes branches, manages pull requests, and reads GitHub Actions CI for the
+repository checked out in your session workspace.
 
 ## What it holds
 
@@ -25,6 +25,9 @@ with `initialize`.
 | `get_pr` | `number` | Reads one pull request: its title, description, branches, and whether it is open, draft, closed, or merged. |
 | `find_pr` | `head` | Lists the pull requests opened from a branch of this repository, newest first and up to 10, closed and merged ones included: each with its number, URL, branches, and whether it is open, draft, closed, or merged. For when you have a branch name and no number. Read one in full with `get_pr`. |
 | `update_pr` | `number`, `title?`, `body?`, `base?`, `state?`, `draft?` | Edits an open pull request. Only the fields you pass change, and each replaces its current value. |
+| `ci_status` | `sha?`, `pr?` | Lists the Actions runs for one commit, newest first and up to 10, with each job's id, state, queue and run time, and the step it failed at. See [Reading CI](#reading-ci). |
+| `ci_job` | `job_id` | Lists a job's steps with their state, start offset, and duration, plus its runner. |
+| `ci_log` | `job_id`, `step?`, `start?`, `limit?` | Returns part of a job's plain-text log, timestamps included. Defaults to the end of the failed step, or of the whole log. |
 
 `create_pr` pushes for you; there is no need to call `push_branch` first.
 
@@ -32,6 +35,28 @@ An unknown parameter is never passed through to a verb: it is refused (or, for a
 key the JSON-RPC layer discards, dropped), as is a call carrying more parameters
 than the fullest legal one. A refused call never runs its verb, and nothing
 reaches git or GitHub.
+
+## Reading CI
+
+`ci_status` with no parameters reports on `origin/<branch>` for the branch checked
+out, which `push_branch` and `fetch_origin` keep current, and says when `HEAD`
+differs from it.
+`pr` checks a pull request's head instead, and `sha` any commit. A ref name is not
+accepted, since resolving one would mean running git on a caller's string.
+
+`ci_log` cuts a step out of the log by the step's start and end times. GitHub
+reports those to the second, so a line from a neighboring step can show at either
+edge. Output is capped in lines and characters, long lines are clipped, and
+control characters are removed; the reply says which `start` continues it. Of a
+very large log only the end is kept, and past a hard limit it is not read at all.
+
+- **A log is untrusted.** It is the output of whatever code CI ran, including a
+  pull request from a fork.
+- **Secret masking is GitHub's, and partial.** GitHub masks the values of
+  registered secrets, not values derived from them. Anyone who can read the
+  repository's Actions logs sees the same thing.
+- **Actions only.** Checks from other apps and legacy commit statuses are not read.
+- **Logs expire**, after 90 days unless the repository sets otherwise.
 
 ## Editing a pull request
 
@@ -69,11 +94,12 @@ At startup the tong reads `remote.origin.url` from the mounted workspace, parses
 it into `<owner>/<repo>`, and holds that for the life of the container. There is
 no verb parameter and no configuration key for the repository.
 
-Two caller values reach a URL rather than a request body. A pull request number is
-bounded to a positive integer at the MCP surface and again in the API client, which
-builds a path out of nothing else. The `head` branch name of `find_pr` is a query
-value, so it is encoded as one: a name containing `&`, `#`, or `=` stays a single
-value and cannot add or override a parameter. The owner half of the lookup is always
+Some caller values reach a URL rather than a request body. A pull request number
+or job id is bounded to a positive integer at the MCP surface and again in the API
+client, which builds a path out of nothing else. The `head` branch name of `find_pr`
+and the `sha` of `ci_status` are query values, so they are encoded as such: a value
+containing `&`, `#`, or `=` stays a single value and cannot add or override a
+parameter. The owner half of the lookup is always
 the pinned owner, so `find_pr` matches only branches of the repository itself, not
 of forks. The GraphQL draft
 mutations see no caller value at all — the node id they address is the one GitHub
@@ -185,8 +211,9 @@ so a commit whose message opens with `gpgsig ` does not pass.
 | `env: GITHUB_TOKEN` | The token itself. |
 | `env: GITHUB_TONG_REQUIRE_SIGNED_COMMITS` | Optional, not a credential. `"true"` refuses to push unsigned commits; see above. |
 
-No `docker-socket`. The only hosts this tong contacts are `github.com` and
-`api.github.com` — but that is its behavior, not a boundary it can impose on
+No `docker-socket`. The only hosts this tong contacts are `github.com`,
+`api.github.com`, and the log storage `api.github.com` redirects a log download to —
+but that is its behavior, not a boundary it can impose on
 itself; actually restricting egress to those hosts is the launcher's job.
 
 ## The token
@@ -196,6 +223,8 @@ Use a **fine-grained personal access token scoped to this one repository**, with
 - **Contents: read and write** — fetching and pushing
 - **Pull requests: read and write** — opening, reading, and editing pull requests,
   over REST and the GraphQL draft mutations
+- **Actions: read** — the `ci_*` verbs. Startup does not check for it; without it
+  those verbs fail with a `403` that names it, and the rest still work.
 
 A classic `repo` token also works but is account-wide, which throws away the
 containment the rest of this design is built on. An SSH deploy key is not an
@@ -204,7 +233,8 @@ single repository at all.
 
 Where it goes at runtime:
 
-- To the GitHub API, as an `Authorization: Bearer` header.
+- To the GitHub API, as an `Authorization: Bearer` header. Not to the signed URL a
+  log download redirects to, which the tong follows without it and never returns.
 - To `git push` and `git fetch`, through `GIT_ASKPASS`, in the environment of
   that one child process. Never on a command line — `/proc/<pid>/cmdline` is
   readable by any process in the container, which rules out `http.extraheader`
@@ -303,7 +333,10 @@ it asks about, that a signature in a commit message does not satisfy it, and tha
 a commit it cannot read is a refusal rather than a pass, and the edit path: that a
 pull request number is bounded on both sides of the client seam, that an edit sends
 only the keys it was given, and that a failed draft mutation still says the text
-edit landed. It drives a fake `git` through the single
+edit landed, and the CI path: that a log redirect is followed without the token and
+only to `https` and that a failed download never reports its URL, that a sha or id is
+checked before it reaches a URL, that log lines and GitHub's names lose control
+characters, and how a log is cut by step and capped. It drives a fake `git` through the single
 `Run` seam in `src/exec.ts` and a fake `fetch` through `src/github.ts`, so it
 needs no git and no credential; the only real subprocesses spawned are the test
 runner's own `node`, exercising `realRun`'s exit, signal, and truncation paths.

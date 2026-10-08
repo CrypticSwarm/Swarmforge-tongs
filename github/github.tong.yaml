@@ -12,12 +12,12 @@
 # The secret reference below is a PLACEHOLDER. `REPLACE-ME` is not a real vault
 # path and will fail to resolve until you edit it. `op` is whatever provider name
 # you declared in ~/.swarmforge/secret-providers.yaml; use yours.
-description: Fetches and pushes branches and opens, reads, and edits pull requests for the workspace's repository, with a token the agent never holds.
+description: Fetches and pushes branches, manages pull requests, and reads Actions CI for the workspace's repository, with a token the agent never holds.
 lifecycle: session
 image: swarmforge-tong-github:latest
 env:
   # A fine-grained personal access token scoped to just this repository, with
-  # Contents: read and write, and Pull requests: read and write.
+  # Contents: read and write, Pull requests: read and write, and Actions: read.
   GITHUB_TOKEN: ${secret:op:op://REPLACE-ME/github-tong/token}
   # "true" refuses any push that would add a commit carrying no signature, which
   # pairs with the git-signing tong: it signs exactly the commits this checks.
