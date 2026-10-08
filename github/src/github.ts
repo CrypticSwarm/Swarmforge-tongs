@@ -1,9 +1,7 @@
 // The GitHub REST client.
 //
-// Everything the agent supplies travels from here as JSON in a request body, with
-// one exception: a pull request number is a path segment. The pinned `owner` and
-// `repo` are the only other values that reach a URL. `fetch` is injected so the
-// path is testable without a token or a network.
+// Caller values reach a URL only as an `assertId` path segment or a URLSearchParams
+// value; everything else travels as a JSON body. `fetch` is injected for tests.
 
 import type { Origin } from "./origin.js";
 
@@ -203,11 +201,9 @@ export class GitHub {
    * The pull requests of the pinned repository whose head is `branch`, open or not,
    * newest first.
    *
-   * The branch name is the second caller-supplied value that reaches a URL, here as
-   * a query value, so it goes through URLSearchParams rather than into a template:
-   * a name containing `&`, `#`, or `=` stays one value and cannot add a parameter or
-   * cut the URL short. The owner half of `head` is the pinned owner, never the
-   * caller's, so this only ever matches branches of the repository itself.
+   * The branch goes through URLSearchParams, so `&`, `#`, or `=` cannot add a
+   * parameter or cut the URL short. The owner half of `head` is the pinned owner,
+   * never the caller's, so this only ever matches branches of the repository itself.
    */
   async findPullRequests(branch: string): Promise<{ pullRequests: PullRequest[]; more: boolean }> {
     if (typeof branch !== "string" || branch.length === 0 || branch.length > 255) {

@@ -14,13 +14,13 @@ const MAX_LINE_CHARS = 1000;
 /** Conclusions that did not fail. */
 const PASSED = new Set(["success", "skipped", "neutral"]);
 
-// Whole OSC, CSI, and two-byte escapes; then C0 but tab, DEL, C1, and bidi or zero-width marks.
+// Whole OSC, CSI, and two-byte escapes; then C0 but tab, DEL, C1, line separators, and bidi or zero-width marks.
 const UNSAFE = new RegExp(
   [
     /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?/,
     /\x1b\[[0-?]*[ -/]*[@-~]/,
     /\x1b[@-_]?/,
-    /[\x00-\x08\x0a-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/,
+    /[\x00-\x08\x0a-\x1f\x7f-\x9f\u061c\u200b-\u200f\u2028-\u202e\u2060\u2066-\u2069\ufeff]/,
   ]
     .map((part) => part.source)
     .join("|"),
@@ -168,10 +168,9 @@ export function parseLog(text: string): LogLine[] {
 }
 
 /** Step times are whole seconds, so the window takes in all of its first and last second. */
-export function stepRange(lines: readonly LogLine[], step: JobStep): [number, number] {
-  if (!step.startedAt) throw new Error(`step ${step.number} (${clean(step.name)}) never started, so it has no log.`);
-  const from = Math.floor(Date.parse(step.startedAt) / 1000) * 1000;
-  const to = step.completedAt ? Math.floor(Date.parse(step.completedAt) / 1000) * 1000 + 1000 : Infinity;
+export function stepRange(lines: readonly LogLine[], startedAt: string, completedAt: string | null): [number, number] {
+  const from = Math.floor(Date.parse(startedAt) / 1000) * 1000;
+  const to = completedAt ? Math.floor(Date.parse(completedAt) / 1000) * 1000 + 1000 : Infinity;
   const first = lines.findIndex((line) => line.time >= from);
   if (first === -1) return [lines.length, lines.length];
   const end = lines.findIndex((line, i) => i >= first && line.time >= to);
@@ -187,8 +186,7 @@ function clip(line: string): string {
 export type CiLogInput = { job_id: number; step?: number; start?: number; limit?: number };
 
 export async function ciLog(context: Context, input: CiLogInput): Promise<string> {
-  const [job, log] = await Promise.all([context.github.job(input.job_id), context.github.jobLog(input.job_id)]);
-  const lines = parseLog(log.text);
+  const job = await context.github.job(input.job_id);
   const limit = input.limit ?? DEFAULT_LOG_LINES;
 
   // A failed job's log opens at the step that failed, unless the caller is paging.
@@ -201,7 +199,11 @@ export async function ciLog(context: Context, input: CiLogInput): Promise<string
   if (input.step !== undefined && !step) {
     throw new Error(`job ${job.id} has no step ${input.step}; ci_job lists its steps.`);
   }
-  const [rangeStart, rangeEnd] = step ? stepRange(lines, step) : [0, lines.length];
+  if (step && !step.startedAt) throw new Error(`step ${step.number} (${clean(step.name)}) never started, so it has no log.`);
+
+  const log = await context.github.jobLog(input.job_id);
+  const lines = parseLog(log.text);
+  const [rangeStart, rangeEnd] = step?.startedAt ? stepRange(lines, step.startedAt, step.completedAt) : [0, lines.length];
   const scope = step
     ? `step ${step.number} (${clean(step.name)}), log lines ${rangeStart + 1}-${rangeEnd}`
     : `log lines 1-${lines.length}`;
@@ -223,7 +225,7 @@ export async function ciLog(context: Context, input: CiLogInput): Promise<string
     else first++;
   }
 
-  const call = `call ci_log with ${step ? `step=${step.number}, ` : ""}start=`;
+  const call = `call ci_log with ${step ? `step=${step.number}, ` : ""}${input.limit ? `limit=${limit}, ` : ""}start=`;
   const footer = [
     ...(first > rangeStart ? [`Earlier: ${call}${Math.max(rangeStart, first - shown.length) + 1}.`] : []),
     ...(end < rangeEnd ? [`Later: ${call}${end + 1}.`] : []),

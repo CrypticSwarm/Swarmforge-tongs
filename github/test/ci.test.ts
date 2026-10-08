@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { MAX_LOG_OUTPUT_CHARS, ciJob, ciLog, ciStatus, clean, parseLog, stepRange } from "../src/ci.js";
-import { GitHub, type JobStep } from "../src/github.js";
+import { GitHub } from "../src/github.js";
 import { remoteUrl, type Origin } from "../src/origin.js";
 import { Repo } from "../src/repo.js";
 import type { Context } from "../src/server.js";
@@ -229,7 +229,7 @@ describe("ci_log", () => {
     const text = await ciLog(contextFor(logApi(job, STEPPED_LOG)), { job_id: 8, limit: 2 });
 
     assert.match(text, /log lines 1-9; showing 8-9\./);
-    assert.match(text, /Earlier: call ci_log with start=6\.$/);
+    assert.match(text, /Earlier: call ci_log with limit=2, start=6\.$/);
   });
 
   it("reads a named step, and pages forward within it", async () => {
@@ -238,14 +238,14 @@ describe("ci_log", () => {
     const first = await ciLog(contextFor(api), { job_id: 8, step: 3, start: 7, limit: 2 });
 
     assert.deepEqual(body(first), [`${T(10)} line 10`, `${T(11)} line 11`]);
-    assert.match(first, /Later: call ci_log with step=3, start=9\.$/);
+    assert.match(first, /Later: call ci_log with step=3, limit=2, start=9\.$/);
   });
 
   it("pages the whole log once 'start' is given", async () => {
     const text = await ciLog(contextFor(logApi(STEPPED, STEPPED_LOG)), { job_id: 8, start: 1, limit: 3 });
 
     assert.match(text, /log lines 1-9; showing 1-3\./);
-    assert.match(text, /Later: call ci_log with start=4\.$/);
+    assert.match(text, /Later: call ci_log with limit=3, start=4\.$/);
   });
 
   it("refuses a start outside the range, and says when a step has no lines", async () => {
@@ -275,6 +275,7 @@ describe("ci_log", () => {
 
     await assert.rejects(() => ciLog(contextFor(api), { job_id: 8, step: 9 }), /has no step 9/);
     await assert.rejects(() => ciLog(contextFor(api), { job_id: 8, step: 4 }), /never started/);
+    assert.ok(!api.calls.some((call) => call.url.includes("/logs")), "a bad step must not download the log");
   });
 
   it("strips terminal escapes and clips very long lines", async () => {
@@ -300,7 +301,7 @@ describe("ci_log", () => {
       assert.match(body(text).at(-1)!, / 0999 z+$/);
       const [from, to] = shown(text);
       assert.equal(to, 1000);
-      assert.match(text, new RegExp(`Earlier: call ci_log with start=${from - (to - from + 1)}\\.$`));
+      assert.match(text, new RegExp(`Earlier: call ci_log with limit=1000, start=${from - (to - from + 1)}\\.$`));
     });
 
     it("paging forward from where it stopped", async () => {
@@ -309,7 +310,15 @@ describe("ci_log", () => {
       assert.ok(text.length < MAX_LOG_OUTPUT_CHARS + 200, String(text.length));
       const [from, to] = shown(text);
       assert.equal(from, 1);
-      assert.match(text, new RegExp(`Later: call ci_log with start=${to + 1}\\.$`));
+      assert.match(text, new RegExp(`Later: call ci_log with limit=1000, start=${to + 1}\\.$`));
+    });
+
+    it("stepping back by what it showed, when paging forward", async () => {
+      const text = await ciLog(contextFor(logApi(job, log)), { job_id: 8, start: 500, limit: 1000 });
+
+      const [from, to] = shown(text);
+      assert.equal(from, 500);
+      assert.match(text, new RegExp(`Earlier: call ci_log with limit=1000, start=${from - (to - from + 1)}\\.$`, "m"));
     });
   });
 
@@ -327,18 +336,11 @@ describe("ci_log", () => {
 describe("clean", () => {
   it("keeps tabs and printable text, and puts a name on one line", () => {
     assert.equal(clean("a\tb\nc\r\u200bd"), "a\tb cd");
+    assert.equal(clean("a\u2028b\u2029c\u2060\ufeff\u061cd"), "abcd");
   });
 });
 
 describe("log parsing", () => {
-  const step = (startedAt: string | null, completedAt: string | null): JobStep => ({
-    number: 1,
-    name: "s",
-    state: "success",
-    completed: completedAt !== null,
-    startedAt,
-    completedAt,
-  });
 
   it("gives an unstamped line the time of the one before", () => {
     const lines = parseLog(`﻿${T(4)} a\r\ncontinued\n${T(6)} b\n`);
@@ -353,8 +355,8 @@ describe("log parsing", () => {
   it("takes in the whole first and last second of a step", () => {
     const lines = parseLog(STEPPED_LOG);
 
-    assert.deepEqual(stepRange(lines, step("2026-10-07T12:00:06Z", "2026-10-07T12:00:09Z")), [2, 6]);
-    assert.deepEqual(stepRange(lines, step("2026-10-07T12:00:06Z", null)), [2, 9]);
-    assert.deepEqual(stepRange(lines, step("2026-10-07T12:01:00Z", "2026-10-07T12:01:01Z")), [9, 9]);
+    assert.deepEqual(stepRange(lines, "2026-10-07T12:00:06Z", "2026-10-07T12:00:09Z"), [2, 6]);
+    assert.deepEqual(stepRange(lines, "2026-10-07T12:00:06Z", null), [2, 9]);
+    assert.deepEqual(stepRange(lines, "2026-10-07T12:01:00Z", "2026-10-07T12:01:01Z"), [9, 9]);
   });
 });
