@@ -319,16 +319,14 @@ export function buildServer(context: Context): McpServer {
   );
 
   // Registers a verb whose handler returns text; a throw becomes an `isError` result.
-  function verb<Schema extends z.ZodObject>(
+  function verb<Shape extends z.ZodRawShape>(
     name: string,
-    config: { description: string; inputSchema: Schema },
-    run: (context: Context, input: z.infer<Schema>) => Promise<string>,
+    config: { description: string; inputSchema: z.ZodObject<Shape> },
+    run: (context: Context, input: z.infer<z.ZodObject<Shape>>) => Promise<string>,
   ): void {
-    // Widened so the SDK's callback type resolves; the SDK has parsed `input` with this schema.
-    const inputSchema: z.ZodObject = config.inputSchema;
-    server.registerTool(name, { title: name, description: config.description, inputSchema }, async (input) => {
+    server.registerTool(name, { title: name, ...config }, async (input) => {
       try {
-        return { content: [{ type: "text" as const, text: await run(context, input as z.infer<Schema>) }] };
+        return { content: [{ type: "text" as const, text: await run(context, input) }] };
       } catch (err) {
         // Also to the container log, the only copy an operator can read after the fact.
         console.error(`${name} failed:`, err);
