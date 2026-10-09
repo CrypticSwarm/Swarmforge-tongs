@@ -296,6 +296,15 @@ describe("tool calls over HTTP", () => {
     assert.match(text(result), /Updated pull request #7: title/);
     assert.match(text(await client.callTool({ name: "get_pr", arguments: { number: 7 } })), /title: Better/);
   });
+
+  it("a handler that throws becomes an error result naming the verb, and is logged", async (t) => {
+    const logged = t.mock.method(console, "error", () => {});
+    const client = await connect();
+    const result = await client.callTool({ name: "get_pr", arguments: { number: 99 } });
+    assert.equal(result.isError, true);
+    assert.match(text(result), /^get_pr: error: /);
+    assert.equal(logged.mock.calls[0]?.arguments[0], "get_pr failed:");
+  });
 });
 
 describe("CI over HTTP", () => {
