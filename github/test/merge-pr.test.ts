@@ -1,24 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { GitHub, GitHubError, type MergeMethod } from "../src/github.js";
-import { remoteUrl, type Origin } from "../src/origin.js";
-import { Repo } from "../src/repo.js";
-import { mergePr, type Context } from "../src/server.js";
-import { ASKPASS, FakeGit, FakeGitHubApi, WORKSPACE, mergeRoutes, type FakeResponse, type MergeableState } from "./fakes.js";
+import { GitHubError, type MergeMethod } from "../src/github.js";
+import { mergePr } from "../src/server.js";
+import { FakeGitHubApi, contextFor, mergeRoutes, type FakeResponse, type MergeableState } from "./fakes.js";
 
-const ORIGIN: Origin = { owner: "acme", repo: "widgets" };
-const TOKEN = "ghp_thisIsTheSecretTokenValue";
 const MERGE = "PUT https://api.github.com/repos/acme/widgets/pulls/7/merge";
-
-function contextFor(api: FakeGitHubApi): Context {
-  return {
-    repo: new Repo(new FakeGit().run, WORKSPACE, ASKPASS, false),
-    github: new GitHub(api.fetch, ORIGIN, TOKEN),
-    origin: ORIGIN,
-    remoteUrl: remoteUrl(ORIGIN),
-    token: TOKEN,
-  };
-}
 
 function apiFor(pr: Partial<MergeableState> = {}, merge?: FakeResponse): FakeGitHubApi {
   return new FakeGitHubApi(mergeRoutes({ number: 7, ...pr }, merge));

@@ -1,11 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { GitHub, GitHubError, MAX_LOG_BYTES, MAX_LOG_READ_BYTES, NoAnswer, type Fetch } from "../src/github.js";
-import type { Origin } from "../src/origin.js";
-import { ACTIONS, FakeGitHubApi, LOG_HOST, getPrRoute, jobsRoute, logRoutes, runsRoute } from "./fakes.js";
+import { ACTIONS, FakeGitHubApi, LOG_HOST, ORIGIN, TOKEN, getPrRoute, jobsRoute, logRoutes, runsRoute } from "./fakes.js";
 
-const ORIGIN: Origin = { owner: "acme", repo: "widgets" };
-const TOKEN = "ghp_thisIsTheSecretTokenValue";
 const SHA = "abcdef0123456789abcdef0123456789abcdef01";
 
 function client(api: FakeGitHubApi): GitHub {

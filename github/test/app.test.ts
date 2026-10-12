@@ -19,14 +19,16 @@ import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/cli
 import { createApp } from "../src/app.js";
 import { MAX_LOG_LINES } from "../src/ci.js";
 import { GitHub, MAX_BODY, MAX_TITLE } from "../src/github.js";
-import { remoteUrl, type Origin } from "../src/origin.js";
+import { remoteUrl } from "../src/origin.js";
 import { Repo } from "../src/repo.js";
 import { MAX_TOOL_INPUT_ELEMENTS, type Context } from "../src/server.js";
 import {
   ASKPASS,
   FakeGit,
   FakeGitHubApi,
+  ORIGIN,
   REPO_ROUTE,
+  TOKEN,
   WORKSPACE,
   editablePrRoutes,
   jobRoute,
@@ -39,8 +41,6 @@ import {
   type FetchCall,
 } from "./fakes.js";
 
-const ORIGIN: Origin = { owner: "acme", repo: "widgets" };
-const TOKEN = "ghp_thisIsTheSecretTokenValue";
 const OPEN_PR = { number: 7, title: "Add a thing", body: "why", base: "main", head: "feature" };
 const VERBS = ["ci_job", "ci_log", "ci_status", "create_pr", "fetch_origin", "find_pr", "get_pr", "merge_pr", "push_branch", "update_pr"];
 

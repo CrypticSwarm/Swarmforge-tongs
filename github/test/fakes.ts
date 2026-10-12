@@ -3,10 +3,15 @@
 // without git installed, without a token, and without a network.
 
 import type { Run, RunResult } from "../src/exec.js";
-import type { Fetch, MergeState } from "../src/github.js";
+import { GitHub, type Fetch, type MergeState } from "../src/github.js";
+import { remoteUrl, type Origin } from "../src/origin.js";
+import { Repo } from "../src/repo.js";
+import type { Context } from "../src/server.js";
 
 export const WORKSPACE = "/workspace";
 export const ASKPASS = "/app/askpass.sh";
+export const ORIGIN: Origin = { owner: "acme", repo: "widgets" };
+export const TOKEN = "ghp_thisIsTheSecretTokenValue";
 
 export type GitCall = {
   args: string[];
@@ -458,5 +463,16 @@ export function mergeRoutes(pr: MergeableState, merge: FakeResponse = { status: 
       return { status: 200, json: { data: { repository: { pullRequest: Object.fromEntries(asked) } } } };
     },
     [`PUT /repos/acme/widgets/pulls/${pr.number}/merge`]: merge,
+  };
+}
+
+/** A verb's context over the fakes, for the pinned acme/widgets. */
+export function contextFor(api = new FakeGitHubApi(), git = new FakeGit()): Context {
+  return {
+    repo: new Repo(git.run, WORKSPACE, ASKPASS, false),
+    github: new GitHub(api.fetch, ORIGIN, TOKEN),
+    origin: ORIGIN,
+    remoteUrl: remoteUrl(ORIGIN),
+    token: TOKEN,
   };
 }

@@ -1,23 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { GitHub } from "../src/github.js";
-import { remoteUrl, type Origin } from "../src/origin.js";
-import { Repo } from "../src/repo.js";
-import { updatePr, type Context } from "../src/server.js";
-import { ASKPASS, FakeGit, FakeGitHubApi, WORKSPACE, editablePrRoutes } from "./fakes.js";
-
-const ORIGIN: Origin = { owner: "acme", repo: "widgets" };
-const TOKEN = "ghp_thisIsTheSecretTokenValue";
-
-function contextFor(api: FakeGitHubApi): Context {
-  return {
-    repo: new Repo(new FakeGit().run, WORKSPACE, ASKPASS, false),
-    github: new GitHub(api.fetch, ORIGIN, TOKEN),
-    origin: ORIGIN,
-    remoteUrl: remoteUrl(ORIGIN),
-    token: TOKEN,
-  };
-}
+import { updatePr } from "../src/server.js";
+import { FakeGitHubApi, TOKEN, contextFor, editablePrRoutes } from "./fakes.js";
 
 const OPEN_PR = { number: 7, title: "Add a thing", body: "why", base: "main", head: "feature" };
 

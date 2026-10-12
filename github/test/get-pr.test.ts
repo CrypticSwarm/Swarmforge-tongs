@@ -1,23 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { GitHub } from "../src/github.js";
-import { remoteUrl, type Origin } from "../src/origin.js";
-import { Repo } from "../src/repo.js";
-import { getPr, positiveId, type Context } from "../src/server.js";
-import { ASKPASS, FakeGit, FakeGitHubApi, WORKSPACE, getPrRoute } from "./fakes.js";
-
-const ORIGIN: Origin = { owner: "acme", repo: "widgets" };
-const TOKEN = "ghp_thisIsTheSecretTokenValue";
-
-function contextFor(api: FakeGitHubApi): Context {
-  return {
-    repo: new Repo(new FakeGit().run, WORKSPACE, ASKPASS, false),
-    github: new GitHub(api.fetch, ORIGIN, TOKEN),
-    origin: ORIGIN,
-    remoteUrl: remoteUrl(ORIGIN),
-    token: TOKEN,
-  };
-}
+import { getPr, positiveId } from "../src/server.js";
+import { FakeGitHubApi, ORIGIN, TOKEN, contextFor, getPrRoute } from "./fakes.js";
 
 describe("get_pr", () => {
   it("reports the text, the branches, and the state", async () => {

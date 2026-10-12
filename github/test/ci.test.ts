@@ -2,14 +2,12 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { MAX_LOG_OUTPUT_CHARS, ciJob, ciLog, ciStatus, clean, parseLog, stepRange } from "../src/ci.js";
 import { GitHub } from "../src/github.js";
-import { remoteUrl, type Origin } from "../src/origin.js";
-import { Repo } from "../src/repo.js";
-import type { Context } from "../src/server.js";
 import {
-  ASKPASS,
   FakeGit,
   FakeGitHubApi,
-  WORKSPACE,
+  ORIGIN,
+  TOKEN,
+  contextFor,
   getPrRoute,
   jobRoute,
   jobsRoute,
@@ -18,20 +16,10 @@ import {
   type JobState,
 } from "./fakes.js";
 
-const ORIGIN: Origin = { owner: "acme", repo: "widgets" };
-const TOKEN = "ghp_thisIsTheSecretTokenValue";
 const PUSHED = "1111111111111111111111111111111111111111";
 const OTHER = "3333333333333333333333333333333333333333";
 
-function contextFor(api: FakeGitHubApi, git = pushedGit()): Context {
-  return {
-    repo: new Repo(git.run, WORKSPACE, ASKPASS, false),
-    github: new GitHub(api.fetch, ORIGIN, TOKEN),
-    origin: ORIGIN,
-    remoteUrl: remoteUrl(ORIGIN),
-    token: TOKEN,
-  };
-}
+const pushedContext = (api: FakeGitHubApi, git = pushedGit()) => contextFor(api, git);
 
 function pushedGit(head = PUSHED): FakeGit {
   const git = new FakeGit({ head });
@@ -50,7 +38,7 @@ describe("ci_status", () => {
   it("defaults to the checked-out branch as origin has it", async () => {
     const api = new FakeGitHubApi({ ...runsRoute([{ id: 100 }]), ...jobsRoute(100, [{ id: 7 }]) });
 
-    const text = await ciStatus(contextFor(api), {});
+    const text = await ciStatus(pushedContext(api), {});
 
     assert.deepEqual(runsOf(api), [PUSHED]);
     assert.match(text, /^CI for origin\/feature at 111111111111: 1 workflow run, newest first\./);
@@ -60,7 +48,7 @@ describe("ci_status", () => {
   it("says when HEAD is not what origin has", async () => {
     const api = new FakeGitHubApi(runsRoute([]));
 
-    const text = await ciStatus(contextFor(api, pushedGit(OTHER)), {});
+    const text = await ciStatus(pushedContext(api, pushedGit(OTHER)), {});
 
     assert.deepEqual(runsOf(api), [PUSHED]);
     assert.match(text, /HEAD is at 333333333333, which is not what origin\/feature has\./);
@@ -72,7 +60,7 @@ describe("ci_status", () => {
       ...runsRoute([]),
     });
 
-    const text = await ciStatus(contextFor(api), { pr: 9 });
+    const text = await ciStatus(pushedContext(api), { pr: 9 });
 
     assert.deepEqual(runsOf(api), [OTHER]);
     assert.match(text, /#9 \(topic at 333333333333\)/);
@@ -81,7 +69,7 @@ describe("ci_status", () => {
   it("checks a given sha", async () => {
     const api = new FakeGitHubApi(runsRoute([]));
 
-    await ciStatus(contextFor(api), { sha: OTHER });
+    await ciStatus(pushedContext(api), { sha: OTHER });
 
     assert.deepEqual(runsOf(api), [OTHER]);
   });
@@ -89,22 +77,22 @@ describe("ci_status", () => {
   it("refuses both a sha and a pull request", async () => {
     const api = new FakeGitHubApi();
 
-    await assert.rejects(() => ciStatus(contextFor(api), { sha: OTHER, pr: 9 }), /not both/);
+    await assert.rejects(() => ciStatus(pushedContext(api), { sha: OTHER, pr: 9 }), /not both/);
     assert.equal(api.calls.length, 0);
   });
 
   it("needs a branch origin has, by default", async () => {
     const api = new FakeGitHubApi();
 
-    await assert.rejects(() => ciStatus(contextFor(api, new FakeGit({ branch: null })), {}), /HEAD is detached/);
-    await assert.rejects(() => ciStatus(contextFor(api, new FakeGit()), {}), /origin has no feature; push it first/);
+    await assert.rejects(() => ciStatus(pushedContext(api, new FakeGit({ branch: null })), {}), /HEAD is detached/);
+    await assert.rejects(() => ciStatus(pushedContext(api, new FakeGit()), {}), /origin has no feature; push it first/);
     assert.equal(api.calls.length, 0);
   });
 
   it("says runs may not have started yet", async () => {
     const api = new FakeGitHubApi(runsRoute([]));
 
-    assert.match(await ciStatus(contextFor(api), {}), /No workflow runs for .*\. If it was just pushed, runs can take/);
+    assert.match(await ciStatus(pushedContext(api), {}), /No workflow runs for .*\. If it was just pushed, runs can take/);
   });
 
   it("names each job's state, timing, and the step it failed at", async () => {
@@ -117,7 +105,7 @@ describe("ci_status", () => {
       ]),
     });
 
-    const text = await ciStatus(contextFor(api), {});
+    const text = await ciStatus(pushedContext(api), {});
 
     assert.match(text, /^CI \(push\): failure · ran 3m12s · run 100, attempt 2$/m);
     assert.match(text, /^https:\/\/github\.com\/acme\/widgets\/actions\/runs\/100$/m);
@@ -132,7 +120,7 @@ describe("ci_status", () => {
       ...jobsRoute(100, [{ id: 8, status: "in_progress", conclusion: null, steps: [{ name: "Test", conclusion: "failure" }] }]),
     });
 
-    const text = await ciStatus(contextFor(api), {});
+    const text = await ciStatus(pushedContext(api), {});
 
     assert.match(text, /^CI \(push\): in_progress · since 2026-10-07T12:00:00Z · run 100$/m);
     assert.match(text, /job 8 test: in_progress, step 1 \(Test\) failed/);
@@ -145,7 +133,7 @@ describe("ci_status", () => {
       ...jobsRoute(2, [{ id: 2 }]),
     });
 
-    const text = await ciStatus(contextFor(api), {});
+    const text = await ciStatus(pushedContext(api), {});
 
     assert.match(text, /: 2\+ workflow runs, newest first\./);
     assert.equal(text.match(/\.\.\.and more jobs than the 1 shown/g)?.length, 1);
@@ -154,14 +142,14 @@ describe("ci_status", () => {
   it("shows GitHub's names on one line, without control characters", async () => {
     const api = new FakeGitHubApi({ ...runsRoute([{ id: 100 }]), ...jobsRoute(100, [{ id: 7, name: "lint\njob 9 x: success\x1b[2J" }]) });
 
-    assert.match(await ciStatus(contextFor(api), {}), /^ {2}job 7 lint job 9 x: success: success · /m);
+    assert.match(await ciStatus(pushedContext(api), {}), /^ {2}job 7 lint job 9 x: success: success · /m);
   });
 
   it("refuses a pull request GitHub reports no head commit for", async () => {
     const pr = getPrRoute({ number: 9, title: "t", body: "b", base: "main", head: "topic" });
     (pr["GET /repos/acme/widgets/pulls/9"].json.head as { sha?: string }).sha = undefined;
 
-    await assert.rejects(() => ciStatus(contextFor(new FakeGitHubApi(pr)), { pr: 9 }), /no head commit for pull request #9/);
+    await assert.rejects(() => ciStatus(pushedContext(new FakeGitHubApi(pr)), { pr: 9 }), /no head commit for pull request #9/);
   });
 });
 
@@ -178,7 +166,7 @@ describe("ci_job", () => {
       }),
     );
 
-    const text = await ciJob(contextFor(api), { job_id: 8 });
+    const text = await ciJob(pushedContext(api), { job_id: 8 });
 
     assert.match(text, /^job 8 test: success · run 100, attempt 1$/m);
     assert.match(text, /^runner GitHub Actions 12 \(ubuntu-latest\) · queued 4s · ran 2m50s$/m);
@@ -217,7 +205,7 @@ function body(text: string): string[] {
 
 describe("ci_log", () => {
   it("opens a failed job's log at the step that failed", async () => {
-    const text = await ciLog(contextFor(logApi(STEPPED, STEPPED_LOG)), { job_id: 8 });
+    const text = await ciLog(pushedContext(logApi(STEPPED, STEPPED_LOG)), { job_id: 8 });
 
     assert.match(text, /^job 8 test \(failure\): step 2 \(Run tests\), log lines 3-6; showing 3-6\.$/m);
     assert.deepEqual(body(text), [6, 7, 8, 9].map((s) => `${T(s)} line ${s}`));
@@ -226,7 +214,7 @@ describe("ci_log", () => {
   it("shows the end of a job that did not fail", async () => {
     const job = { ...STEPPED, conclusion: "success", steps: [] };
 
-    const text = await ciLog(contextFor(logApi(job, STEPPED_LOG)), { job_id: 8, limit: 2 });
+    const text = await ciLog(pushedContext(logApi(job, STEPPED_LOG)), { job_id: 8, limit: 2 });
 
     assert.match(text, /log lines 1-9; showing 8-9\./);
     assert.match(text, /Earlier: call ci_log with limit=2, start=6\.$/);
@@ -235,14 +223,14 @@ describe("ci_log", () => {
   it("reads a named step, and pages forward within it", async () => {
     const api = logApi(STEPPED, STEPPED_LOG);
 
-    const first = await ciLog(contextFor(api), { job_id: 8, step: 3, start: 7, limit: 2 });
+    const first = await ciLog(pushedContext(api), { job_id: 8, step: 3, start: 7, limit: 2 });
 
     assert.deepEqual(body(first), [`${T(10)} line 10`, `${T(11)} line 11`]);
     assert.match(first, /Later: call ci_log with step=3, limit=2, start=9\.$/);
   });
 
   it("pages the whole log once 'start' is given", async () => {
-    const text = await ciLog(contextFor(logApi(STEPPED, STEPPED_LOG)), { job_id: 8, start: 1, limit: 3 });
+    const text = await ciLog(pushedContext(logApi(STEPPED, STEPPED_LOG)), { job_id: 8, start: 1, limit: 3 });
 
     assert.match(text, /log lines 1-9; showing 1-3\./);
     assert.match(text, /Later: call ci_log with limit=3, start=4\.$/);
@@ -251,30 +239,30 @@ describe("ci_log", () => {
   it("refuses a start outside the range, and says when a step has no lines", async () => {
     const api = logApi(STEPPED, STEPPED_LOG);
 
-    await assert.rejects(() => ciLog(contextFor(api), { job_id: 8, start: 10 }), /start=10 is outside log lines 1-9/);
-    await assert.rejects(() => ciLog(contextFor(api), { job_id: 8, step: 3, start: 2 }), /outside step 3 \(Post\), log lines 7-9/);
+    await assert.rejects(() => ciLog(pushedContext(api), { job_id: 8, start: 10 }), /start=10 is outside log lines 1-9/);
+    await assert.rejects(() => ciLog(pushedContext(api), { job_id: 8, step: 3, start: 2 }), /outside step 3 \(Post\), log lines 7-9/);
     const late = { ...STEPPED, steps: [{ name: "Late", started_at: "2026-10-07T12:05:00Z", completed_at: null }] };
-    assert.match(await ciLog(contextFor(logApi(late, STEPPED_LOG)), { job_id: 8, step: 1 }), /step 1 has no lines\.$/);
+    assert.match(await ciLog(pushedContext(logApi(late, STEPPED_LOG)), { job_id: 8, step: 1 }), /step 1 has no lines\.$/);
   });
 
   it("opens at the whole log when the failed step never started", async () => {
     const job = { ...STEPPED, conclusion: "cancelled", steps: [{ name: "Wait", conclusion: "cancelled", started_at: null }] };
 
-    assert.match(await ciLog(contextFor(logApi(job, STEPPED_LOG)), { job_id: 8 }), /: log lines 1-9; showing 1-9\./);
+    assert.match(await ciLog(pushedContext(logApi(job, STEPPED_LOG)), { job_id: 8 }), /: log lines 1-9; showing 1-9\./);
   });
 
   it("reads the end of a job still running", async () => {
     const job = { ...STEPPED, status: "in_progress", conclusion: null };
 
-    assert.match(await ciLog(contextFor(logApi(job, STEPPED_LOG)), { job_id: 8, limit: 1 }), /showing 9-9\.\n\n.* line 12$/m);
+    assert.match(await ciLog(pushedContext(logApi(job, STEPPED_LOG)), { job_id: 8, limit: 1 }), /showing 9-9\.\n\n.* line 12$/m);
   });
 
   it("refuses a step the job does not have, and one that never ran", async () => {
     const job = { ...STEPPED, steps: [...STEPPED.steps!, { name: "Skipped", started_at: null, completed_at: null }] };
     const api = logApi(job, STEPPED_LOG);
 
-    await assert.rejects(() => ciLog(contextFor(api), { job_id: 8, step: 9 }), /has no step 9/);
-    await assert.rejects(() => ciLog(contextFor(api), { job_id: 8, step: 4 }), /never started/);
+    await assert.rejects(() => ciLog(pushedContext(api), { job_id: 8, step: 9 }), /has no step 9/);
+    await assert.rejects(() => ciLog(pushedContext(api), { job_id: 8, step: 4 }), /never started/);
     assert.ok(!api.calls.some((call) => call.url.includes("/logs")), "a bad step must not download the log");
   });
 
@@ -282,7 +270,7 @@ describe("ci_log", () => {
     const log = `${T(4)} \x1b[36;1mcolored\x1b[0m\x07\x1b]8;;https://evil\x07\u202e\u009b\n${T(5)} ${"y".repeat(5000)}\n`;
     const job = { ...STEPPED, conclusion: "success" };
 
-    const lines = body(await ciLog(contextFor(logApi(job, log)), { job_id: 8 }));
+    const lines = body(await ciLog(pushedContext(logApi(job, log)), { job_id: 8 }));
 
     assert.equal(lines[0], `${T(4)} colored`);
     assert.match(lines[1], /y{900}\.\.\. \(\d+ more characters\)$/);
@@ -295,7 +283,7 @@ describe("ci_log", () => {
     const shown = (text: string) => text.match(/showing (\d+)-(\d+)\./)!.slice(1).map(Number);
 
     it("keeping the end, and stepping back by what it showed", async () => {
-      const text = await ciLog(contextFor(logApi(job, log)), { job_id: 8, limit: 1000 });
+      const text = await ciLog(pushedContext(logApi(job, log)), { job_id: 8, limit: 1000 });
 
       assert.ok(text.length < MAX_LOG_OUTPUT_CHARS + 200, String(text.length));
       assert.match(body(text).at(-1)!, / 0999 z+$/);
@@ -305,7 +293,7 @@ describe("ci_log", () => {
     });
 
     it("paging forward from where it stopped", async () => {
-      const text = await ciLog(contextFor(logApi(job, log)), { job_id: 8, start: 1, limit: 1000 });
+      const text = await ciLog(pushedContext(logApi(job, log)), { job_id: 8, start: 1, limit: 1000 });
 
       assert.ok(text.length < MAX_LOG_OUTPUT_CHARS + 200, String(text.length));
       const [from, to] = shown(text);
@@ -314,7 +302,7 @@ describe("ci_log", () => {
     });
 
     it("stepping back by what it showed, when paging forward", async () => {
-      const text = await ciLog(contextFor(logApi(job, log)), { job_id: 8, start: 500, limit: 1000 });
+      const text = await ciLog(pushedContext(logApi(job, log)), { job_id: 8, start: 500, limit: 1000 });
 
       const [from, to] = shown(text);
       assert.equal(from, 500);
