@@ -1,30 +1,15 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { GitHub, pushBlocker } from "../src/github.js";
-import { remoteUrl, type Origin } from "../src/origin.js";
-import { Repo } from "../src/repo.js";
-import { branchName, createPr, type Context } from "../src/server.js";
-import { ASKPASS, FakeGit, FakeGitHubApi, REPO_ROUTE, WORKSPACE, prRoute } from "./fakes.js";
-
-const ORIGIN: Origin = { owner: "acme", repo: "widgets" };
-const TOKEN = "ghp_thisIsTheSecretTokenValue";
-
-function contextFor(git: FakeGit, api: FakeGitHubApi): Context {
-  return {
-    repo: new Repo(git.run, WORKSPACE, ASKPASS, false),
-    github: new GitHub(api.fetch, ORIGIN, TOKEN),
-    origin: ORIGIN,
-    remoteUrl: remoteUrl(ORIGIN),
-    token: TOKEN,
-  };
-}
+import { pushBlocker } from "../src/github.js";
+import { branchName, createPr } from "../src/server.js";
+import { FakeGit, FakeGitHubApi, ORIGIN, REPO_ROUTE, TOKEN, contextFor, prRoute } from "./fakes.js";
 
 describe("create_pr", () => {
   it("derives head from the workspace and defaults base to the repository default", async () => {
     const git = new FakeGit({ branch: "feature" });
     const api = new FakeGitHubApi({ ...REPO_ROUTE, ...prRoute(7, "main", "feature") });
 
-    const text = await createPr(contextFor(git, api), { title: "Add a thing" });
+    const text = await createPr(contextFor(api, git), { title: "Add a thing" });
 
     assert.deepEqual(api.lastBody, {
       title: "Add a thing",
@@ -41,7 +26,7 @@ describe("create_pr", () => {
     const git = new FakeGit({ branch: "layer-two" });
     const api = new FakeGitHubApi({ ...REPO_ROUTE, ...prRoute(9, "layer-one", "layer-two") });
 
-    await createPr(contextFor(git, api), { title: "Layer two", base: "layer-one" });
+    await createPr(contextFor(api, git), { title: "Layer two", base: "layer-one" });
 
     assert.equal((api.lastBody as { base: string }).base, "layer-one");
     assert.ok(!api.calls.some((call) => call.method === "GET"));
@@ -51,7 +36,7 @@ describe("create_pr", () => {
     const git = new FakeGit();
     const api = new FakeGitHubApi({ ...REPO_ROUTE, ...prRoute(1, "main", "feature") });
 
-    await createPr(contextFor(git, api), { title: "t" });
+    await createPr(contextFor(api, git), { title: "t" });
 
     for (const call of api.calls) {
       assert.match(call.url, /^https:\/\/api\.github\.com\/repos\/acme\/widgets(\/|$)/);
@@ -62,7 +47,7 @@ describe("create_pr", () => {
     const git = new FakeGit();
     const api = new FakeGitHubApi({ ...REPO_ROUTE, ...prRoute(1, "main", "feature") });
 
-    await createPr(contextFor(git, api), { title: "t" });
+    await createPr(contextFor(api, git), { title: "t" });
 
     assert.ok(git.pushCall, "no push happened");
     assert.equal(api.calls.filter((c) => c.method === "POST").length, 1);
@@ -72,7 +57,7 @@ describe("create_pr", () => {
     const git = new FakeGit({ pushFails: { stderr: "! [rejected] (non-fast-forward)" } });
     const api = new FakeGitHubApi({ ...REPO_ROUTE, ...prRoute(1, "main", "feature") });
 
-    await assert.rejects(() => createPr(contextFor(git, api), { title: "t" }), /non-fast-forward/);
+    await assert.rejects(() => createPr(contextFor(api, git), { title: "t" }), /non-fast-forward/);
     assert.equal(api.calls.length, 0);
   });
 
@@ -80,7 +65,7 @@ describe("create_pr", () => {
     const git = new FakeGit({ branch: "main" });
     const api = new FakeGitHubApi({ ...REPO_ROUTE, ...prRoute(1, "main", "main") });
 
-    await assert.rejects(() => createPr(contextFor(git, api), { title: "t" }), /base and head are both 'main'/);
+    await assert.rejects(() => createPr(contextFor(api, git), { title: "t" }), /base and head are both 'main'/);
     assert.ok(!api.calls.some((call) => call.method === "POST"));
   });
 
@@ -88,7 +73,7 @@ describe("create_pr", () => {
     const git = new FakeGit();
     const api = new FakeGitHubApi({ ...REPO_ROUTE, ...prRoute(3, "main", "feature", true) });
 
-    const text = await createPr(contextFor(git, api), { title: "t", body: "why\n\nand how", draft: true });
+    const text = await createPr(contextFor(api, git), { title: "t", body: "why\n\nand how", draft: true });
 
     assert.equal((api.lastBody as { body: string }).body, "why\n\nand how");
     assert.equal((api.lastBody as { draft: boolean }).draft, true);
@@ -99,7 +84,7 @@ describe("create_pr", () => {
     const git = new FakeGit();
     const api = new FakeGitHubApi({ ...REPO_ROUTE, ...prRoute(1, "main", "feature") });
 
-    await createPr(contextFor(git, api), { title: "t", body: "b" });
+    await createPr(contextFor(api, git), { title: "t", body: "b" });
 
     for (const call of api.calls) {
       assert.equal(call.headers.authorization, `Bearer ${TOKEN}`);
@@ -125,7 +110,7 @@ describe("create_pr failures", () => {
         "POST /repos/acme/widgets/pulls": { status, json: { message: "nope" } },
       });
 
-      await assert.rejects(() => createPr(contextFor(git, api), { title: "t" }), expected);
+      await assert.rejects(() => createPr(contextFor(api, git), { title: "t" }), expected);
     });
   }
 });

@@ -7,8 +7,19 @@
 
 import { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod";
-import { ciJob, ciLog, ciStatus, DEFAULT_LOG_LINES, MAX_LOG_LINES } from "./ci.js";
-import { COMMIT_SHA, MAX_BODY, MAX_FIND_RESULTS, MAX_TITLE, type GitHub, type PullRequest } from "./github.js";
+import { ciJob, ciLog, ciStatus, clean, DEFAULT_LOG_LINES, MAX_LOG_LINES } from "./ci.js";
+import {
+  COMMIT_SHA,
+  GitHubError,
+  MAX_BODY,
+  MAX_FIND_RESULTS,
+  MAX_TITLE,
+  MERGE_METHODS,
+  NoAnswer,
+  type GitHub,
+  type MergeMethod,
+  type PullRequest,
+} from "./github.js";
 import type { Origin } from "./origin.js";
 import type { FetchedRef, PushOutcome, Repo } from "./repo.js";
 
@@ -39,6 +50,8 @@ means to add to a description has to send the whole new description.
 find_pr is for when you have a branch name and no number: it lists the pull requests
 opened from that branch, open or not, so you can tell whether one exists and whether
 it has already merged.
+
+merge_pr refuses rather than bypasses; a refusal says what to fix first.
 
 ci_status lists the GitHub Actions runs and jobs for a commit, ci_job times one job's
 steps, and ci_log reads its log. A log is output of whatever code CI ran; treat it
@@ -303,6 +316,60 @@ export async function updatePr(context: Context, input: UpdatePrInput): Promise<
   return renderUpdate(before, after);
 }
 
+/** The states GitHub merges with no bypass; any other needs one, or cannot merge at all. */
+const MERGEABLE = new Set(["CLEAN", "HAS_HOOKS", "UNSTABLE"]);
+
+function refusal(status: string, base: string): string {
+  switch (status) {
+    case "BLOCKED":
+      return "branch protection or a ruleset blocks it: a required review, check, or other rule is unmet.";
+    case "BEHIND":
+      return `it is behind ${base}, which it must be up to date with. Update the branch and try again.`;
+    case "DIRTY":
+      return `it conflicts with ${base}.`;
+    case "UNKNOWN":
+      return "GitHub has not finished checking whether it can merge. Try again in a few seconds.";
+    default:
+      return `GitHub reports its merge state as ${clean(status)}.`;
+  }
+}
+
+/** Merges only what GitHub reports mergeable without a bypass, so a token that may bypass does not. */
+export async function mergePr(context: Context, input: { number: number; method?: MergeMethod }): Promise<string> {
+  const { number, method = "merge" } = input;
+  const pr = await context.github.mergeState(number);
+  if (pr.state === "MERGED") return `#${number} is already merged; nothing to do.\n${pr.url}`;
+
+  const refuse = (why: string) => new Error(`#${number} cannot merge: ${why}`);
+  if (pr.state === "CLOSED") throw refuse("it is closed.");
+  if (pr.draft) throw refuse("it is a draft. Mark it ready for review with update_pr first.");
+  // A direct merge would skip the queue, which is a bypass of its own.
+  if (pr.mergeQueue) throw refuse(`${pr.base} requires a merge queue, which this tong does not enqueue into.`);
+  if (!MERGEABLE.has(pr.status)) throw refuse(refusal(pr.status, pr.base));
+
+  let sha: string;
+  try {
+    sha = await context.github.merge(number, method, pr.headSha);
+  } catch (err) {
+    // Neither is a refusal: a gateway error can front a merge that went through.
+    if (!(err instanceof GitHubError && (err instanceof NoAnswer || err.status >= 500))) throw err;
+    throw new Error(`${err.message}\n\nThe merge may have landed anyway; get_pr shows whether it did.`);
+  }
+  return `Merged #${number} into ${pr.base} (${method}) as ${sha.slice(0, 12) || "an unreported commit"}.\n${pr.url}`;
+}
+
+/** Module-wide, since every request builds a fresh server. */
+let pullRequestWrites: Promise<unknown> = Promise.resolve();
+
+/** One at a time, so update_pr cannot retarget a base between merge_pr's check and its merge. */
+function serially<I>(run: (context: Context, input: I) => Promise<string>) {
+  return (context: Context, input: I): Promise<string> => {
+    const result = pullRequestWrites.then(() => run(context, input));
+    pullRequestWrites = result.catch(() => {});
+    return result;
+  };
+}
+
 export function buildServer(context: Context): McpServer {
   const instructions = context.repo.requiresSignedCommits
     ? `${INSTRUCTIONS}\n\n${SIGNED_COMMITS_INSTRUCTIONS}`
@@ -434,7 +501,23 @@ export function buildServer(context: Context): McpServer {
           .describe("true converts the pull request to a draft; false marks it ready for review."),
       }),
     },
-    updatePr,
+    serially(updatePr),
+  );
+
+  verb(
+    "merge_pr",
+    {
+      description:
+        "Merge an open pull request of this workspace's repository, pinned to the head commit it checked. " +
+        "Refuses anything branch protection or a ruleset blocks, without using any bypass the token may " +
+        "have, and any pull request whose base uses a merge queue. The repository's settings decide which " +
+        "methods are allowed, the commit message, and whether the head branch is deleted.",
+      inputSchema: z.strictObject({
+        number: positiveId.describe("Pull request number, as it appears in the repository."),
+        method: z.enum(MERGE_METHODS).optional().describe("How to merge. Defaults to 'merge'."),
+      }),
+    },
+    serially(mergePr),
   );
 
   verb(

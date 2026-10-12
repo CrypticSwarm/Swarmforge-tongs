@@ -1,11 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { GitHub, MAX_LOG_BYTES, MAX_LOG_READ_BYTES, type Fetch } from "../src/github.js";
-import type { Origin } from "../src/origin.js";
-import { ACTIONS, FakeGitHubApi, LOG_HOST, getPrRoute, jobsRoute, logRoutes, runsRoute } from "./fakes.js";
+import { GitHub, GitHubError, MAX_LOG_BYTES, MAX_LOG_READ_BYTES, NoAnswer, type Fetch } from "../src/github.js";
+import { ACTIONS, FakeGitHubApi, LOG_HOST, ORIGIN, TOKEN, getPrRoute, jobsRoute, logRoutes, runsRoute } from "./fakes.js";
 
-const ORIGIN: Origin = { owner: "acme", repo: "widgets" };
-const TOKEN = "ghp_thisIsTheSecretTokenValue";
 const SHA = "abcdef0123456789abcdef0123456789abcdef01";
 
 function client(api: FakeGitHubApi): GitHub {
@@ -32,6 +29,34 @@ function* repeat(chunk: Uint8Array, times: number, suffix?: Uint8Array): Iterato
   for (let i = 0; i < times; i++) yield chunk;
   if (suffix) yield suffix;
 }
+
+describe("every request", () => {
+  // A timeout of its own, so a request that is never abandoned fails rather than hangs.
+  it("gives up on one GitHub never answers, so it cannot hold up serialized pull request writes", { timeout: 2000 }, async () => {
+    const stalled: Fetch = (_input, init) =>
+      new Promise((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(init.signal?.reason)));
+    const github = new GitHub(stalled, ORIGIN, TOKEN, undefined, 10);
+    await assert.rejects(() => github.pullRequest(7), /cannot reach https:\/\/api\.github\.com: .*timeout/);
+  });
+
+  it("keeps an error's status when its body is cut off partway", async () => {
+    const cut: Fetch = async () =>
+      new Response(new ReadableStream({ start: (stream) => stream.error(new TypeError("terminated")) }), { status: 502 });
+    await assert.rejects(
+      () => new GitHub(cut, ORIGIN, TOKEN).pullRequest(7),
+      (err) => err instanceof GitHubError && err.status === 502,
+    );
+  });
+
+  it("reports an answer cut off partway as no answer", async () => {
+    const cut: Fetch = async () =>
+      new Response(new ReadableStream({ start: (stream) => stream.error(new TypeError("terminated")) }), { status: 200 });
+    await assert.rejects(
+      () => new GitHub(cut, ORIGIN, TOKEN).pullRequest(7),
+      (err) => err instanceof NoAnswer && /cut off: terminated/.test(err.message),
+    );
+  });
+});
 
 describe("workflow runs", () => {
   it("asks for one commit's runs in the pinned repository", async () => {

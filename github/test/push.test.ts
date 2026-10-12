@@ -1,12 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { remoteUrl, type Origin } from "../src/origin.js";
+import { remoteUrl } from "../src/origin.js";
 import { Repo, RepoError } from "../src/repo.js";
-import { ASKPASS, FakeGit, WORKSPACE, configPairs } from "./fakes.js";
+import { ASKPASS, FakeGit, ORIGIN, TOKEN, WORKSPACE, configPairs } from "./fakes.js";
 
-const ORIGIN: Origin = { owner: "acme", repo: "widgets" };
 const URL = remoteUrl(ORIGIN);
-const TOKEN = "ghp_thisIsTheSecretTokenValue";
 
 function repoFor(git: FakeGit): Repo {
   return new Repo(git.run, WORKSPACE, ASKPASS, false);

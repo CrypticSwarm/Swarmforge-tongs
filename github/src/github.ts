@@ -14,6 +14,13 @@ export class GitHubError extends Error {
   }
 }
 
+/** GitHub sent no complete answer, so a write may or may not have happened. */
+export class NoAnswer extends GitHubError {
+  constructor(message: string) {
+    super(message, 0);
+  }
+}
+
 export type Fetch = typeof globalThis.fetch;
 
 /**
@@ -39,7 +46,7 @@ export const MAX_LOG_BYTES = 8 * 1024 * 1024;
 /** A log bigger than this is refused rather than read to its end. */
 export const MAX_LOG_READ_BYTES = 256 * 1024 * 1024;
 
-const LOG_TIMEOUT_MS = 60_000;
+const TIMEOUT_MS = 60_000;
 
 /** GitHub has no SHA-256 repositories, so a commit id is 40 hex digits. */
 export const COMMIT_SHA = /^[0-9a-f]{40}$/;
@@ -105,6 +112,19 @@ export type Job = Progress & {
   steps: JobStep[];
 };
 
+export const MERGE_METHODS = ["merge", "squash", "rebase"] as const;
+export type MergeMethod = (typeof MERGE_METHODS)[number];
+
+const PR_STATES = ["OPEN", "CLOSED", "MERGED"] as const;
+
+/** What decides whether a pull request may merge, as GitHub reports it. */
+export type MergeState = Pick<PullRequest, "url" | "base" | "headSha" | "draft"> & {
+  state: (typeof PR_STATES)[number];
+  /** GraphQL's MergeStateStatus. */
+  status: string;
+  mergeQueue: boolean;
+};
+
 /** Every field omitted here is one GitHub leaves as it is. `head` is not editable. */
 export type UpdatePullRequest = {
   title?: string;
@@ -119,6 +139,7 @@ export class GitHub {
     private readonly origin: Origin,
     private readonly token: string,
     private readonly apiBase = "https://api.github.com",
+    private readonly timeoutMs = TIMEOUT_MS,
   ) {}
 
   private get repoPath(): string {
@@ -130,6 +151,7 @@ export class GitHub {
       return await this.fetchImpl(`${this.apiBase}${path}`, {
         method,
         redirect,
+        signal: AbortSignal.timeout(this.timeoutMs),
         headers: {
           authorization: `Bearer ${this.token}`,
           accept: "application/vnd.github+json",
@@ -140,12 +162,13 @@ export class GitHub {
         body: body === undefined ? undefined : JSON.stringify(body),
       });
     } catch (err) {
-      throw new GitHubError(`cannot reach ${this.apiBase}: ${(err as Error).message}`, 0);
+      throw new NoAnswer(`cannot reach ${this.apiBase}: ${(err as Error).message}`);
     }
   }
 
   private async fail(response: Response, path: string): Promise<never> {
-    const text = await response.text();
+    // The status is the answer; a body cut off partway only loses GitHub's detail.
+    const text = await response.text().catch(() => "");
     const parsed = text.length > 0 ? safeJson(text) : undefined;
     throw new GitHubError(describeFailure(response.status, parsed, this.repoPath, path), response.status);
   }
@@ -153,7 +176,12 @@ export class GitHub {
   private async request(method: string, path: string, body?: unknown): Promise<unknown> {
     const response = await this.send(method, path, body);
     if (!response.ok) return this.fail(response, path);
-    const text = await response.text();
+    let text: string;
+    try {
+      text = await response.text();
+    } catch (err) {
+      throw new NoAnswer(`GitHub's answer was cut off: ${(err as Error).message}`);
+    }
     return text.length > 0 ? safeJson(text) : undefined;
   }
 
@@ -243,10 +271,56 @@ export class GitHub {
     );
   }
 
+  /** Owner and name are the pinned ones, and every value travels as a GraphQL variable. */
+  async mergeState(number: number): Promise<MergeState> {
+    const data = (await this.graphql(
+      `query($owner: String!, $name: String!, $number: Int!) {
+        repository(owner: $owner, name: $name) {
+          pullRequest(number: $number) {
+            url baseRefName state isDraft headRefOid mergeStateStatus isMergeQueueEnabled
+          }
+        }
+      }`,
+      { owner: this.origin.owner, name: this.origin.repo, number: assertId(number, "pull request number") },
+    )) as { repository?: { pullRequest?: Record<string, unknown> | null } };
+    const pr = data.repository?.pullRequest;
+    const state = pr?.state as MergeState["state"];
+    // All required, so a missing one is a refusal rather than a default that might permit the merge.
+    if (
+      typeof pr?.url !== "string" ||
+      typeof pr.baseRefName !== "string" ||
+      !PR_STATES.includes(state) ||
+      typeof pr.isDraft !== "boolean" ||
+      typeof pr.headRefOid !== "string" ||
+      !COMMIT_SHA.test(pr.headRefOid) ||
+      typeof pr.mergeStateStatus !== "string" ||
+      typeof pr.isMergeQueueEnabled !== "boolean"
+    ) {
+      throw new GitHubError(`GitHub did not report the merge state of pull request ${number}`, 0);
+    }
+    return {
+      url: pr.url,
+      base: pr.baseRefName,
+      state,
+      draft: pr.isDraft,
+      headSha: pr.headRefOid,
+      status: pr.mergeStateStatus,
+      mergeQueue: pr.isMergeQueueEnabled,
+    };
+  }
+
+  /** Pinned to `sha`: GitHub refuses with a 409 if the head has moved since. Returns the merge commit. */
+  async merge(number: number, method: MergeMethod, sha: string): Promise<string> {
+    const data = (await this.request("PUT", `${this.pullPath(number)}/merge`, {
+      merge_method: method,
+      sha: assertSha(sha),
+    })) as { sha?: string };
+    return data?.sha ?? "";
+  }
+
   /** The Actions runs for `sha`, newest first, each at its latest attempt. */
   async workflowRuns(sha: string): Promise<{ runs: WorkflowRun[]; more: boolean }> {
-    if (!COMMIT_SHA.test(sha)) throw new GitHubError(`'${sha.slice(0, 40)}' is not a commit sha`, 0);
-    const query = new URLSearchParams({ head_sha: sha, per_page: String(MAX_RUNS) });
+    const query = new URLSearchParams({ head_sha: assertSha(sha), per_page: String(MAX_RUNS) });
     const data = (await this.request("GET", `/repos/${this.repoPath}/actions/runs?${query}`)) as {
       workflow_runs?: unknown;
       total_count?: number;
@@ -291,7 +365,7 @@ export class GitHub {
       download = await this.fetchImpl(target, {
         headers: { "user-agent": USER_AGENT },
         redirect: "error",
-        signal: AbortSignal.timeout(LOG_TIMEOUT_MS),
+        signal: AbortSignal.timeout(this.timeoutMs),
       });
     } catch (err) {
       throw downloadError(id, err);
@@ -472,6 +546,11 @@ function assertId(value: number, what: string): number {
   return value;
 }
 
+function assertSha(value: string): string {
+  if (!COMMIT_SHA.test(value)) throw new GitHubError(`'${value.slice(0, 40)}' is not a commit sha`, 0);
+  return value;
+}
+
 /** A fetch error's message may carry the signed URL, so only its kind is kept. */
 function downloadError(id: number, err: unknown): GitHubError {
   if (err instanceof GitHubError) return err;
@@ -539,9 +618,15 @@ function safeJson(text: string): unknown {
   }
 }
 
+/** The fine-grained permission a 403 on `path` most likely lacks, when the path tells. */
+function permissionFor(path: string): string | undefined {
+  if (path.includes("/actions/")) return "Actions: read";
+  if (path.endsWith("/merge")) return "Contents: read and write";
+}
+
 /** What a 404 on each numbered path most likely means. */
 const ADDRESSED: ReadonlyArray<[RegExp, string, string]> = [
-  [/\/pulls\/\d+$/, "pull request", "the number names no pull request"],
+  [/\/pulls\/\d+(\/merge)?$/, "pull request", "the number names no pull request"],
   [/\/actions\/runs\/\d+\/jobs$/, "workflow run", "the id names no run"],
   [/\/actions\/jobs\/\d+$/, "job", "the id names no job"],
   [/\/actions\/jobs\/\d+\/logs$/, "job log", "the job has no log yet, as while it is running"],
@@ -560,11 +645,13 @@ function describeFailure(status: number, parsed: unknown, repoPath: string, path
   switch (status) {
     case 401:
       return `GitHub rejected the token (401). It is invalid, revoked, or expired.`;
-    case 403:
+    case 403: {
+      const permission = permissionFor(path);
       return (
         `GitHub refused the request (403)${detail ? `: ${detail}` : ""}. The token most likely lacks the ` +
-        `permission this needs${path.includes("/actions/") ? ": Actions: read, on a fine-grained token" : ""}.`
+        `permission this needs${permission ? `: ${permission}, on a fine-grained token` : ""}.`
       );
+    }
     case 404: {
       // Startup proved the repository is visible, so blame the number.
       const addressed = ADDRESSED.find(([pattern]) => pattern.test(path.split("?")[0]));

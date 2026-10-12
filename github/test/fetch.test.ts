@@ -1,14 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { GitHub } from "../src/github.js";
-import { remoteUrl, type Origin } from "../src/origin.js";
+import { remoteUrl } from "../src/origin.js";
 import { Repo, RepoError } from "../src/repo.js";
-import { fetchOrigin, type Context } from "../src/server.js";
-import { ASKPASS, FakeGit, FakeGitHubApi, WORKSPACE, configPairs, type GitFailure } from "./fakes.js";
+import { fetchOrigin } from "../src/server.js";
+import { ASKPASS, FakeGit, ORIGIN, TOKEN, WORKSPACE, configPairs, contextFor, type GitFailure } from "./fakes.js";
 
-const ORIGIN: Origin = { owner: "acme", repo: "widgets" };
 const URL = remoteUrl(ORIGIN);
-const TOKEN = "ghp_thisIsTheSecretTokenValue";
 
 const A = "a".repeat(40);
 const B = "b".repeat(40);
@@ -22,16 +19,6 @@ const PARTIAL: GitFailure = {
 
 function repoFor(git: FakeGit): Repo {
   return new Repo(git.run, WORKSPACE, ASKPASS, false);
-}
-
-function contextFor(git: FakeGit): Context {
-  return {
-    repo: repoFor(git),
-    github: new GitHub(new FakeGitHubApi().fetch, ORIGIN, TOKEN),
-    origin: ORIGIN,
-    remoteUrl: URL,
-    token: TOKEN,
-  };
 }
 
 describe("fetch argv", () => {
@@ -142,7 +129,7 @@ describe("fetch_origin", () => {
     });
 
     assert.equal(
-      await fetchOrigin(contextFor(git)),
+      await fetchOrigin(contextFor(undefined, git)),
       [
         "Fetched acme/widgets; 2 refs updated:",
         "",
@@ -153,13 +140,13 @@ describe("fetch_origin", () => {
   });
 
   it("says so when nothing changed", async () => {
-    assert.equal(await fetchOrigin(contextFor(new FakeGit())), "Fetched acme/widgets; nothing changed.");
+    assert.equal(await fetchOrigin(contextFor(undefined, new FakeGit())), "Fetched acme/widgets; nothing changed.");
   });
 
   it("fails a partial fetch, naming both the rejected refs and the ones that moved", async () => {
     const git = new FakeGit({ fetchFails: PARTIAL });
 
-    await assert.rejects(() => fetchOrigin(contextFor(git)), (err: Error) => {
+    await assert.rejects(() => fetchOrigin(contextFor(undefined, git)), (err: Error) => {
       assert.match(err.message, /^fetching acme\/widgets failed partway: error: cannot lock ref/);
       assert.match(err.message, new RegExp(`origin/foo/bar ${A.slice(0, 12)} \\(rejected\\)`));
       assert.match(err.message, /git update-ref -d/);
@@ -170,7 +157,7 @@ describe("fetch_origin", () => {
 
   it("caps the list, and says by how much", async () => {
     const lines = Array.from({ length: 60 }, (_, i) => `* ${Z} ${A} refs/remotes/origin/b${i}`);
-    const text = await fetchOrigin(contextFor(new FakeGit({ fetchOutput: lines.join("\n") })));
+    const text = await fetchOrigin(contextFor(undefined, new FakeGit({ fetchOutput: lines.join("\n") })));
 
     assert.match(text, /^Fetched acme\/widgets; 60 refs updated:/);
     assert.match(text, /origin\/b49 /);
