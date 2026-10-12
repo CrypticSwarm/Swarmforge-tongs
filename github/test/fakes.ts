@@ -3,7 +3,7 @@
 // without git installed, without a token, and without a network.
 
 import type { Run, RunResult } from "../src/exec.js";
-import type { Fetch } from "../src/github.js";
+import type { Fetch, MergeState } from "../src/github.js";
 
 export const WORKSPACE = "/workspace";
 export const ASKPASS = "/app/askpass.sh";
@@ -207,6 +207,7 @@ export type FetchCall = {
   headers: Record<string, string>;
   body: unknown;
   redirect: RequestRedirect | undefined;
+  signal: AbortSignal | undefined;
 };
 
 /** `text` is sent as is; otherwise `json`, serialized. */
@@ -215,7 +216,9 @@ export type FakeResponse = { status: number; json?: unknown; text?: string; head
 export class FakeGitHubApi {
   readonly calls: FetchCall[] = [];
 
-  constructor(readonly routes: Record<string, FakeResponse | ((call: FetchCall) => FakeResponse)> = {}) {}
+  constructor(
+    readonly routes: Record<string, FakeResponse | ((call: FetchCall) => FakeResponse | Promise<FakeResponse>)> = {},
+  ) {}
 
   get lastBody(): unknown {
     return this.calls[this.calls.length - 1]?.body;
@@ -230,6 +233,7 @@ export class FakeGitHubApi {
       headers: (init?.headers ?? {}) as Record<string, string>,
       body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
       redirect: init?.redirect,
+      signal: init?.signal ?? undefined,
     };
     this.calls.push(call);
 
@@ -240,7 +244,7 @@ export class FakeGitHubApi {
     if (!route) {
       return new Response(JSON.stringify({ message: `no fake route for ${key}` }), { status: 500 });
     }
-    const { status, json, text, headers } = typeof route === "function" ? route(call) : route;
+    const { status, json, text, headers } = typeof route === "function" ? await route(call) : route;
     return new Response(text ?? JSON.stringify(json), { status, headers });
   };
 }
@@ -426,5 +430,33 @@ export function logRoutes(jobId: number, text: string) {
       headers: { location: `https://${LOG_HOST}/logs/${jobId}?sig=signed` },
     },
     [`GET ${LOG_HOST}/logs/${jobId}`]: { status: 200, text },
+  };
+}
+
+export type MergeableState = { number: number; base?: string } & Partial<
+  Pick<MergeState, "state" | "draft" | "status" | "mergeQueue" | "headSha">
+>;
+
+/**
+ * The GraphQL merge-state read, answering only the fields the query names as GitHub
+ * would, and the REST merge, answering `merge`.
+ */
+export function mergeRoutes(pr: MergeableState, merge: FakeResponse = { status: 200, json: { sha: "3".repeat(40) } }) {
+  const fields: Record<string, unknown> = {
+    url: `https://github.com/acme/widgets/pull/${pr.number}`,
+    baseRefName: pr.base ?? "main",
+    state: pr.state ?? "OPEN",
+    isDraft: pr.draft ?? false,
+    headRefOid: pr.headSha ?? "2".repeat(40),
+    mergeStateStatus: pr.status ?? "CLEAN",
+    isMergeQueueEnabled: pr.mergeQueue ?? false,
+  };
+  return {
+    "POST /graphql": (call: FetchCall) => {
+      const { query } = call.body as { query: string };
+      const asked = Object.entries(fields).filter(([name]) => new RegExp(`\\b${name}\\b`).test(query));
+      return { status: 200, json: { data: { repository: { pullRequest: Object.fromEntries(asked) } } } };
+    },
+    [`PUT /repos/acme/widgets/pulls/${pr.number}/merge`]: merge,
   };
 }

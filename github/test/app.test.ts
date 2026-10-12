@@ -33,14 +33,16 @@ import {
   jobsRoute,
   listPrsRoute,
   logRoutes,
+  mergeRoutes,
   prRoute,
   runsRoute,
+  type FetchCall,
 } from "./fakes.js";
 
 const ORIGIN: Origin = { owner: "acme", repo: "widgets" };
 const TOKEN = "ghp_thisIsTheSecretTokenValue";
 const OPEN_PR = { number: 7, title: "Add a thing", body: "why", base: "main", head: "feature" };
-const VERBS = ["ci_job", "ci_log", "ci_status", "create_pr", "fetch_origin", "find_pr", "get_pr", "push_branch", "update_pr"];
+const VERBS = ["ci_job", "ci_log", "ci_status", "create_pr", "fetch_origin", "find_pr", "get_pr", "merge_pr", "push_branch", "update_pr"];
 
 /**
  * The body cap from src/app.ts, written out rather than imported so that moving
@@ -191,6 +193,7 @@ describe("protocol eras", () => {
         create_pr: { properties: ["base", "body", "draft", "title"], required: ["title"] },
         find_pr: { properties: ["head"], required: ["head"] },
         get_pr: { properties: ["number"], required: ["number"] },
+        merge_pr: { properties: ["method", "number"], required: ["number"] },
         update_pr: { properties: ["base", "body", "draft", "number", "state", "title"], required: ["number"] },
       };
       for (const [name, schema] of Object.entries(byName)) {
@@ -208,6 +211,8 @@ describe("protocol eras", () => {
       assert.equal(updateProps.title.maxLength, MAX_TITLE);
       assert.equal(updateProps.body.maxLength, MAX_BODY);
       assert.deepEqual(updateProps.state.enum, ["open", "closed"]);
+      const mergeProps = byName.merge_pr.properties as Record<string, Record<string, unknown>>;
+      assert.deepEqual(mergeProps.method.enum, ["merge", "squash", "rebase"]);
       // The branch-name rule is a regex so clients can see it, not a refinement they cannot.
       for (const name of ["create_pr", "update_pr"]) {
         const baseProp = (byName[name].properties as Record<string, Record<string, unknown>>).base;
@@ -304,6 +309,53 @@ describe("tool calls over HTTP", () => {
     assert.equal(result.isError, true);
     assert.match(text(result), /^get_pr: error: /);
     assert.equal(logged.mock.calls[0]?.arguments[0], "get_pr failed:");
+  });
+});
+
+describe("merge_pr over HTTP", () => {
+  it("merges with a merge commit by default", async () => {
+    Object.assign(api.routes, mergeRoutes({ number: 7 }));
+    const client = await connect();
+    const result = await client.callTool({ name: "merge_pr", arguments: { number: 7 } });
+    assert.notEqual(result.isError, true, text(result));
+    assert.equal((api.lastBody as { merge_method: string }).merge_method, "merge");
+  });
+
+  it("a refused merge does not hold up the next update_pr", { timeout: 2000 }, async () => {
+    Object.assign(api.routes, mergeRoutes({ number: 7, status: "BLOCKED" }));
+    const client = await connect();
+    assert.equal((await client.callTool({ name: "merge_pr", arguments: { number: 7 } })).isError, true);
+    const result = await client.callTool({ name: "update_pr", arguments: { number: 7, title: "Better" } });
+    assert.match(text(result), /Updated pull request #7: title/);
+  });
+
+  it("lets no update_pr land between its check and its merge", { timeout: 2000 }, async () => {
+    const routes = mergeRoutes({ number: 7 });
+    let release!: () => void;
+    const checked = new Promise<void>((resolve) => (release = resolve));
+    Object.assign(api.routes, routes, {
+      "POST /graphql": async (call: FetchCall) => {
+        await checked;
+        return routes["POST /graphql"](call);
+      },
+    });
+    const client = await connect();
+
+    const merging = client.callTool({ name: "merge_pr", arguments: { number: 7 } });
+    try {
+      while (api.calls.length === 0) await new Promise((resolve) => setImmediate(resolve));
+      const retargeting = client.callTool({ name: "update_pr", arguments: { number: 7, base: "release" } });
+      // Held until update_pr reaches GitHub, or long enough that it would have.
+      const deadline = Date.now() + 500;
+      while (api.calls.length === 1 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+      release();
+      await Promise.all([merging, retargeting]);
+    } finally {
+      release();
+    }
+
+    const writes = api.calls.map((call) => call.method).filter((method) => method !== "GET" && method !== "POST");
+    assert.deepEqual(writes, ["PUT", "PATCH"]);
   });
 });
 
@@ -565,6 +617,9 @@ describe("untrusted arguments", () => {
       ["find_pr", { head: "x", repo: "evil/elsewhere" }],
       ["find_pr", {}],
       ["update_pr", { number: 7, state: "merged" }],
+      ["merge_pr", { number: 7, method: "fast-forward" }],
+      ["merge_pr", { number: 0 }],
+      ["merge_pr", { number: 7, repo: "evil/elsewhere" }],
       ["ci_status", { sha: "abc123" }],
       ["ci_status", { sha: "A".repeat(40) }],
       ["ci_status", { pr: 0 }],
