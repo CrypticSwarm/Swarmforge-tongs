@@ -25,6 +25,7 @@ with `initialize`.
 | `get_pr` | `number` | Reads one pull request: its title, description, branches, and whether it is open, draft, closed, or merged. |
 | `find_pr` | `head` | Lists the pull requests opened from a branch of this repository, newest first and up to 10, closed and merged ones included: each with its number, URL, branches, and whether it is open, draft, closed, or merged. For when you have a branch name and no number. Read one in full with `get_pr`. |
 | `update_pr` | `number`, `title?`, `body?`, `base?`, `state?`, `draft?` | Edits an open pull request. Only the fields you pass change, and each replaces its current value. |
+| `merge_pr` | `number`, `method?` | Merges an open pull request with `merge` (the default), `squash`, or `rebase`, if GitHub reports it mergeable without a bypass. See [Merging](#merging). |
 | `ci_status` | `sha?`, `pr?` | Lists the Actions runs for one commit, newest first and up to 10, with each job's id, state, queue and run time, and the step it failed at. See [Reading CI](#reading-ci). |
 | `ci_job` | `job_id` | Lists a job's steps with their state, start offset, and duration, plus its runner. |
 | `ci_log` | `job_id`, `step?`, `start?`, `limit?` | Returns part of a job's plain-text log, timestamps included. Defaults to the end of the failed step, or of the whole log. |
@@ -88,6 +89,27 @@ and if the draft half fails the error says the text edit landed — a caller tol
 between. The mutation is skipped when the pull request already has the status asked
 for.
 
+## Merging
+
+`merge_pr` reads the pull request's GraphQL `mergeStateStatus` and merges only on
+`CLEAN`, `HAS_HOOKS`, or `UNSTABLE` (non-required checks failing or pending), the
+states `gh pr merge` merges without `--admin`. GitHub reports a bypass separately, so
+an unmet rule should read `BLOCKED` even to a token that may bypass it, and the tong
+refuses.
+It also refuses a draft, and a base with a merge queue, since a direct merge would
+skip the queue. The merge is pinned to the head sha it checked, so a push in between
+makes GitHub refuse it, and `update_pr` waits for it, so the base cannot be
+retargeted in between either.
+
+**Not airtight.** A token that may bypass still does so for a rule or base changed by
+someone else between the check and the merge, and for any rule GitHub does not report
+to it as `BLOCKED`. `push_branch` can also push a protected branch outright. For a
+hard guarantee, use a token whose account cannot bypass.
+
+The repository's settings decide the rest: which methods are allowed (a disallowed
+one is GitHub's `405`), the merge and squash commit messages, and whether the head
+branch is deleted. A `rebase` merge has GitHub re-create the commits, unsigned.
+
 ## It only ever touches the workspace's own repository
 
 At startup the tong reads `remote.origin.url` from the mounted workspace, parses
@@ -103,7 +125,8 @@ parameter. The owner half of the lookup is always
 the pinned owner, so `find_pr` matches only branches of the repository itself, not
 of forks. The GraphQL draft
 mutations see no caller value at all — the node id they address is the one GitHub
-just returned for a pull request of this repository.
+just returned for a pull request of this repository — and `merge_pr`'s merge-state
+query takes the number only as a variable, against the pinned owner and name.
 
 Two things follow from that:
 
@@ -193,8 +216,7 @@ and `Verified` badge are what decide whether a signature is trusted. What this
 catches is the mistake that is otherwise silent: pushing commits nobody signed. On
 a repository whose branch protection already requires signatures, it turns a
 remote rejection of the whole push into a local error naming the commits; on a
-repository without that protection, it is the only thing standing between an
-unsigned commit and `main`.
+repository without that protection, it is the only check on what this tong pushes.
 
 Two details follow from holding no key. `git log --format=%G?` is not used, because
 git reports a signed commit as `N` when it cannot run gpg, and there is no gpg in
@@ -220,9 +242,9 @@ itself; actually restricting egress to those hosts is the launcher's job.
 
 Use a **fine-grained personal access token scoped to this one repository**, with:
 
-- **Contents: read and write** — fetching and pushing
+- **Contents: read and write** — fetching, pushing, and merging
 - **Pull requests: read and write** — opening, reading, and editing pull requests,
-  over REST and the GraphQL draft mutations
+  over REST and GraphQL
 - **Actions: read** — the `ci_*` verbs. Startup does not check for it; without it
   those verbs fail with a `403` that names it, and the rest still work.
 
@@ -336,7 +358,10 @@ only the keys it was given, and that a failed draft mutation still says the text
 edit landed, and the CI path: that a log redirect is followed without the token and
 only to `https` and that a failed download never reports its URL, that a sha or id is
 checked before it reaches a URL, that log lines and GitHub's names lose control
-characters, and how a log is cut by step and capped. It drives a fake `git` through the single
+characters, and how a log is cut by step and capped, and the merge path: that only
+a status mergeable without a bypass reaches GitHub's merge, pinned to the checked
+head, never with a draft, a merge queue, or a field GitHub left out, and with no
+`update_pr` in between. It drives a fake `git` through the single
 `Run` seam in `src/exec.ts` and a fake `fetch` through `src/github.ts`, so it
 needs no git and no credential; the only real subprocesses spawned are the test
 runner's own `node`, exercising `realRun`'s exit, signal, and truncation paths.
