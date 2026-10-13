@@ -1,4 +1,4 @@
-import type { Run, RunResult } from "../src/exec.js";
+import type { RunError, Run, RunResult } from "../src/exec.js";
 import { GitHub, type Fetch, type MergeState } from "../src/github.js";
 import { remoteUrl, type Origin } from "../src/origin.js";
 import { Repo } from "../src/repo.js";
@@ -13,6 +13,7 @@ export type GitCall = {
   args: string[];
   env: NodeJS.ProcessEnv;
   stdin: Buffer | undefined;
+  timeoutMs: number | undefined;
   verb: string[];
 };
 
@@ -25,6 +26,8 @@ export type FakeGitOptions = {
   originUrl?: string | null;
   isRepo?: boolean;
   pushFails?: GitFailure;
+  /** What running the push throws, as a timeout or a failure to run. */
+  pushThrows?: RunError;
   pushUpToDate?: boolean;
   /** `fetch --porcelain` stdout on success. */
   fetchOutput?: string;
@@ -46,6 +49,7 @@ export class FakeGit {
   originUrl: string | null;
   isRepo: boolean;
   pushFails: GitFailure | undefined;
+  pushThrows: RunError | undefined;
   pushUpToDate: boolean;
   fetchOutput: string;
   fetchFails: GitFailure | undefined;
@@ -61,6 +65,7 @@ export class FakeGit {
     this.originUrl = options.originUrl === undefined ? "git@github.com:acme/widgets.git" : options.originUrl;
     this.isRepo = options.isRepo ?? true;
     this.pushFails = options.pushFails;
+    this.pushThrows = options.pushThrows;
     this.pushUpToDate = options.pushUpToDate ?? false;
     this.fetchOutput = options.fetchOutput ?? "";
     this.fetchFails = options.fetchFails;
@@ -97,7 +102,9 @@ export class FakeGit {
     const argv = [...args];
     const verb = [...argv];
     while (verb[0] === "-c" || verb[0] === "-C") verb.splice(0, 2);
-    this.calls.push({ args: argv, env: options?.env ?? {}, stdin: options?.stdin, verb });
+    const { env = {}, stdin, timeoutMs } = options ?? {};
+    this.calls.push({ args: argv, env, stdin, timeoutMs, verb });
+    if (verb[0] === "push" && this.pushThrows) throw this.pushThrows;
 
     return this.runGit(verb, options?.stdin);
   };

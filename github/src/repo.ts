@@ -1,4 +1,5 @@
-import { type Run, type RunResult, runOrThrow } from "./exec.js";
+import { type Run, RunError, type RunResult, runOrThrow } from "./exec.js";
+import { COMMIT_SHA } from "./github.js";
 import type { Origin } from "./origin.js";
 
 export class RepoError extends Error {}
@@ -81,6 +82,9 @@ function failureDetail(result: RunResult): string {
   return detail || `git exited ${result.exitCode}`;
 }
 
+/** Caps a branch delete push. */
+export const DELETE_TIMEOUT_MS = 60_000;
+
 const FETCH_REFSPEC = "+refs/heads/*:refs/remotes/origin/*";
 
 const FETCH_FLAGS = {
@@ -152,12 +156,28 @@ export class Repo {
   }
 
   /** Clears any remote named after `url`, which would redirect the token; needs git 2.46+. */
-  private runWithToken(args: readonly string[], url: string, refspec: string, token: string): Promise<RunResult> {
+  private runWithToken(
+    args: readonly string[],
+    url: string,
+    refspec: string,
+    token: string,
+    { timeoutMs }: { timeoutMs?: number } = {},
+  ): Promise<RunResult> {
     return this.run(
       "git",
       ["-c", `remote.${url}.url=`, "-c", `remote.${url}.pushurl=`, ...this.gitArgv([...args, url, refspec])],
-      { env: this.env({ GIT_ASKPASS: this.askpass, GITHUB_TONG_TOKEN: token }) },
+      { env: this.env({ GIT_ASKPASS: this.askpass, GITHUB_TONG_TOKEN: token }), timeoutMs },
     );
+  }
+
+  private pushRef(
+    flags: readonly string[],
+    url: string,
+    refspec: string,
+    token: string,
+    options?: { timeoutMs?: number },
+  ): Promise<RunResult> {
+    return this.runWithToken(["push", "--no-verify", "--porcelain", ...flags], url, refspec, token, options);
   }
 
   private async capture(args: readonly string[], stdin?: Buffer): Promise<Buffer> {
@@ -274,12 +294,7 @@ export class Repo {
 
     if (this.requireSignedCommits) await this.assertPushIsSigned(origin, sha);
 
-    const result = await this.runWithToken(
-      ["push", "--no-verify", "--porcelain"],
-      url,
-      `${sha}:refs/heads/${branch}`,
-      token,
-    );
+    const result = await this.pushRef([], url, `${sha}:refs/heads/${branch}`, token);
 
     const stdout = result.stdout.toString("utf8");
     if (result.exitCode !== 0) {
@@ -305,5 +320,21 @@ export class Repo {
     }
 
     return { branch, sha, alreadyUpToDate, detail: stdout.trim() || result.stderr.trim() };
+  }
+
+  /** Deletes `branch` if still at `sha`, keeping its tracking ref; null on success, else the reason. */
+  async deleteBranch(url: string, token: string, branch: string, sha: string): Promise<string | null> {
+    assertUsableBranch(branch);
+    if (!COMMIT_SHA.test(sha)) throw new RepoError(`'${sha.slice(0, 40)}' is not a commit sha`);
+    const ref = `refs/heads/${branch}`;
+    let result: RunResult;
+    try {
+      const lease = `--force-with-lease=${ref}:${sha}`;
+      result = await this.pushRef([lease], url, `:${ref}`, token, { timeoutMs: DELETE_TIMEOUT_MS });
+    } catch (err) {
+      if (!(err instanceof RunError)) throw err;
+      return err.message;
+    }
+    return result.exitCode === 0 ? null : `git refused the push: ${failureDetail(result)}`;
   }
 }
