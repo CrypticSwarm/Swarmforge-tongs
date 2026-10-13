@@ -207,7 +207,7 @@ describe("protocol eras", () => {
         create_pr: { properties: ["base", "body", "draft", "title"], required: ["title"] },
         find_pr: { properties: ["head"], required: ["head"] },
         get_pr: { properties: ["number"], required: ["number"] },
-        merge_pr: { properties: ["method", "number"], required: ["number"] },
+        merge_pr: { properties: ["delete_branch", "method", "number"], required: ["number"] },
         update_pr: { properties: ["base", "body", "draft", "number", "state", "title"], required: ["number"] },
       };
       for (const [name, schema] of Object.entries(byName)) {
@@ -366,6 +366,46 @@ describe("merge_pr over HTTP", () => {
 
     const writes = api.calls.map((call) => call.method).filter((method) => method !== "GET" && method !== "POST");
     assert.deepEqual(writes, ["PUT", "PATCH"]);
+  });
+
+  it("queues create_pr behind merge_pr, so it pushes and opens only once the head is deleted", { timeout: 2000 }, async () => {
+    const routes = mergeRoutes({ number: 7 });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    Object.assign(api.routes, routes, prRoute(9, "feature", "next"), {
+      "POST /graphql": async (call: FetchCall) => {
+        await held;
+        return routes["POST /graphql"](call);
+      },
+    });
+    let pushesBeforeOpening = -1;
+    const open = api.routes["POST /repos/acme/widgets/pulls"];
+    api.routes["POST /repos/acme/widgets/pulls"] = (call) => {
+      pushesBeforeOpening = git.callsTo("push").length;
+      return typeof open === "function" ? open(call) : open;
+    };
+    git.branch = "next";
+    const client = await connect();
+
+    const merging = client.callTool({ name: "merge_pr", arguments: { number: 7, delete_branch: true } });
+    try {
+      while (api.calls.length === 0) await new Promise((resolve) => setImmediate(resolve));
+      const opening = client.callTool({ name: "create_pr", arguments: { title: "Next", base: "feature" } });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.equal(git.callsTo("push").length, 0, "create_pr must wait for merge_pr");
+      release();
+      assert.match(text(await merging), /; deleted `feature`\./);
+      const opened = await opening;
+      assert.notEqual(opened.isError, true, text(opened));
+    } finally {
+      release();
+    }
+
+    assert.deepEqual(
+      git.callsTo("push").map((call) => call.verb.at(-1)),
+      [":refs/heads/feature", `${git.head}:refs/heads/next`],
+    );
+    assert.equal(pushesBeforeOpening, 2);
   });
 });
 
@@ -676,6 +716,7 @@ describe("untrusted arguments", () => {
       ["update_pr", { number: 7, state: "merged" }],
       ["merge_pr", { number: 7, method: "fast-forward" }],
       ["merge_pr", { number: 0 }],
+      ["merge_pr", { number: 7, delete_branch: "yes" }],
       ["merge_pr", { number: 7, repo: "evil/elsewhere" }],
       ["ci_status", { sha: "abc123" }],
       ["ci_status", { sha: "A".repeat(40) }],

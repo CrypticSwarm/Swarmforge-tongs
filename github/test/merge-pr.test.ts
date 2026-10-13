@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { RunError } from "../src/exec.js";
 import { GitHub, GitHubError, MAX_FIND_RESULTS, type MergeMethod } from "../src/github.js";
 import { mergePr } from "../src/server.js";
 import {
+  FakeGit,
   FakeGitHubApi,
   ORIGIN,
   TOKEN,
@@ -10,6 +12,7 @@ import {
   mergeRoutes,
   prConnection,
   type FakeResponse,
+  type FetchCall,
   type MergeableState,
 } from "./fakes.js";
 
@@ -72,10 +75,12 @@ describe("merge_pr", () => {
     });
   }
 
-  it("reports an already merged pull request without merging again", async () => {
+  it("reports an already merged pull request without merging or deleting", async () => {
     const api = apiFor({ state: "MERGED", status: "UNKNOWN" });
-    assert.match(await mergePr(contextFor(api), { number: 7 }), /already merged; nothing to do/);
-    assert.ok(!merged(api));
+    const git = new FakeGit();
+    assert.match(await mergePr(contextFor(api, git), { number: 7 }), /already merged; nothing to do/);
+    assert.deepEqual(api.calls.map((call) => call.method), ["POST"]);
+    assert.equal(git.calls.length, 0);
   });
 
   const fields = [
@@ -110,6 +115,16 @@ describe("merge_pr", () => {
       assert.ok(!merged(api));
     });
   }
+
+  it("strips control and bidi characters from the base it names", async () => {
+    assert.match(await mergePr(contextFor(apiFor({ base: "r\u202eel" })), { number: 7 }), /^Merged #7 into rel /);
+    for (const pr of [{ status: "BEHIND" }, { mergeQueue: true }]) {
+      await assert.rejects(
+        () => mergePr(contextFor(apiFor({ base: "r\u202eel", ...pr })), { number: 7 }),
+        (err: Error) => /\brel\b/.test(err.message) && !/\u202e/.test(err.message),
+      );
+    }
+  });
 
   it("reads the merge state of the pinned repository through variables, not the query text", async () => {
     const api = apiFor();
@@ -184,6 +199,252 @@ describe("merge_pr", () => {
     });
     await assert.rejects(() => mergePr(contextFor(api), { number: 7 }), /Could not resolve to a PullRequest/);
   });
+});
+
+describe("merge_pr delete_branch", () => {
+  const SHA = "2".repeat(40);
+  const MERGE_STATE = ["POST /graphql", "PUT /repos/acme/widgets/pulls/7/merge"];
+  const routes = (api: FakeGitHubApi) => api.calls.map((call) => `${call.method} ${new URL(call.url).pathname}`);
+  const STALE = { stdout: "!\t(delete):refs/heads/feature\t[rejected] (stale info)\n", stderr: "error: failed to push" };
+  const isBranchRead = (call: FetchCall) => /\bref\(qualifiedName:/.test((call.body as { query?: string })?.query ?? "");
+
+  async function mergeDeleting(pr: Partial<MergeableState> = {}, git = new FakeGit(), api = apiFor(pr)) {
+    const text = await mergePr(contextFor(api, git), { number: 7, delete_branch: true });
+    return { api, git, text };
+  }
+
+  /** apiFor, but the head branch read answers `reply`. */
+  function branchReadAnswering(reply: FakeResponse): FakeGitHubApi {
+    const api = apiFor();
+    const read = api.routes["POST /graphql"] as (call: FetchCall) => FakeResponse;
+    api.routes["POST /graphql"] = (call) => (isBranchRead(call) ? reply : read(call));
+    return api;
+  }
+
+  for (const input of [{}, { delete_branch: false }]) {
+    it(`does nothing more with ${JSON.stringify(input)}`, async () => {
+      const api = apiFor();
+      const git = new FakeGit();
+      const text = await mergePr(contextFor(api, git), { number: 7, ...input });
+      assert.deepEqual(routes(api), MERGE_STATE);
+      assert.equal(git.calls.length, 0);
+      assert.doesNotMatch(text, /delete/);
+    });
+  }
+
+  it("deletes the head after the merge, with a push leased to the merged sha", async () => {
+    const { api, git, text } = await mergeDeleting({ head: "feature/x" });
+
+    assert.deepEqual(routes(api), [...MERGE_STATE, "GET /repos/acme/widgets", "POST /graphql"]);
+    assert.ok(git.pushCall!.verb.includes(`--force-with-lease=refs/heads/feature/x:${SHA}`));
+    assert.equal(git.pushCall!.verb.at(-1), ":refs/heads/feature/x");
+    assert.match(text, /^Merged #7 into main \(merge\) as 333333333333; deleted `feature\/x`\.\nhttps:/);
+  });
+
+  it("deletes the head of an earlier merge", async () => {
+    const { api, git, text } = await mergeDeleting({ state: "MERGED", status: "UNKNOWN" });
+    assert.ok(!merged(api));
+    assert.equal(git.pushCall!.verb.at(-1), ":refs/heads/feature");
+    assert.match(text, /^#7 is already merged; deleted `feature`\./);
+  });
+
+  it("deletes a head whose only open pull request is this one", async () => {
+    const { git, text } = await mergeDeleting({ heads: [7] });
+    assert.ok(git.pushCall);
+    assert.match(text, /; deleted `feature`\./);
+  });
+
+  it("checks for a fork before reading anything else", async () => {
+    const { api, git, text } = await mergeDeleting({ crossRepository: true, head: "main", headDeleted: true });
+    assert.match(text, /; did not delete `main`: it is in a fork\.\n/);
+    assert.deepEqual(routes(api), MERGE_STATE);
+    assert.equal(git.calls.length, 0);
+  });
+
+  const kept: Array<[string, Partial<MergeableState>, RegExp]> = [
+    ["the default branch", { head: "main", base: "release" }, /did not delete `main`: it is the default branch\./],
+    [
+      "the head of another open pull request",
+      { heads: [31] },
+      /did not delete `feature`: deleting it would close open pull request #31, which has the same head\./,
+    ],
+    [
+      "the head of two other open pull requests",
+      { heads: [7, 31, 32] },
+      /would close open pull requests #31, #32, which have the same head\./,
+    ],
+    [
+      "the base of an open pull request",
+      { dependents: [12] },
+      new RegExp(
+        "did not delete `feature`: it is the base of open pull request #12\\. Retarget it to another base " +
+          "with update_pr, then call merge_pr again with delete_branch\\.\\n",
+      ),
+    ],
+    [
+      "the base of two open pull requests",
+      { dependents: [20, 21] },
+      /it is the base of open pull requests #20, #21\. Retarget them to another base/,
+    ],
+    [
+      "the base of more open pull requests than one read lists",
+      { dependents: Array.from({ length: MAX_FIND_RESULTS + 1 }, (_, i) => 20 + i) },
+      /it is the base of open pull requests #20, .*#29, and 1 more\. Retarget them/,
+    ],
+    [
+      "a branch its protection keeps",
+      { restrictedBy: "protection" },
+      /restricts deleting it, and the tong uses no bypass\./,
+    ],
+    ["a branch a ruleset keeps", { restrictedBy: "ruleset" }, /restricts deleting it, and the tong uses no bypass\./],
+  ];
+  for (const [what, pr, message] of kept) {
+    it(`leaves ${what}, and still reports the merge`, async () => {
+      const { api, git, text } = await mergeDeleting(pr);
+      assert.ok(merged(api));
+      assert.match(text, /^Merged #7 into \S+ \(merge\) as 333333333333; did not delete /);
+      assert.match(text, message);
+      assert.equal(git.pushCall, undefined);
+    });
+  }
+
+  const unlisted: Array<[string, Record<string, unknown>, RegExp]> = [
+    [
+      "heads",
+      {
+        ref: { refUpdateRule: null, rules, associatedPullRequests: { totalCount: 2, nodes: [{ number: 7 }] } },
+        pullRequests: none,
+      },
+      /; did not delete `feature`: deleting it would close 1 open pull request, which has the same head\./,
+    ],
+    [
+      "dependents",
+      { ref: { refUpdateRule: null, rules, associatedPullRequests: none }, pullRequests: { totalCount: 1, nodes: [] } },
+      /; did not delete `feature`: it is the base of 1 open pull request\. Retarget it/,
+    ],
+  ];
+  for (const [what, repository, message] of unlisted) {
+    it(`counts ${what} GitHub did not list`, async () => {
+      const { git, text } = await mergeDeleting({}, new FakeGit(), branchReadAnswering(branchReply(repository)));
+      assert.match(text, message);
+      assert.equal(git.pushCall, undefined);
+    });
+  }
+
+  it("leaves the head of another open pull request after an earlier merge", async () => {
+    const { git, text } = await mergeDeleting({ state: "MERGED", heads: [31] });
+    assert.match(text, /^#7 is already merged; did not delete `feature`: deleting it would close open pull request #31/);
+    assert.equal(git.pushCall, undefined);
+  });
+
+  it("says a head that is already gone is gone, without pushing", async () => {
+    const { git, text } = await mergeDeleting({ headDeleted: true });
+    assert.match(text, /^Merged #7 .*; `feature` is gone\.\n/);
+    assert.equal(git.pushCall, undefined);
+  });
+
+  const unread: Array<[string, FakeResponse, RegExp]> = [
+    ["fails", { status: 502, json: { message: "Bad Gateway" } }, /GitHub returned 502: Bad Gateway\./],
+    [
+      "leaves out the rules",
+      branchReply({ ref: { refUpdateRule: null, associatedPullRequests: none }, pullRequests: none }),
+      /GitHub did not fully describe the branch\./,
+    ],
+  ];
+  for (const [what, reply, message] of unread) {
+    it(`leaves the branch when the branch read ${what}, and says to retry`, async () => {
+      const { git, text } = await mergeDeleting({}, new FakeGit(), branchReadAnswering(reply));
+      assert.match(text, /^Merged #7 .*; did not delete `feature`: /);
+      assert.match(text, message);
+      assert.match(text, / Call merge_pr again with delete_branch to retry\.\n/);
+      assert.equal(git.pushCall, undefined);
+    });
+  }
+
+  it("leaves the branch when reading the repository fails, and still reports the merge", async () => {
+    const api = apiFor();
+    api.routes["GET /repos/acme/widgets"] = { status: 502, json: { message: "Bad Gateway" } };
+    const { git, text } = await mergeDeleting({}, new FakeGit(), api);
+    assert.match(text, /^Merged #7 .*; did not delete `feature`: GitHub returned 502: Bad Gateway\./);
+    assert.equal(git.pushCall, undefined);
+  });
+
+  const timedOut = () => new FakeGit({ pushThrows: new RunError("git timed out after 60s") });
+  const unsure: Array<[string, Partial<MergeableState>, FakeGit, RegExp]> = [
+    [
+      "a refused push, with the branch still there",
+      {},
+      new FakeGit({ pushFails: STALE }),
+      /; did not delete `feature`: git refused the push: .*stale info.* error: failed to push\.\n/,
+    ],
+    [
+      "a refused push, with an incomplete answer",
+      { refAfterPush: "partial" },
+      new FakeGit({ pushFails: STALE }),
+      /; `feature` may be gone: git refused the push: .*stale info.* failed to push\. Call merge_pr again .* to check\.\n/,
+    ],
+    [
+      "a refused push, with the branch gone",
+      { refAfterPush: "absent" },
+      new FakeGit({ pushFails: STALE }),
+      /; `feature` is gone\.\n/,
+    ],
+    [
+      "a push that could not run",
+      {},
+      new FakeGit({ pushThrows: new RunError("cannot run git: spawn git ENOENT") }),
+      /; did not delete `feature`: cannot run git: spawn git ENOENT\.\n/,
+    ],
+    ["a killed push, with the branch still there", {}, timedOut(), /; did not delete `feature`: git timed out after 60s\.\n/],
+    ["a killed push, with the branch gone", { refAfterPush: "absent" }, timedOut(), /; `feature` is gone\.\n/],
+    [
+      "a killed push, with an incomplete answer",
+      { refAfterPush: "partial" },
+      timedOut(),
+      /; `feature` may be gone: git timed out after 60s\. Call merge_pr again with delete_branch to check\.\n/,
+    ],
+  ];
+  for (const [what, pr, git, message] of unsure) {
+    it(`reads the branch again after ${what}`, async () => {
+      const { api, text } = await mergeDeleting(pr, git);
+      assert.match(text, message);
+      assert.equal(api.calls.filter(isBranchRead).length, 2);
+    });
+  }
+
+  for (const head of ["a:b", "a:b‮c"]) {
+    it(`reports the refusal to push ${JSON.stringify(head)} without asking again whether it is gone`, async () => {
+      const { api, git, text } = await mergeDeleting({ head, refAfterPush: "absent" });
+      assert.match(text, /did not delete `a:bc?`: branch name 'a:bc?' is not one this tong will build a refspec from\./);
+      assert.doesNotMatch(text, /‮/);
+      assert.equal(git.pushCall, undefined);
+      assert.equal(api.calls.filter(isBranchRead).length, 1);
+    });
+  }
+
+  it("pushes the head's raw name, and strips control and bidi characters from what it shows", async () => {
+    const head = "x‮y\u0085z";
+    const stale = { stdout: `!\t(delete):refs/heads/${head}\t[rejected] (stale info)\n`, stderr: "" };
+    const { git, text } = await mergeDeleting({ head }, new FakeGit({ pushFails: stale }));
+    assert.equal(git.pushCall!.verb.at(-1), `:refs/heads/${head}`);
+    assert.ok(git.pushCall!.verb.includes(`--force-with-lease=refs/heads/${head}:${SHA}`));
+    assert.match(text, /did not delete `xyz`: git refused the push: .*refs\/heads\/xyz/);
+    assert.doesNotMatch(text, /[‮\u0085]/);
+  });
+
+  const notMerged: Array<[string, Partial<MergeableState>, FakeResponse | undefined]> = [
+    ["refused", { status: "BLOCKED" }, undefined],
+    ["failed", {}, { status: 409, json: { message: "moved" } }],
+  ];
+  for (const [what, pr, merge] of notMerged) {
+    it(`deletes nothing when the merge is ${what}`, async () => {
+      const api = apiFor(pr, merge);
+      const git = new FakeGit();
+      await assert.rejects(() => mergePr(contextFor(api, git), { number: 7, delete_branch: true }));
+      assert.equal(git.calls.length, 0);
+      assert.deepEqual(routes(api), merge ? MERGE_STATE : ["POST /graphql"]);
+    });
+  }
 });
 
 describe("head branch lookups", () => {
