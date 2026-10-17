@@ -15,7 +15,7 @@
 import express, { type Express } from "express";
 import { toNodeHandler } from "@modelcontextprotocol/node";
 import { createMcpHandler } from "@modelcontextprotocol/server";
-import { buildServer, type Context } from "./server.js";
+import { buildIdleServer, buildServer, type Context, type Idle } from "./server.js";
 
 /**
  * Above the largest schema-legal request, with room for the client's envelope.
@@ -33,9 +33,10 @@ import { buildServer, type Context } from "./server.js";
  */
 export const MAX_REQUEST_BODY_BYTES = 1024 * 1024;
 
-export function createApp(context: Context): Express {
+export function createApp(context: Context | Idle): Express {
   const onerror = (err: Error) => console.error("mcp request rejected or failed", err);
-  const handler = createMcpHandler(() => buildServer(context), {
+  const build = "idle" in context ? () => buildIdleServer(context.idle) : () => buildServer(context);
+  const handler = createMcpHandler(build, {
     onerror,
     maxRequestBodySize: MAX_REQUEST_BODY_BYTES,
   });
