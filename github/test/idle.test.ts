@@ -6,6 +6,8 @@ import type { AddressInfo } from "node:net";
 import { after, before, describe, it } from "node:test";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { createApp } from "../src/app.js";
+import { Repo } from "../src/repo.js";
+import { ASKPASS, FakeGit, WORKSPACE } from "./fakes.js";
 
 const REASON = "/workspace had no 'origin' remote";
 
@@ -51,5 +53,12 @@ describe("with no repository", () => {
   it("refuses a call to a verb it would otherwise have", async () => {
     const client = await connect("auto");
     await assert.rejects(client.callTool({ name: "push_branch", arguments: {} }), /Tool push_branch not found/);
+  });
+});
+
+describe("Repo.isRepo", () => {
+  it("is true in a work tree and false outside one", async () => {
+    assert.equal(await new Repo(new FakeGit().run, WORKSPACE, ASKPASS, false).isRepo(), true);
+    assert.equal(await new Repo(new FakeGit({ isRepo: false }).run, WORKSPACE, ASKPASS, false).isRepo(), false);
   });
 });
