@@ -1,16 +1,17 @@
 // Process entrypoint.
 //
-// Startup is fail-closed: a missing token, a workspace that is not a git work
-// tree, an origin that is not a GitHub repository, or a token that cannot see that
-// repository all stop the process here rather than leaving a tong that accepts
-// calls and fails every one of them.
+// Startup is fail-closed: a missing token, an origin that is not a GitHub
+// repository, or a token that cannot see that repository all stop the process here
+// rather than leaving a tong that accepts calls and fails every one of them.
+// No origin, or no repository, serves no verbs instead.
 
 import { booleanFromEnv } from "./config.js";
 import { realRun } from "./exec.js";
 import { GitHub, pushBlocker } from "./github.js";
-import { parseOrigin, remoteUrl } from "./origin.js";
+import { type Origin, parseOrigin, remoteUrl } from "./origin.js";
 import { Repo } from "./repo.js";
 import { createApp } from "./app.js";
+import type { Context, Idle } from "./server.js";
 
 const port = Number(process.env.PORT ?? 8080);
 const workspace = process.env.GITHUB_TONG_WORKSPACE ?? "/workspace";
@@ -49,41 +50,54 @@ const requireSignedCommits = (() => {
 
 const repo = new Repo(realRun, workspace, askpass, requireSignedCommits);
 
-const origin = await (async () => {
+/** The verified repository, or why there is none. */
+async function serving(token: string): Promise<Context | Idle> {
+  let url: string | null;
   try {
-    await repo.assertIsRepo();
-    const url = await repo.originUrl();
-    if (!url) die(`${workspace} has no 'origin' remote; this tong has no way to know which repository it serves.`);
-    return parseOrigin(url);
+    if (!(await repo.isRepo())) return { idle: `${workspace} was not a git work tree` };
+    url = await repo.originUrl();
   } catch (err) {
     die((err as Error).message);
   }
-})();
+  if (!url) return { idle: `${workspace} had no 'origin' remote` };
 
-const github = new GitHub(fetch, origin, token);
+  let origin: Origin;
+  try {
+    origin = parseOrigin(url);
+  } catch (err) {
+    die((err as Error).message);
+  }
 
-// Catches the configuration mistakes that are otherwise invisible until the first
-// verb call. Reachability is not enough on its own: a public repository answers
-// this for any valid token, including one with no write access to it, so the
-// reported permissions are what actually gets checked.
-try {
-  const { defaultBranch, permissions } = await github.repository();
-  const blocker = pushBlocker(origin, permissions);
-  if (blocker) die(blocker);
-  console.log(`github: ${origin.owner}/${origin.repo} writable, default branch ${defaultBranch}`);
-} catch (err) {
-  // Including the network case. Warning and starting anyway produces a tong that
-  // looks healthy and fails every verb with an error from deep inside git, which
-  // is a worse outcome than not starting.
-  die((err as Error).message);
+  const github = new GitHub(fetch, origin, token);
+
+  // Catches the configuration mistakes that are otherwise invisible until the first
+  // verb call. Reachability is not enough on its own: a public repository answers
+  // this for any valid token, including one with no write access to it, so the
+  // reported permissions are what actually gets checked.
+  try {
+    const { defaultBranch, permissions } = await github.repository();
+    const blocker = pushBlocker(origin, permissions);
+    if (blocker) die(blocker);
+    console.log(`github: ${origin.owner}/${origin.repo} writable, default branch ${defaultBranch}`);
+  } catch (err) {
+    // Including the network case. Warning and starting anyway produces a tong that
+    // looks healthy and fails every verb with an error from deep inside git, which
+    // is a worse outcome than not starting.
+    die((err as Error).message);
+  }
+
+  if (requireSignedCommits) {
+    console.log("github: every commit a push would add to the repository must carry a signature");
+  }
+
+  return { repo, github, origin, remoteUrl: remoteUrl(origin), token };
 }
 
-if (requireSignedCommits) {
-  console.log("github: every commit a push would add to the repository must carry a signature");
-}
+const context = await serving(token);
+const serves = "idle" in context ? `no verbs: ${context.idle}` : `${context.origin.owner}/${context.origin.repo}`;
 
-const httpServer = createApp({ repo, github, origin, remoteUrl: remoteUrl(origin), token }).listen(port, () => {
-  console.log(`github listening on :${port} (${origin.owner}/${origin.repo}, workspace ${workspace})`);
+const httpServer = createApp(context).listen(port, () => {
+  console.log(`github listening on :${port} (${serves}, workspace ${workspace})`);
 });
 
 function shutdown(signal: string): void {

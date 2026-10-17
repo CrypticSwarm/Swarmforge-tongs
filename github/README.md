@@ -141,6 +141,10 @@ Two things follow from that:
 A remote pointing anywhere but `github.com` stops startup rather than aiming the
 token at an unknown server.
 
+A workspace with no `origin`, or no git repository, starts a tong with no verbs
+rather than failing the session's health check. Adding a remote later needs a new
+session.
+
 ## Fetching
 
 `fetch_origin` fetches the pinned URL a push uses, with `git fetch origin`'s
@@ -178,7 +182,7 @@ on `origin` and the follow-up push is a fast-forward. Sign, then push.
 - `HEAD` is detached — there is no branch to push.
 - The push is not a fast-forward. There is no force verb, and no flag to add one.
   Rebase or rename the branch and push again.
-- The workspace has no `origin`, or `origin` is not a GitHub repository.
+- `origin` is not a GitHub repository.
 - The token cannot see the repository. That is checked at startup, because a
   fine-grained token missing this repository and a repository that does not exist
   are the same 404 later on.

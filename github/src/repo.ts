@@ -237,11 +237,8 @@ export class Repo {
     return text.length > 0 ? text : null;
   }
 
-  async assertIsRepo(): Promise<void> {
-    const inside = await this.tryCapture(["rev-parse", "--is-inside-work-tree"]);
-    if (inside !== "true") {
-      throw new RepoError(`${this.workspace} is not a git work tree`);
-    }
+  async isRepo(): Promise<boolean> {
+    return (await this.tryCapture(["rev-parse", "--is-inside-work-tree"])) === "true";
   }
 
   /**

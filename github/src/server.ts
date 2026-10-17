@@ -358,6 +358,22 @@ export async function mergePr(context: Context, input: { number: number; method?
   return `Merged #${number} into ${pr.base} (${method}) as ${sha.slice(0, 12) || "an unreported commit"}.\n${pr.url}`;
 }
 
+/** Why the workspace has no repository to serve. */
+export type Idle = { idle: string };
+
+/** No verbs, but still up, so the launcher's health check passes. */
+export function buildIdleServer(reason: string): McpServer {
+  return new McpServer(
+    { name: "github", version: "0.1.0" },
+    {
+      instructions:
+        `No verbs: at startup, ${reason}. Add a GitHub 'origin' and start a new session to use this tong.`,
+      // So tools/list returns [] rather than an error.
+      capabilities: { tools: { listChanged: false } },
+    },
+  );
+}
+
 /** Module-wide, since every request builds a fresh server. */
 let pullRequestWrites: Promise<unknown> = Promise.resolve();
 
