@@ -283,6 +283,9 @@ export type PrState = {
   state?: "open" | "closed";
   merged?: boolean;
   headSha?: string;
+  createdAt?: string;
+  closedAt?: string | null;
+  mergedAt?: string | null;
 };
 
 /** A pull request as GitHub reports it, for the read and edit paths. */
@@ -298,6 +301,9 @@ export function prJson(pr: PrState) {
     merged: pr.merged ?? false,
     base: { ref: pr.base },
     head: { ref: pr.head, sha: pr.headSha ?? "2222222222222222222222222222222222222222" },
+    created_at: pr.createdAt ?? "2026-09-30T08:00:00Z",
+    closed_at: pr.closedAt ?? (pr.state === "closed" || pr.merged ? "2026-10-01T12:00:00Z" : null),
+    merged_at: pr.mergedAt ?? (pr.merged ? "2026-10-01T12:00:00Z" : null),
   };
 }
 
@@ -307,7 +313,7 @@ export function prJson(pr: PrState) {
  */
 export function listedPrJson(pr: PrState) {
   const { merged, ...rest } = prJson(pr);
-  return { ...rest, merged_at: merged ? "2026-10-01T12:00:00Z" : null };
+  return rest;
 }
 
 export function listPrsRoute(prs: PrState[]) {
