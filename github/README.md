@@ -22,7 +22,7 @@ with `initialize`.
 | `fetch_origin` | none | `git fetch origin` for the workspace's repository: every branch into `refs/remotes/origin/*`, plus new tags that point into them. Never prunes, and writes no `FETCH_HEAD`. |
 | `push_branch` | none | Pushes the branch you have checked out to its GitHub repository and moves the local `refs/remotes/origin/<branch>` to match. Never force-pushes. |
 | `create_pr` | `title`, `body?`, `base?`, `draft?` | Pushes the branch as above, then opens a pull request from it. `base` defaults to the repository's default branch. |
-| `get_pr` | `number` | Reads one pull request: its title, description, branches, and whether it is open, draft, closed, or merged. |
+| `get_pr` | `number` | Reads one pull request: its title, description, branches, whether it is open, draft, closed, or merged, and when it was opened, closed, and merged. |
 | `find_pr` | `head` | Lists the pull requests opened from a branch of this repository, newest first and up to 10, closed and merged ones included: each with its number, URL, branches, and whether it is open, draft, closed, or merged. For when you have a branch name and no number. Read one in full with `get_pr`. |
 | `update_pr` | `number`, `title?`, `body?`, `base?`, `state?`, `draft?` | Edits an open pull request. Only the fields you pass change, and each replaces its current value. |
 | `merge_pr` | `number`, `method?` | Merges an open pull request with `merge` (the default), `squash`, or `rebase`, if GitHub reports it mergeable without a bypass. See [Merging](#merging). |
