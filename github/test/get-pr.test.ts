@@ -33,6 +33,32 @@ describe("get_pr", () => {
     }
   });
 
+  it("reports when it was opened, closed, and merged, omitting what has not happened", async () => {
+    const open = new FakeGitHubApi(getPrRoute({ number: 5, title: "t", body: "b", base: "main", head: "feature" }));
+    const text = await getPr(contextFor(open), { number: 5 });
+    assert.match(text, /\nopened: 2026-09-30T08:00:00Z\n/);
+    assert.doesNotMatch(text, /closed:|merged:/);
+
+    const merged = new FakeGitHubApi(
+      getPrRoute({
+        number: 6,
+        title: "t",
+        body: "b",
+        base: "main",
+        head: "feature",
+        state: "closed",
+        merged: true,
+        createdAt: "2026-10-01T09:00:00Z",
+        closedAt: "2026-10-02T10:00:00Z",
+        mergedAt: "2026-10-02T10:00:00Z",
+      }),
+    );
+    assert.match(
+      await getPr(contextFor(merged), { number: 6 }),
+      /\nopened: 2026-10-01T09:00:00Z\nclosed: 2026-10-02T10:00:00Z\nmerged: 2026-10-02T10:00:00Z\n/,
+    );
+  });
+
   it("renders an empty description as such rather than as nothing", async () => {
     // GitHub answers with null, not "", for a pull request opened with no body.
     const api = new FakeGitHubApi(getPrRoute({ number: 4, title: "t", body: null, base: "main", head: "feature" }));

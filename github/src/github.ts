@@ -68,6 +68,10 @@ export type PullRequest = {
   state: "open" | "closed";
   /** A merged pull request is also `closed`, but almost nothing about it can change. */
   merged: boolean;
+  /** ISO 8601 timestamps as GitHub sends them; null when unset or omitted. */
+  createdAt: string | null;
+  closedAt: string | null;
+  mergedAt: string | null;
 };
 
 export type CreatePullRequest = {
@@ -433,6 +437,8 @@ function parsePullRequest(data: unknown, context: string): PullRequest {
     body?: string | null;
     draft?: boolean;
     merged?: boolean;
+    created_at?: string;
+    closed_at?: string | null;
     merged_at?: string | null;
     state?: string;
     base?: { ref?: string };
@@ -459,7 +465,14 @@ function parsePullRequest(data: unknown, context: string): PullRequest {
     // pull request endpoint sends both. Reading either keeps a merged pull request
     // from showing up as merely closed in a lookup by branch.
     merged: pr.merged === true || (typeof pr.merged_at === "string" && pr.merged_at.length > 0),
+    createdAt: timestamp(pr.created_at),
+    closedAt: timestamp(pr.closed_at),
+    mergedAt: timestamp(pr.merged_at),
   };
+}
+
+function timestamp(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
 }
 
 function progress(item: { status?: string; conclusion?: string | null }): Progress {

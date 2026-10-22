@@ -204,9 +204,16 @@ function statusOf(pr: PullRequest): string {
 
 /** What a caller needs before editing: the current text, verbatim, and where it points. */
 function renderPr(pr: PullRequest): string {
+  const times: Array<[string, string | null]> = [
+    ["opened", pr.createdAt],
+    ["closed", pr.closedAt],
+    ["merged", pr.mergedAt],
+  ];
   return [
     `#${pr.number} ${pr.head} -> ${pr.base} (${statusOf(pr)})`,
     pr.url,
+    "",
+    ...times.filter(([, at]) => at !== null).map(([label, at]) => `${label}: ${at}`),
     "",
     `title: ${pr.title}`,
     "",
@@ -472,7 +479,7 @@ export function buildServer(context: Context): McpServer {
     {
       description:
         "Read one pull request of this workspace's repository: its title, its description, the branches it " +
-        "goes between, and whether it is open, draft, closed, or merged. The repository is not a parameter " +
+        "goes between, whether it is open, draft, closed, or merged, and when it was opened, closed, and merged. The repository is not a parameter " +
         "-- only pull requests of the pinned one are readable.",
       inputSchema: z.strictObject({
         number: positiveId.describe("Pull request number, as it appears in the repository."),
