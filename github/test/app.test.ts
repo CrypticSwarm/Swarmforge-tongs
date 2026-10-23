@@ -55,6 +55,7 @@ const VERBS = [
   "fetch_origin",
   "find_pr",
   "get_pr",
+  "list_workflows",
   "merge_pr",
   "push_branch",
   "update_pr",
@@ -216,7 +217,7 @@ describe("protocol eras", () => {
       // Every built-in verb is reserved, so a dispatch verb cannot collide with one.
       assert.deepEqual(
         VERBS.filter((verb) => !verb.startsWith("deploy_")),
-        [...RESERVED_VERBS].filter((verb) => verb !== "list_workflows").sort(),
+        [...RESERVED_VERBS].sort(),
       );
 
       // What the strict zod 4 schemas list: no extra keys, the right required set,
@@ -226,6 +227,7 @@ describe("protocol eras", () => {
         ci_status: { properties: ["pr", "run", "sha"], required: undefined },
         deploy_production: { properties: ["inputs"], required: undefined },
         deploy_staging: { properties: ["inputs"], required: undefined },
+        list_workflows: { properties: [], required: undefined },
         ci_job: { properties: ["job_id"], required: ["job_id"] },
         ci_log: { properties: ["job_id", "limit", "start", "step"], required: ["job_id"] },
         fetch_origin: { properties: [], required: undefined },
@@ -651,6 +653,15 @@ describe("untrusted arguments", () => {
       refs.push((api.lastBody as { ref: string }).ref);
     }
     assert.deepEqual(refs, ["refs/heads/feature", "refs/heads/main"]);
+  });
+
+  it("list_workflows lists each dispatch verb's inputs", async () => {
+    Object.assign(api.routes, branchTipRoute({ "refs/heads/main": "4".repeat(40) }));
+    const client = await connect();
+
+    const listing = text(await client.callTool({ name: "list_workflows", arguments: {} }));
+    assert.match(listing, /^deploy_production: \.github\/workflows\/deploy\.yml on main \(default branch\), at 444444444444\n {2}in0 \(string\)$/m);
+    assert.match(listing, /^deploy_old: dropped at startup$/m);
   });
 
   it("an invented argument within the cap is refused by the strict schema", async () => {
