@@ -26,7 +26,7 @@ with `initialize`.
 | `find_pr` | `head` | Lists the pull requests opened from a branch of this repository, newest first and up to 10, closed and merged ones included: each with its number, URL, branches, and whether it is open, draft, closed, or merged. For when you have a branch name and no number. Read one in full with `get_pr`. |
 | `update_pr` | `number`, `title?`, `body?`, `base?`, `state?`, `draft?` | Edits an open pull request. Only the fields you pass change, and each replaces its current value. |
 | `merge_pr` | `number`, `method?` | Merges an open pull request with `merge` (the default), `squash`, or `rebase`, if GitHub reports it mergeable without a bypass. See [Merging](#merging). |
-| `ci_status` | `sha?`, `pr?` | Lists the Actions runs for one commit, newest first and up to 10, with each job's id, state, queue and run time, and the step it failed at. See [Reading CI](#reading-ci). |
+| `ci_status` | `sha?`, `pr?`, `run?` | Lists the Actions runs for one commit, newest first and up to 10, or one run by id with the commit it is for. Shows each job's id, state, queue and run time, skipped steps, and the step it failed at. See [Reading CI](#reading-ci). |
 | `ci_job` | `job_id` | Lists a job's steps with their state, start offset, and duration, plus its runner. |
 | `ci_log` | `job_id`, `step?`, `start?`, `limit?` | Returns part of a job's plain-text log, timestamps included. Defaults to the end of the failed step, or of the whole log. |
 
@@ -42,8 +42,17 @@ reaches git or GitHub.
 `ci_status` with no parameters reports on `origin/<branch>` for the branch checked
 out, which `push_branch` and `fetch_origin` keep current, and says when `HEAD`
 differs from it.
-`pr` checks a pull request's head instead, and `sha` any commit. A ref name is not
-accepted, since resolving one would mean running git on a caller's string.
+`pr` checks a pull request's head instead, `sha` any commit, and `run` one run,
+reporting its branch and full head sha. A ref name is not accepted, since resolving
+one would mean running git on a caller's string.
+
+`ci_status` also says what a bare state hides:
+
+- skipped jobs in a successful run;
+- the steps a successful job skipped;
+- a run cancelled before any step started;
+- what usually holds a `waiting` or `pending` run: environment protection rules, or
+  a concurrency group.
 
 `ci_log` cuts a step out of the log by the step's start and end times. GitHub
 reports those to the second, so a line from a neighboring step can show at either
