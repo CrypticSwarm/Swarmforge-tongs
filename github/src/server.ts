@@ -9,7 +9,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod";
 import { ciJob, ciLog, ciStatus, clean, DEFAULT_LOG_LINES, MAX_LOG_LINES } from "./ci.js";
 import type { DispatchEntry } from "./config.js";
-import { dispatch, INPUT_NAME, MAX_INPUT_CHARS, MAX_INPUTS, type Dropped } from "./dispatch.js";
+import { dispatch, INPUT_NAME, listWorkflows, MAX_INPUT_CHARS, MAX_INPUTS, type Dropped } from "./dispatch.js";
 import {
   COMMIT_SHA,
   GitHubError,
@@ -90,7 +90,8 @@ export function dispatchInstructions(verbs: readonly string[], dropped: readonly
     ? [
         `${verbs.length === 1 ? verbs[0] : `Each of ${verbs.join(", ")}`} dispatches one configured GitHub Actions`,
         "workflow on its configured branch, checking 'inputs' against the workflow file there",
-        "first. A dispatch cannot be undone here; follow its run with ci_status run=<id>.",
+        "first. list_workflows shows the inputs. A dispatch cannot be undone here; follow",
+        "its run with ci_status run=<id>.",
       ]
     : [];
   // So an agent missing a verb can say why, rather than that it was never there.
@@ -645,6 +646,19 @@ export function buildServer(context: Context): McpServer {
     .refine((value) => Object.keys(value).length <= MAX_INPUTS, `at most ${MAX_INPUTS} inputs`)
     .optional()
     .describe("Workflow inputs by name, each a string, number, or boolean, as the workflow file types it.");
+  if (dispatchText) {
+    verb(
+      "list_workflows",
+      {
+        description:
+          "List each dispatch verb's workflow file, branch, and inputs as that file on that branch has them now, " +
+          "with why a dispatch would be refused now, plus any verb dropped at startup.",
+        inputSchema: z.strictObject({}),
+      },
+      listWorkflows,
+    );
+  }
+
   for (const entry of dispatchVerbs) {
     const on =
       entry.ref === "default"
