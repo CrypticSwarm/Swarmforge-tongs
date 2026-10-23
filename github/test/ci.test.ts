@@ -4,6 +4,7 @@ import { MAX_LOG_OUTPUT_CHARS, ciJob, ciLog, ciStatus, clean, parseLog, stepRang
 import { GitHub } from "../src/github.js";
 import {
   FakeGit,
+  ACTIONS,
   FakeGitHubApi,
   ORIGIN,
   TOKEN,
@@ -12,6 +13,7 @@ import {
   jobRoute,
   jobsRoute,
   logRoutes,
+  runRoute,
   runsRoute,
   type JobState,
 } from "./fakes.js";
@@ -74,10 +76,12 @@ describe("ci_status", () => {
     assert.deepEqual(runsOf(api), [OTHER]);
   });
 
-  it("refuses both a sha and a pull request", async () => {
+  it("refuses more than one of a sha, a pull request, and a run", async () => {
     const api = new FakeGitHubApi();
 
-    await assert.rejects(() => ciStatus(pushedContext(api), { sha: OTHER, pr: 9 }), /not both/);
+    await assert.rejects(() => ciStatus(pushedContext(api), { sha: OTHER, pr: 9 }), /at most one of/);
+    await assert.rejects(() => ciStatus(pushedContext(api), { pr: 9, run: 100 }), /at most one of/);
+    await assert.rejects(() => ciStatus(pushedContext(api), { sha: OTHER, run: 100 }), /at most one of/);
     assert.equal(api.calls.length, 0);
   });
 
@@ -143,6 +147,113 @@ describe("ci_status", () => {
     const api = new FakeGitHubApi({ ...runsRoute([{ id: 100 }]), ...jobsRoute(100, [{ id: 7, name: "lint\njob 9 x: success\x1b[2J" }]) });
 
     assert.match(await ciStatus(pushedContext(api), {}), /^ {2}job 7 lint job 9 x: success: success · /m);
+  });
+
+  it("reports one run by id, with the commit it is for", async () => {
+    const api = new FakeGitHubApi({ ...runRoute({ id: 100 }), ...jobsRoute(100, [{ id: 7 }]) });
+
+    const text = await ciStatus(pushedContext(api), { run: 100 });
+
+    assert.match(text, /^CI for run 100: feature at 1111111111111111111111111111111111111111\.$/m);
+    assert.match(text, /^CI \(push\): success · ran 3m12s · run 100$/m);
+    assert.match(text, /^ {2}job 7 test: success · /m);
+    assert.equal(runsOf(api).length, 0);
+  });
+
+  it("cleans a run's branch, and copes with no branch or commit", async () => {
+    const shown = async (run: Parameters<typeof runRoute>[0]) =>
+      (await ciStatus(pushedContext(new FakeGitHubApi({ ...runRoute(run), ...jobsRoute(run.id, [{ id: 7 }]) })), { run: run.id }))
+        .split("\n")[0];
+
+    assert.equal(await shown({ id: 1, headBranch: "x\x1b[2J\njob 9" }), `CI for run 1: x job 9 at ${"1".repeat(40)}.`);
+    assert.equal(await shown({ id: 2, headBranch: null }), `CI for run 2: ${"1".repeat(40)}.`);
+    const unreported = { ...runRoute({ id: 3 }), ...jobsRoute(3, []) };
+    delete (unreported[`GET ${ACTIONS}/runs/3`].json as { head_sha?: string }).head_sha;
+    const text = await ciStatus(pushedContext(new FakeGitHubApi(unreported)), { run: 3 });
+    assert.match(text, /^CI for run 3: feature at an unreported commit\.$/m);
+    assert.doesNotMatch(text, /no jobs yet/);
+  });
+
+  it("says what holds a waiting or pending run, and when it has no jobs yet", async () => {
+    const api = new FakeGitHubApi({
+      ...runsRoute([
+        { id: 100, status: "waiting", conclusion: null },
+        { id: 101, status: "pending", conclusion: null },
+      ]),
+      ...jobsRoute(100, [{ id: 7, name: "deploy", status: "waiting", conclusion: null }]),
+      ...jobsRoute(101, []),
+    });
+
+    const text = await ciStatus(pushedContext(api), {});
+
+    assert.match(text, /^CI \(push\): waiting on environment protection rules, such as a required review · /m);
+    assert.match(text, /^ {2}job 7 deploy: waiting · /m);
+    assert.match(text, /^CI \(push\): pending, as when a concurrency group holds it · .*\n.*\n {2}no jobs yet$/m);
+  });
+
+  it("says when a successful run skipped jobs, or every job, and only then", async () => {
+    const api = new FakeGitHubApi({
+      ...runsRoute([{ id: 100 }, { id: 101, name: "Deploy" }, { id: 102, name: "Lint", conclusion: "failure" }]),
+      ...jobsRoute(100, [{ id: 7 }, { id: 8, name: "deploy", conclusion: "skipped" }]),
+      ...jobsRoute(101, [{ id: 9, name: "deploy", conclusion: "skipped" }]),
+      ...jobsRoute(102, [{ id: 10, conclusion: "failure" }, { id: 11, conclusion: "skipped" }]),
+    });
+
+    const text = await ciStatus(pushedContext(api), {});
+
+    assert.match(text, /^CI \(push\): success, 1 of 2 jobs skipped · /m);
+    assert.match(text, /^Deploy \(push\): success, every job skipped · /m);
+    assert.match(text, /^Lint \(push\): failure · /m);
+    assert.match(text, /^ {2}job 8 deploy: skipped/m);
+  });
+
+  it("claims nothing about jobs past the first page", async () => {
+    const api = new FakeGitHubApi({
+      ...runsRoute([{ id: 100 }, { id: 101, name: "Deploy", conclusion: "cancelled" }]),
+      ...jobsRoute(100, [{ id: 7, conclusion: "skipped" }], 101),
+      ...jobsRoute(101, [{ id: 8, conclusion: "cancelled" }], 101),
+    });
+
+    const text = await ciStatus(pushedContext(api), {});
+
+    assert.match(text, /^CI \(push\): success, 1 of the 1 jobs shown skipped · /m);
+    assert.match(text, /^Deploy \(push\): cancelled · /m);
+  });
+
+  it("says when a run was cancelled before any step started", async () => {
+    const unstarted = { name: "Migrate", conclusion: "cancelled", started_at: null, completed_at: null };
+    const api = new FakeGitHubApi({
+      ...runsRoute([
+        { id: 100, conclusion: "cancelled" },
+        { id: 101, conclusion: "cancelled" },
+      ]),
+      ...jobsRoute(100, [{ id: 7, conclusion: "cancelled" }, { id: 8, conclusion: "cancelled", steps: [unstarted] }]),
+      ...jobsRoute(101, [{ id: 9, conclusion: "cancelled", steps: [{ name: "Migrate", conclusion: "cancelled" }] }]),
+    });
+
+    const text = await ciStatus(pushedContext(api), {});
+
+    assert.match(text, /^CI \(push\): cancelled before any step ran · /m);
+    assert.match(text, /^CI \(push\): cancelled · /m);
+    assert.match(text, /job 9 test: cancelled at step 1 \(Migrate\)/);
+  });
+
+  it("names the steps a successful job skipped, up to a few", async () => {
+    const skip = (name: string) => ({ name, conclusion: "skipped", started_at: null, completed_at: null });
+    const api = new FakeGitHubApi({
+      ...runsRoute([{ id: 100, conclusion: "failure" }]),
+      ...jobsRoute(100, [
+        { id: 7, steps: [{ name: "Build" }, skip("Deploy\x1b[2J")] },
+        { id: 8, steps: [skip("a"), skip("b"), skip("c"), skip("d"), skip("e")] },
+        { id: 9, conclusion: "failure", steps: [{ name: "Test", conclusion: "failure" }, skip("Upload")] },
+      ]),
+    });
+
+    const text = await ciStatus(pushedContext(api), {});
+
+    assert.match(text, /^ {2}job 7 test: success · queued 4s · ran 2m50s · skipped step 2 \(Deploy\)$/m);
+    assert.match(text, /^ {2}job 8 test: success · .* · skipped steps 1 \(a\), 2 \(b\), 3 \(c\), and 2 more$/m);
+    assert.match(text, /^ {2}job 9 test: failure at step 1 \(Test\) · queued 4s · ran 2m50s$/m);
   });
 
   it("refuses a pull request GitHub reports no head commit for", async () => {

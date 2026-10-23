@@ -1,4 +1,4 @@
-// The CI verbs: the GitHub Actions runs for a commit, a job's steps, and its log.
+// The CI verbs: the GitHub Actions runs for a commit or one run, a job's steps, and its log.
 
 import type { Job, JobStep, Progress, WorkflowRun } from "./github.js";
 import type { Context } from "./server.js";
@@ -13,6 +13,15 @@ const MAX_LINE_CHARS = 1000;
 
 /** Conclusions that did not fail. */
 const PASSED = new Set(["success", "skipped", "neutral"]);
+
+/** Skipped steps named on a job's line before the rest are only counted. */
+const MAX_SKIPPED_SHOWN = 3;
+
+/** Unfinished run states whose name alone does not say what holds them. */
+const HELD = new Map([
+  ["waiting", "waiting on environment protection rules, such as a required review"],
+  ["pending", "pending, as when a concurrency group holds it"],
+]);
 
 // Whole OSC, CSI, and two-byte escapes; then C0 but tab, DEL, C1, line separators, and bidi or zero-width marks.
 const UNSAFE = new RegExp(
@@ -61,13 +70,12 @@ function firstFailedStep(job: Job): JobStep | undefined {
   return job.steps.find((step) => failed(step) && step.startedAt);
 }
 
-export type CiStatusInput = { sha?: string; pr?: number };
+export type CiStatusInput = { sha?: string; pr?: number; run?: number };
 
 type Target = { sha: string; label: string; note?: string };
 
 /** By default, the checked-out branch as origin has it. */
 async function resolveTarget(context: Context, input: CiStatusInput): Promise<Target> {
-  if (input.sha !== undefined && input.pr !== undefined) throw new Error("pass 'sha' or 'pr', not both.");
   if (input.sha !== undefined) return { sha: input.sha, label: input.sha.slice(0, 12) };
   if (input.pr !== undefined) {
     const pr = await context.github.pullRequest(input.pr);
@@ -87,17 +95,43 @@ async function resolveTarget(context: Context, input: CiStatusInput): Promise<Ta
   };
 }
 
+/** Only in a job that succeeded: after a failure, GitHub skips every later step. */
+function skippedSteps(job: Job): string[] {
+  if (!job.completed || job.state !== "success") return [];
+  const skipped = job.steps.filter((step) => step.completed && step.state === "skipped");
+  if (skipped.length === 0) return [];
+  const named = skipped.slice(0, MAX_SKIPPED_SHOWN).map((step) => `${step.number} (${clean(step.name)})`);
+  const rest = skipped.length - named.length;
+  const list = rest ? `${named.join(", ")}, and ${rest} more` : named.join(", ");
+  return [`skipped step${skipped.length === 1 ? "" : "s"} ${list}`];
+}
+
 function renderJob(job: Job): string {
   const step = firstFailedStep(job);
   const where = step ? `step ${step.number} (${clean(step.name)})` : "";
   const state = !step ? job.state : job.completed ? `${job.state} at ${where}` : `${job.state}, ${where} failed`;
-  return [`  job ${job.id} ${clean(job.name)}: ${state}`, ...timing(job, job.completedAt)].join(" · ");
+  return [`  job ${job.id} ${clean(job.name)}: ${state}`, ...timing(job, job.completedAt), ...skippedSteps(job)].join(
+    " · ",
+  );
+}
+
+/** A run's state, plus what it hides: what holds it, skipped jobs, or a cancellation before any step ran. */
+function runState(run: WorkflowRun, { jobs, more }: { jobs: Job[]; more: boolean }): string {
+  if (!run.completed) return HELD.get(run.state) ?? run.state;
+  // Jobs past the first page are unseen, so claim nothing about all of them.
+  if (run.state === "cancelled" && !more && !jobs.some((job) => job.steps.some((step) => step.startedAt))) {
+    return "cancelled before any step ran";
+  }
+  const skipped = jobs.filter((job) => job.completed && job.state === "skipped").length;
+  if (run.state !== "success" || skipped === 0) return run.state;
+  if (more) return `success, ${skipped} of the ${jobs.length} jobs shown skipped`;
+  return skipped === jobs.length ? "success, every job skipped" : `success, ${skipped} of ${jobs.length} jobs skipped`;
 }
 
 function renderRun(run: WorkflowRun, jobs: { jobs: Job[]; more: boolean }): string {
   const attempt = run.attempt > 1 ? `, attempt ${run.attempt}` : "";
   const head = [
-    `${clean(run.name)} (${clean(run.event)}): ${run.state}`,
+    `${clean(run.name)} (${clean(run.event)}): ${runState(run, jobs)}`,
     ...timing(run, run.updatedAt),
     `run ${run.id}${attempt}`,
   ];
@@ -105,11 +139,24 @@ function renderRun(run: WorkflowRun, jobs: { jobs: Job[]; more: boolean }): stri
     head.join(" · "),
     run.url,
     ...jobs.jobs.map(renderJob),
+    ...(jobs.jobs.length === 0 && !run.completed ? ["  no jobs yet"] : []),
     ...(jobs.more ? [`  ...and more jobs than the ${jobs.jobs.length} shown`] : []),
   ].join("\n");
 }
 
+const NEXT = "Read a job's steps with ci_job and its log with ci_log.";
+
 export async function ciStatus(context: Context, input: CiStatusInput): Promise<string> {
+  const given = [input.sha, input.pr, input.run].filter((value) => value !== undefined).length;
+  if (given > 1) throw new Error("pass at most one of 'sha', 'pr', or 'run'.");
+  if (input.run !== undefined) {
+    const run = await context.github.workflowRun(input.run);
+    const jobs = await context.github.runJobs(run.id);
+    const branch = run.headBranch ? `${clean(run.headBranch)} at ` : "";
+    const head = `CI for run ${run.id}: ${branch}${clean(run.headSha) || "an unreported commit"}.`;
+    return [head, renderRun(run, jobs), NEXT].join("\n\n");
+  }
+
   const target = await resolveTarget(context, input);
   const { runs, more } = await context.github.workflowRuns(target.sha);
   const note = target.note ? [target.note] : [];
@@ -125,7 +172,7 @@ export async function ciStatus(context: Context, input: CiStatusInput): Promise<
   return [
     [`CI for ${target.label}: ${count}, newest first.`, ...note].join("\n"),
     ...runs.map((run, i) => renderRun(run, jobs[i])),
-    "Read a job's steps with ci_job and its log with ci_log.",
+    NEXT,
   ].join("\n\n");
 }
 
