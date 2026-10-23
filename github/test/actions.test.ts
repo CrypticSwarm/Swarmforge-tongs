@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { GitHub, GitHubError, MAX_LOG_BYTES, MAX_LOG_READ_BYTES, NoAnswer, type Fetch } from "../src/github.js";
-import { ACTIONS, FakeGitHubApi, LOG_HOST, ORIGIN, TOKEN, getPrRoute, jobsRoute, logRoutes, runRoute, runsRoute } from "./fakes.js";
+import { ACTIONS, FakeGitHubApi, LOG_HOST, ORIGIN, TOKEN, branchTipRoute, dispatchRoute, getPrRoute, jobsRoute, logRoutes, runRoute, runsRoute, workflowFileRoute } from "./fakes.js";
 
 const SHA = "abcdef0123456789abcdef0123456789abcdef01";
 
@@ -268,5 +268,92 @@ describe("pull request head", () => {
     );
 
     assert.equal((await client(api).pullRequest(7)).headSha, SHA);
+  });
+});
+
+describe("workflows", () => {
+  const CONTENTS = "/repos/acme/widgets/contents/.github/workflows/deploy.yml";
+
+  it("asks GitHub for a branch's tip with the qualified ref as a GraphQL variable", async () => {
+    const api = new FakeGitHubApi(branchTipRoute({ "refs/heads/a\"b": SHA }));
+
+    assert.equal(await client(api).branchTip('a"b'), SHA);
+    const { query, variables } = api.lastBody as { query: string; variables: Record<string, string> };
+    assert.deepEqual(variables, { owner: "acme", name: "widgets", ref: 'refs/heads/a"b' });
+    assert.doesNotMatch(query, /a"b/);
+    assert.equal(await client(api).branchTip("gone"), null);
+  });
+
+  it("refuses a branch tip that is not a commit sha", async () => {
+    const answer = (repository: unknown) =>
+      client(new FakeGitHubApi({ "POST /graphql": { status: 200, json: { data: { repository } } } })).branchTip("main");
+
+    await assert.rejects(() => answer({ ref: { target: { oid: "abc" } } }), /did not report the commit main points at/);
+    await assert.rejects(() => answer({ ref: {} }), /did not report the commit main points at/);
+    await assert.rejects(() => answer(null), /did not report the commit main points at/);
+  });
+
+  it("reads a workflow file at a ref, which stays one query value", async () => {
+    const api = new FakeGitHubApi(workflowFileRoute("deploy.yml", "on: workflow_dispatch\n"));
+
+    assert.equal(await client(api).workflowFile("deploy.yml", "a&ref=main#x"), "on: workflow_dispatch\n");
+    const url = new URL(api.calls[0].url);
+    assert.equal(url.pathname, CONTENTS);
+    assert.deepEqual([...url.searchParams], [["ref", "a&ref=main#x"]]);
+  });
+
+  it("refuses a workflow file GitHub does not send inline, or that is not a file", async () => {
+    const answer = (json: unknown) => new FakeGitHubApi({ [`GET ${CONTENTS}`]: { status: 200, json } });
+
+    await assert.rejects(() => client(answer({ type: "file", encoding: "none", size: 2_000_000, content: "" })).workflowFile("deploy.yml", "main"), /over 1 MB/);
+    await assert.rejects(() => client(answer({ type: "file", encoding: "base64", size: 2_000_000, content: "" })).workflowFile("deploy.yml", "main"), /over 1 MB/);
+    await assert.rejects(() => client(answer({ type: "file", encoding: "none", size: 10, content: "" })).workflowFile("deploy.yml", "main"), /over 1 MB/);
+    await assert.rejects(() => client(answer([{ type: "file" }])).workflowFile("deploy.yml", "main"), /is not a file on main/);
+  });
+
+  it("dispatches on a branch, asking for the run's details", async () => {
+    const api = new FakeGitHubApi(dispatchRoute("deploy.yml", 9));
+
+    const result = await client(api).dispatchWorkflow("deploy.yml", "main", { a: "1" });
+
+    assert.equal(new URL(api.calls[0].url).pathname, `${ACTIONS}/workflows/deploy.yml/dispatches`);
+    assert.equal(api.calls[0].method, "POST");
+    assert.deepEqual(api.lastBody, { ref: "main", inputs: { a: "1" }, return_run_details: true });
+    assert.deepEqual(result, { runId: 9, url: "https://github.com/acme/widgets/actions/runs/9" });
+  });
+
+  it("reports no run id when GitHub sends none, or one that is not an id", async () => {
+    const route = `POST ${ACTIONS}/workflows/deploy.yml/dispatches`;
+    const ids = ["9", -1, 1.5];
+    for (const response of [{ status: 204 }, ...ids.map((workflow_run_id) => ({ status: 200, json: { workflow_run_id } }))]) {
+      const api = new FakeGitHubApi({ [route]: response });
+      assert.deepEqual(await client(api).dispatchWorkflow("deploy.yml", "main", {}), { runId: null, url: "" });
+    }
+  });
+
+  it("keeps a file name that is not a workflow file name out of the URL", async () => {
+    const api = new FakeGitHubApi();
+    for (const file of ["../deploy.yml", "a/b.yml", "deploy.yml?x=1", "deploy", "%2e%2e.yml"]) {
+      await assert.rejects(() => client(api).workflowFile(file, "main"), /is not a workflow file name/);
+      await assert.rejects(() => client(api).dispatchWorkflow(file, "main", {}), /is not a workflow file name/);
+    }
+    assert.equal(api.calls.length, 0);
+  });
+
+  it("names the permission a 403 lacks, and what a 404 most likely means", async () => {
+    const forbidden = { status: 403, json: { message: "Resource not accessible" } };
+    const missing = { status: 404, json: {} };
+    const route = `POST ${ACTIONS}/workflows/deploy.yml/dispatches`;
+
+    await assert.rejects(() => client(new FakeGitHubApi({ [route]: forbidden })).dispatchWorkflow("deploy.yml", "main", {}), /Actions: read and write/);
+    await assert.rejects(() => client(new FakeGitHubApi({ [`GET ${CONTENTS}`]: forbidden })).workflowFile("deploy.yml", "main"), /Contents: read,/);
+    await assert.rejects(
+      () => client(new FakeGitHubApi({ [route]: missing })).dispatchWorkflow("deploy.yml", "main", {}),
+      /cannot see that workflow in acme\/widgets \(404\)\. Either no workflow on the default branch has that file name/,
+    );
+    await assert.rejects(
+      () => client(new FakeGitHubApi({ [`GET ${CONTENTS}`]: missing })).workflowFile("deploy.yml", "main"),
+      /cannot see that workflow file in acme\/widgets \(404\)\. Either it is not on that ref/,
+    );
   });
 });

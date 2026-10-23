@@ -489,12 +489,47 @@ export function mergeRoutes(pr: MergeableState, merge: FakeResponse = { status: 
 }
 
 /** A verb's context over the fakes, for the pinned acme/widgets. */
-export function contextFor(api = new FakeGitHubApi(), git = new FakeGit()): Context {
+export function contextFor(api = new FakeGitHubApi(), git = new FakeGit(), dispatch?: Context["dispatch"]): Context {
   return {
     repo: new Repo(git.run, WORKSPACE, ASKPASS, false),
     github: new GitHub(api.fetch, ORIGIN, TOKEN),
     origin: ORIGIN,
     remoteUrl: remoteUrl(ORIGIN),
     token: TOKEN,
+    dispatch,
+  };
+}
+
+/** A workflow file as the Contents API sends it, at any ref. */
+export function workflowFileRoute(file: string, yaml: string) {
+  const content = Buffer.from(yaml, "utf8").toString("base64");
+  return {
+    [`GET /repos/acme/widgets/contents/.github/workflows/${file}`]: {
+      status: 200,
+      json: { type: "file", encoding: "base64", size: yaml.length, content },
+    },
+  };
+}
+
+export function dispatchRoute(file: string, runId = 555) {
+  return {
+    [`POST ${ACTIONS}/workflows/${file}/dispatches`]: {
+      status: 200,
+      json: {
+        workflow_run_id: runId,
+        run_url: `https://api.github.com${ACTIONS}/runs/${runId}`,
+        html_url: `https://github.com/acme/widgets/actions/runs/${runId}`,
+      },
+    },
+  };
+}
+
+/** GraphQL's answer for branch tips: `tips` maps `refs/heads/<branch>` to a sha, and any other ref is absent. */
+export function branchTipRoute(tips: Record<string, string>) {
+  return {
+    "POST /graphql": (call: FetchCall) => {
+      const oid = tips[(call.body as { variables: { ref: string } }).variables.ref];
+      return { status: 200, json: { data: { repository: { ref: oid ? { target: { oid } } : null } } } };
+    },
   };
 }

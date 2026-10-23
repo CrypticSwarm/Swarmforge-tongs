@@ -5,13 +5,14 @@
 // rather than leaving a tong that accepts calls and fails every one of them.
 // No origin, or no repository, serves no verbs instead.
 
-import { booleanFromEnv } from "./config.js";
+import { booleanFromEnv, dispatchFromEnv } from "./config.js";
+import { usableEntries } from "./dispatch.js";
 import { realRun } from "./exec.js";
 import { GitHub, pushBlocker } from "./github.js";
 import { type Origin, parseOrigin, remoteUrl } from "./origin.js";
 import { Repo } from "./repo.js";
 import { createApp } from "./app.js";
-import type { Context, Idle } from "./server.js";
+import { RESERVED_VERBS, type Context, type Idle } from "./server.js";
 
 const port = Number(process.env.PORT ?? 8080);
 const workspace = process.env.GITHUB_TONG_WORKSPACE ?? "/workspace";
@@ -48,6 +49,14 @@ const requireSignedCommits = (() => {
   }
 })();
 
+const dispatchEntries = (() => {
+  try {
+    return dispatchFromEnv("GITHUB_TONG_DISPATCH", process.env.GITHUB_TONG_DISPATCH, RESERVED_VERBS);
+  } catch (err) {
+    die((err as Error).message);
+  }
+})();
+
 const repo = new Repo(realRun, workspace, askpass, requireSignedCommits);
 
 /** The verified repository, or why there is none. */
@@ -74,8 +83,10 @@ async function serving(token: string): Promise<Context | Idle> {
   // verb call. Reachability is not enough on its own: a public repository answers
   // this for any valid token, including one with no write access to it, so the
   // reported permissions are what actually gets checked.
+  let defaultBranch: string;
   try {
-    const { defaultBranch, permissions } = await github.repository();
+    let permissions: Record<string, boolean> | undefined;
+    ({ defaultBranch, permissions } = await github.repository());
     const blocker = pushBlocker(origin, permissions);
     if (blocker) die(blocker);
     console.log(`github: ${origin.owner}/${origin.repo} writable, default branch ${defaultBranch}`);
@@ -90,7 +101,15 @@ async function serving(token: string): Promise<Context | Idle> {
     console.log("github: every commit a push would add to the repository must carry a signature");
   }
 
-  return { repo, github, origin, remoteUrl: remoteUrl(origin), token };
+  // A bad workflow drops only its verb, so the verbs that would land a fix stay up.
+  const { entries, dropped } = await usableEntries(github, defaultBranch, dispatchEntries);
+  for (const entry of entries) {
+    const on = entry.ref === "default" ? defaultBranch : "the checked-out branch";
+    console.log(`github: ${entry.verb} dispatches ${entry.file} on ${on}`);
+  }
+  for (const { verb, why } of dropped) console.error(`github: dropping verb ${verb}: ${why}`);
+
+  return { repo, github, origin, remoteUrl: remoteUrl(origin), token, dispatch: { defaultBranch, entries, dropped } };
 }
 
 const context = await serving(token);
