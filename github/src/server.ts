@@ -8,6 +8,8 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod";
 import { ciJob, ciLog, ciStatus, clean, DEFAULT_LOG_LINES, MAX_LOG_LINES } from "./ci.js";
+import type { DispatchEntry } from "./config.js";
+import { dispatch, INPUT_NAME, MAX_INPUT_CHARS, MAX_INPUTS, type Dropped } from "./dispatch.js";
 import {
   COMMIT_SHA,
   GitHubError,
@@ -29,7 +31,24 @@ export type Context = {
   origin: Origin;
   remoteUrl: string;
   token: string;
+  /** The configured dispatch verbs that passed the startup check; absent means none. */
+  dispatch?: { defaultBranch: string; entries: readonly DispatchEntry[]; dropped: readonly Dropped[] };
 };
+
+/** Names a dispatch verb may not take: the built-in verbs, plus list_workflows. */
+export const RESERVED_VERBS: ReadonlySet<string> = new Set([
+  "push_branch",
+  "fetch_origin",
+  "create_pr",
+  "get_pr",
+  "find_pr",
+  "update_pr",
+  "merge_pr",
+  "ci_status",
+  "ci_job",
+  "ci_log",
+  "list_workflows",
+]);
 
 const INSTRUCTIONS = `Fetches and pushes branches, manages pull requests, and reads Actions CI for the repository checked out in this workspace.
 
@@ -63,6 +82,21 @@ const SIGNED_COMMITS_INSTRUCTIONS = `This tong is configured to require signed c
 unsigned commit to the repository is refused, and nothing is pushed. Sign the
 commits you have not pushed yet -- the git-signing tong's sign_commits verb signs
 exactly the set this checks -- and then call again.`;
+
+/** Nothing when there are no dispatch verbs and none were dropped. */
+export function dispatchInstructions(verbs: readonly string[], dropped: readonly Dropped[]): string | undefined {
+  if (!verbs.length && !dropped.length) return undefined;
+  const lines = verbs.length
+    ? [
+        `${verbs.length === 1 ? verbs[0] : `Each of ${verbs.join(", ")}`} dispatches one configured GitHub Actions`,
+        "workflow on its configured branch, checking 'inputs' against the workflow file there",
+        "first. A dispatch cannot be undone here; follow its run with ci_status run=<id>.",
+      ]
+    : [];
+  // So an agent missing a verb can say why, rather than that it was never there.
+  const gone = dropped.map(({ verb, why }) => `Dispatch verb ${verb} was dropped at startup: ${why}.`);
+  return [...lines, ...gone].join("\n");
+}
 
 const SIGNED_COMMITS_SENTENCE =
   "This tong requires signed commits: it refuses the push, and pushes nothing, if any commit the push would " +
@@ -99,14 +133,12 @@ export const commitSha = z.string().regex(COMMIT_SHA, "must be a full 40-charact
 
 /**
  * The cap on array elements plus object members in a `tools/call` `arguments`
- * payload, checked before schema validation runs. The schemas below take only
- * scalars, so a call's count is its number of keys, and the fullest legal call
- * is `update_pr` with all six of `number`, `title`, `body`, `base`, `state`, and
- * `draft`. Any more is a key the strict schemas would refuse anyway; the cap
- * makes an oversized payload fail on a bounded count instead of a full walk.
- * Adding a parameter means raising this.
+ * payload, checked before schema validation runs. The fullest legal call is a
+ * dispatch verb: `inputs` plus its 25 members. Any more is a key the strict
+ * schemas would refuse anyway; the cap makes an oversized payload fail on a
+ * bounded count instead of a full walk. Adding a parameter means checking this.
  */
-export const MAX_TOOL_INPUT_ELEMENTS = 6;
+export const MAX_TOOL_INPUT_ELEMENTS = 1 + MAX_INPUTS;
 
 export type CreatePrInput = {
   title: string;
@@ -394,9 +426,17 @@ function serially<I>(run: (context: Context, input: I) => Promise<string>) {
 }
 
 export function buildServer(context: Context): McpServer {
-  const instructions = context.repo.requiresSignedCommits
-    ? `${INSTRUCTIONS}\n\n${SIGNED_COMMITS_INSTRUCTIONS}`
-    : INSTRUCTIONS;
+  const dispatchVerbs = context.dispatch?.entries ?? [];
+  const dropped = context.dispatch?.dropped ?? [];
+  const dispatchText = dispatchInstructions(
+    dispatchVerbs.map((entry) => entry.verb),
+    dropped,
+  );
+  const instructions = [
+    INSTRUCTIONS,
+    ...(dispatchText ? [dispatchText] : []),
+    ...(context.repo.requiresSignedCommits ? [SIGNED_COMMITS_INSTRUCTIONS] : []),
+  ].join("\n\n");
   const server = new McpServer(
     { name: "github", version: "0.1.0" },
     {
@@ -596,6 +636,32 @@ export function buildServer(context: Context): McpServer {
     },
     ciLog,
   );
+
+  const inputs = z
+    .record(
+      z.string().regex(INPUT_NAME, "must be a workflow input name"),
+      z.union([z.string().max(MAX_INPUT_CHARS), z.number(), z.boolean()]),
+    )
+    .refine((value) => Object.keys(value).length <= MAX_INPUTS, `at most ${MAX_INPUTS} inputs`)
+    .optional()
+    .describe("Workflow inputs by name, each a string, number, or boolean, as the workflow file types it.");
+  for (const entry of dispatchVerbs) {
+    const on =
+      entry.ref === "default"
+        ? `the default branch, ${context.dispatch!.defaultBranch}`
+        : "the checked-out branch, which must be pushed up to HEAD and must not be the default branch";
+    verb(
+      entry.verb,
+      {
+        description:
+          `Dispatch the GitHub Actions workflow .github/workflows/${entry.file} on ${on}, and return its run ` +
+          "id. 'inputs' is checked against that file's on.workflow_dispatch.inputs on that branch first. Follow " +
+          "the run with ci_status run=<id>.",
+        inputSchema: z.strictObject({ inputs }),
+      },
+      (context, input) => dispatch(context, entry, input),
+    );
+  }
 
   return server;
 }

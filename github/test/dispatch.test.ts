@@ -1,0 +1,411 @@
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import type { DispatchEntry } from "../src/config.js";
+import { checkInputs, dispatch, dispatchInputs, usableEntries, type InputSpec } from "../src/dispatch.js";
+import { dispatchInstructions } from "../src/server.js";
+import { GitHub } from "../src/github.js";
+import {
+  ACTIONS,
+  FakeGit,
+  FakeGitHubApi,
+  ORIGIN,
+  TOKEN,
+  branchTipRoute,
+  contextFor,
+  dispatchRoute,
+  workflowFileRoute,
+  type FetchCall,
+} from "./fakes.js";
+
+const PUSHED = "1111111111111111111111111111111111111111";
+const MAIN = "4444444444444444444444444444444444444444";
+const TIPS = { "refs/heads/main": MAIN, "refs/heads/feature": PUSHED };
+const PRODUCTION: DispatchEntry = { verb: "deploy_production", file: "deploy.yml", ref: "default" };
+const STAGING: DispatchEntry = { verb: "deploy_staging", file: "deploy.yml", ref: "current" };
+const CONTENTS = "/repos/acme/widgets/contents/.github/workflows/deploy.yml";
+const DISPATCHES = `POST ${ACTIONS}/workflows/deploy.yml/dispatches`;
+
+const DEPLOY = `
+on:
+  push:
+  workflow_dispatch:
+    inputs:
+      note: { type: string }
+      dry_run: { type: boolean, default: false }
+      replicas: { type: number }
+      tier: { type: choice, options: [small, large], required: true, default: small }
+`;
+
+function pushedGit(branch = "feature"): FakeGit {
+  const git = new FakeGit({ branch, head: PUSHED });
+  git.refs.set(`refs/remotes/origin/${branch}`, PUSHED);
+  return git;
+}
+
+function deployApi(yaml = DEPLOY, dispatched: FetchCall[] = [], tips: Record<string, string> = TIPS): FakeGitHubApi {
+  const route = dispatchRoute("deploy.yml")[DISPATCHES];
+  return new FakeGitHubApi({
+    ...branchTipRoute(tips),
+    ...workflowFileRoute("deploy.yml", yaml),
+    [DISPATCHES]: (call) => {
+      dispatched.push(call);
+      return route;
+    },
+  });
+}
+
+const contextWith = (api: FakeGitHubApi, git = pushedGit()) =>
+  contextFor(api, git, { defaultBranch: "main", entries: [PRODUCTION, STAGING], dropped: [] });
+
+function readRefs(api: FakeGitHubApi): string[] {
+  return api.calls
+    .map((call) => new URL(call.url))
+    .filter((url) => url.pathname === CONTENTS)
+    .map((url) => url.searchParams.get("ref") ?? "");
+}
+
+function askedTips(api: FakeGitHubApi): string[] {
+  return api.calls
+    .filter((call) => call.url.endsWith("/graphql"))
+    .map((call) => (call.body as { variables: { ref: string } }).variables.ref);
+}
+
+describe("dispatching", () => {
+  it("runs a default-branch verb on the default branch, checked at GitHub's tip", async () => {
+    const dispatched: FetchCall[] = [];
+    const api = deployApi(DEPLOY, dispatched);
+
+    const text = await dispatch(contextWith(api), PRODUCTION, { inputs: { note: "hi", dry_run: true, replicas: 2.5 } });
+
+    assert.deepEqual(askedTips(api), ["refs/heads/main"]);
+    assert.deepEqual(readRefs(api), [MAIN]);
+    assert.deepEqual(dispatched[0].body, {
+      ref: "refs/heads/main",
+      inputs: { note: "hi", dry_run: "true", replicas: "2.5" },
+      return_run_details: true,
+    });
+    assert.equal(
+      text,
+      "Dispatched deploy.yml on main, checked at 444444444444, as run 555.\n" +
+        "https://github.com/acme/widgets/actions/runs/555\nFollow it with ci_status run=555.",
+    );
+  });
+
+  it("runs a current-branch verb on the checked-out branch, at the commit GitHub and HEAD agree on", async () => {
+    const dispatched: FetchCall[] = [];
+    const api = deployApi(DEPLOY, dispatched);
+
+    const text = await dispatch(contextWith(api), STAGING, {});
+
+    assert.deepEqual(askedTips(api), ["refs/heads/feature"]);
+    assert.deepEqual(readRefs(api), [PUSHED]);
+    assert.equal((dispatched[0].body as { ref: string }).ref, "refs/heads/feature");
+    assert.match(text, /^Dispatched deploy\.yml on feature, checked at 111111111111, as run 555\./);
+  });
+
+  it("refuses a current-branch verb unless HEAD is a branch GitHub has at HEAD, other than the default", async () => {
+    const moved = pushedGit();
+    moved.head = "2".repeat(40);
+    const cases: Array<[FakeGit, Record<string, string>, RegExp]> = [
+      [new FakeGit({ branch: null }), TIPS, /HEAD is detached/],
+      [pushedGit("main"), TIPS, /main is the default branch/],
+      [pushedGit(), { "refs/heads/main": MAIN }, /GitHub has no branch feature; push it first/],
+      [moved, TIPS, /HEAD is at 222222222222, but GitHub's feature is at 111111111111; push or pull first/],
+    ];
+    for (const [git, tips, expected] of cases) {
+      const dispatched: FetchCall[] = [];
+      const api = deployApi(DEPLOY, dispatched, tips);
+      await assert.rejects(() => dispatch(contextWith(api, git), STAGING, {}), expected);
+      assert.deepEqual([readRefs(api), dispatched.length], [[], 0], String(expected));
+    }
+  });
+
+  it("trusts GitHub's tip over the workspace's own tracking ref", async () => {
+    const dispatched: FetchCall[] = [];
+    const api = deployApi(DEPLOY, dispatched, { ...TIPS, "refs/heads/feature": "5".repeat(40) });
+
+    await assert.rejects(() => dispatch(contextWith(api), STAGING, {}), /GitHub's feature is at 555555555555/);
+    assert.equal(dispatched.length, 0);
+  });
+
+  it("qualifies a branch named like a ref, so it cannot stand in for the default branch or a tag", async () => {
+    const dispatched: FetchCall[] = [];
+    const api = deployApi(DEPLOY, dispatched);
+    const git = new FakeGit({ branch: "refs/heads/main", head: MAIN });
+
+    await assert.rejects(() => dispatch(contextWith(api, git), STAGING, {}), /GitHub has no branch refs\/heads\/main/);
+    assert.deepEqual(askedTips(api), ["refs/heads/refs/heads/main"]);
+    assert.equal(dispatched.length, 0);
+  });
+
+  it("refuses a workflow with no workflow_dispatch trigger on that branch, and dispatches nothing", async () => {
+    const dispatched: FetchCall[] = [];
+    const api = deployApi("on: push\n", dispatched);
+
+    await assert.rejects(() => dispatch(contextWith(api), PRODUCTION, {}), /deploy\.yml on main has no workflow_dispatch/);
+    assert.equal(dispatched.length, 0);
+  });
+
+  it("refuses inputs the workflow file does not accept, and dispatches nothing", async () => {
+    const dispatched: FetchCall[] = [];
+    const api = deployApi(DEPLOY, dispatched);
+
+    await assert.rejects(
+      () => dispatch(contextWith(api), PRODUCTION, { inputs: { notes: "x" } }),
+      /no input notes; it takes note, dry_run, replicas, tier\./,
+    );
+    assert.equal(dispatched.length, 0);
+  });
+
+  it("says when GitHub reports no run id, and where to look", async () => {
+    const api = new FakeGitHubApi({
+      ...branchTipRoute(TIPS),
+      ...workflowFileRoute("deploy.yml", DEPLOY),
+      [DISPATCHES]: { status: 204 },
+    });
+
+    assert.equal(
+      await dispatch(contextWith(api), PRODUCTION, {}),
+      `Dispatched deploy.yml on main, checked at 444444444444, but GitHub reported no run id; find the run with ci_status sha=${MAIN}.`,
+    );
+  });
+
+  it("says a dispatch behind a 5xx or no answer may have started, and a 4xx did not", async () => {
+    const respond = (answer: () => Response | Promise<Response>) => {
+      const api = new FakeGitHubApi({ ...branchTipRoute(TIPS), ...workflowFileRoute("deploy.yml", DEPLOY) });
+      const fetch = api.fetch;
+      const context = contextWith(api);
+      context.github = new GitHub(
+        async (input, init) => (String(input).endsWith("/dispatches") ? answer() : fetch(input, init)),
+        ORIGIN,
+        TOKEN,
+      );
+      return context;
+    };
+    const status = (code: number) => () => new Response(JSON.stringify({ message: "nope" }), { status: code });
+
+    await assert.rejects(() => dispatch(respond(status(502)), PRODUCTION, {}), /may have started anyway/);
+    await assert.rejects(
+      () =>
+        dispatch(
+          respond(() => Promise.reject(new TypeError("socket hang up"))),
+          PRODUCTION,
+          {},
+        ),
+      /cannot reach .*socket hang up\n\nThe run may have started anyway/s,
+    );
+    await assert.rejects(
+      () => dispatch(respond(status(422)), PRODUCTION, {}),
+      (err: Error) => /422/.test(err.message) && !/may have started/.test(err.message),
+    );
+  });
+
+  it("refuses when the tong has no dispatch configuration", async () => {
+    await assert.rejects(() => dispatch(contextFor(deployApi()), PRODUCTION, {}), /not configured/);
+  });
+});
+
+describe("dispatchInputs", () => {
+  it("reads each shape of the workflow_dispatch trigger", () => {
+    assert.deepEqual(dispatchInputs("on: workflow_dispatch\n"), []);
+    assert.deepEqual(dispatchInputs("on: [push, workflow_dispatch]\n"), []);
+    assert.deepEqual(dispatchInputs("on:\n  workflow_dispatch:\n"), []);
+    assert.deepEqual(dispatchInputs("on:\n  workflow_dispatch:\n    inputs:\n"), []);
+    assert.deepEqual(dispatchInputs("on:\n  workflow_dispatch:\n    inputs:\n      x:\n"), [
+      { name: "x", type: "string", required: false, hasDefault: false, options: [] },
+    ]);
+  });
+
+  it("returns null without the trigger", () => {
+    for (const text of ["on: push\n", "on: [push]\n", "on:\n  push:\n", "name: x\n", "", "just a string\n"]) {
+      assert.equal(dispatchInputs(text), null, JSON.stringify(text));
+    }
+  });
+
+  it("reads each input's type, whether it is required, its default, and its options", () => {
+    const specs = dispatchInputs(DEPLOY)!;
+
+    assert.deepEqual(
+      specs.map((spec) => [spec.name, spec.type, spec.required, spec.hasDefault, spec.options]),
+      [
+        ["note", "string", false, false, []],
+        ["dry_run", "boolean", false, true, []],
+        ["replicas", "number", false, false, []],
+        ["tier", "choice", true, true, ["small", "large"]],
+      ],
+    );
+  });
+
+  it("refuses a file it cannot read safely", () => {
+    const cases: Array<[string, RegExp]> = [
+      ["on: [\n", /not valid YAML/],
+      ["on:\n  workflow_dispatch:\n    inputs: [a]\n", /inputs is not a map/],
+      ["on:\n  workflow_dispatch:\n    inputs:\n      x: { type: secret }\n", /type 'secret', which this tong does not know/],
+      ["on:\n  workflow_dispatch:\n    inputs:\n      x: { type: choice }\n", /lists no options/],
+      ['on:\n  workflow_dispatch:\n    inputs:\n      "a b": {}\n', /name GitHub does not accept/],
+      ["on: push\non: workflow_dispatch\n", /not valid YAML/],
+      ["on: push\n---\non: workflow_dispatch\n", /not valid YAML/],
+      ["%YAML 1.1\n---\non: workflow_dispatch\n", /YAML version other than 1\.2/],
+    ];
+    for (const [text, expected] of cases) assert.throws(() => dispatchInputs(text), expected, text);
+  });
+
+  it("expands only the trigger, so anchors elsewhere are fine and an alias bomb in it is refused", () => {
+    const reused = `x: &s {run: echo}\n${Array.from({ length: 150 }, (_, i) => `j${i}: *s`).join("\n")}\non: workflow_dispatch\n`;
+    assert.deepEqual(dispatchInputs(reused), []);
+
+    const rows = ["a: &a [x, x, x, x, x, x, x, x, x, x]"];
+    for (let i = 1; i < 12; i++) {
+      const name = "b".repeat(i);
+      rows.push(`${name}: &${name} [${Array(10).fill(i === 1 ? "*a" : `*${"b".repeat(i - 1)}`).join(", ")}]`);
+    }
+    const bomb = `${rows.join("\n")}\non:\n  workflow_dispatch:\n    inputs:\n      x: { options: *${"b".repeat(11)} }\n`;
+    assert.throws(() => dispatchInputs(bomb), /not valid YAML/);
+  });
+});
+
+describe("checkInputs", () => {
+  const spec = (name: string, type: InputSpec["type"], more: Partial<InputSpec> = {}): InputSpec => ({
+    name,
+    type,
+    required: false,
+    hasDefault: false,
+    options: [],
+    ...more,
+  });
+
+  it("turns each typed value into the string GitHub takes", () => {
+    const specs = [spec("s", "string"), spec("b", "boolean"), spec("n", "number"), spec("c", "choice", { options: ["x", "y"] })];
+
+    assert.deepEqual(checkInputs(specs, { s: "", b: false, n: -3, c: "y" }), { s: "", b: "false", n: "-3", c: "y" });
+  });
+
+  it("refuses a value of the wrong type, or a choice not offered", () => {
+    const cases: Array<[InputSpec, unknown, RegExp]> = [
+      [spec("b", "boolean"), "true", /b is a boolean input/],
+      [spec("n", "number"), "3", /n is a number input/],
+      [spec("s", "string"), 3, /s is a string input/],
+      [spec("c", "choice", { options: ["x"] }), "z", /c takes one of these strings: x\./],
+      [spec("c", "choice", { options: ["1"] }), 1, /c takes one of these strings: 1\./],
+    ];
+    for (const [s, value, expected] of cases) {
+      assert.throws(() => checkInputs([s], { [s.name]: value as string }), expected);
+    }
+  });
+
+  it("needs every required input with no default, and a boolean with none, all named at once", () => {
+    const specs = [spec("r", "string", { required: true }), spec("q", "number", { required: true }), spec("b", "boolean")];
+
+    assert.throws(() => checkInputs(specs, {}), /requires r, q, b; pass them\./);
+    assert.throws(() => checkInputs(specs, { r: "x", q: 1 }), /requires b; pass it\./);
+    assert.throws(() => checkInputs(specs, { z: 1 }), /it takes r \(required\), q \(required\), b \(required\)\./);
+    assert.deepEqual(checkInputs([spec("r", "string", { required: true, hasDefault: true }), spec("b", "boolean", { hasDefault: true })], {}), {});
+  });
+
+  it("never sets an environment input", () => {
+    const env = spec("environment", "environment");
+
+    assert.throws(() => checkInputs([env], { environment: "production" }), /environment is an environment input, which this tong never sets/);
+    assert.throws(() => checkInputs([{ ...env, required: true }], {}), /requires environment input environment, which this tong never sets/);
+    assert.deepEqual(checkInputs([{ ...env, required: true, hasDefault: true }], {}), {});
+    assert.deepEqual(checkInputs([env], {}), {});
+    assert.throws(() => checkInputs([env, spec("x", "string")], { y: "" }), /no input y; it takes x\./);
+  });
+
+  it("treats names like __proto__ and constructor as plain names", () => {
+    const specs = [spec("constructor", "string", { required: true }), spec("__proto__", "string")];
+
+    assert.throws(() => checkInputs(specs, {}), /requires constructor/);
+    const given = JSON.parse('{"constructor": "a", "__proto__": "b"}');
+    const out = checkInputs(specs, given);
+    assert.equal(Object.getPrototypeOf(out), Object.prototype);
+    assert.deepEqual(Object.entries(out), [
+      ["constructor", "a"],
+      ["__proto__", "b"],
+    ]);
+    assert.throws(() => checkInputs([], { toString: "x" }), /no input toString; it takes none/);
+  });
+});
+
+describe("usableEntries", () => {
+  const entry = (verb: string, file: string): DispatchEntry => ({ verb, file, ref: "default" });
+
+  it("keeps the entries dispatchable from the default branch's tip, and says why it drops each other one", async () => {
+    const api = new FakeGitHubApi({
+      ...branchTipRoute(TIPS),
+      ...workflowFileRoute("deploy.yml", DEPLOY),
+      ...workflowFileRoute("lint.yml", "on: push\n"),
+      ...workflowFileRoute("broken.yml", "on: [\n"),
+      ...workflowFileRoute("pick.yml", "on:\n  workflow_dispatch:\n    inputs:\n      e: { type: environment, required: true }\n"),
+      "GET /repos/acme/widgets/contents/.github/workflows/gone.yml": { status: 404, json: { message: "Not Found" } },
+    });
+
+    const { entries, dropped } = await usableEntries(new GitHub(api.fetch, ORIGIN, TOKEN), "main", [
+      entry("deploy", "deploy.yml"),
+      entry("lint", "lint.yml"),
+      entry("broken", "broken.yml"),
+      entry("pick", "pick.yml"),
+      entry("gone", "gone.yml"),
+    ]);
+
+    assert.deepEqual(
+      entries.map((e) => e.verb),
+      ["deploy"],
+    );
+    assert.deepEqual(
+      dropped.map((d) => d.verb),
+      ["lint", "broken", "pick", "gone"],
+    );
+    assert.equal(dropped[0].why, "lint.yml: no workflow_dispatch trigger on main");
+    assert.match(dropped[1].why, /^broken\.yml: the workflow file is not valid YAML/);
+    assert.equal(dropped[2].why, "pick.yml: it requires environment input e, which this tong never sets");
+    assert.match(dropped[3].why, /^gone\.yml: GitHub cannot see that workflow file .* not on that ref/);
+    assert.deepEqual(askedTips(api), ["refs/heads/main"]);
+    assert.deepEqual(readRefs(api), [MAIN]);
+  });
+
+  it("drops every entry when GitHub has no default branch tip, and asks nothing without entries", async () => {
+    const api = new FakeGitHubApi(branchTipRoute({}));
+    const github = new GitHub(api.fetch, ORIGIN, TOKEN);
+
+    const { dropped } = await usableEntries(github, "main", [entry("deploy", "deploy.yml")]);
+    assert.deepEqual(dropped, [{ verb: "deploy", why: "deploy.yml: GitHub has no branch main" }]);
+
+    api.calls.length = 0;
+    assert.deepEqual(await usableEntries(github, "main", []), { entries: [], dropped: [] });
+    assert.equal(api.calls.length, 0);
+  });
+
+  it("drops the verbs, asking once, when the tip lookup itself fails", async () => {
+    const api = new FakeGitHubApi({ "POST /graphql": { status: 502, json: { message: "Bad Gateway" } } });
+
+    const { entries, dropped } = await usableEntries(new GitHub(api.fetch, ORIGIN, TOKEN), "main", [
+      entry("a", "a.yml"),
+      entry("b", "b.yml"),
+    ]);
+
+    assert.deepEqual(entries, []);
+    assert.deepEqual(
+      dropped.map((d) => [d.verb, /^[ab]\.yml: GitHub returned 502/.test(d.why)]),
+      [
+        ["a", true],
+        ["b", true],
+      ],
+    );
+    assert.equal(api.calls.length, 1);
+  });
+});
+
+describe("dispatchInstructions", () => {
+  const dropped = [{ verb: "deploy_old", why: "old.yml: no workflow_dispatch trigger on main" }];
+
+  it("names the verbs, and each one dropped, even when every one was dropped", () => {
+    assert.match(dispatchInstructions(["a"], [])!, /^a dispatches one configured/);
+    assert.match(dispatchInstructions(["a", "b"], [])!, /^Each of a, b dispatches one configured/);
+    assert.equal(
+      dispatchInstructions([], dropped),
+      "Dispatch verb deploy_old was dropped at startup: old.yml: no workflow_dispatch trigger on main.",
+    );
+    assert.equal(dispatchInstructions([], []), undefined);
+  });
+});
