@@ -30,7 +30,7 @@ with `initialize`.
 | `ci_job` | `job_id` | Lists a job's steps with their state, start offset, and duration, plus its runner. |
 | `ci_log` | `job_id`, `step?`, `start?`, `limit?` | Returns part of a job's plain-text log, timestamps included. Defaults to the end of the failed step, or of the whole log. |
 | an allowlisted verb | `inputs?` | Dispatches one workflow on the branch its entry names and returns the run id. See [Dispatching workflows](#dispatching-workflows). |
-| `list_workflows` | none | Lists each dispatch verb's workflow, branch, and inputs as the file there has them now, why a dispatch would be refused now, and any verb dropped at startup. Only with `GITHUB_TONG_DISPATCH`. |
+| `list_workflows` | none | Lists each dispatch verb's workflow, branch, and inputs as the file there has them, why a dispatch would be refused now, and any verb dropped at startup. Only when `GITHUB_TONG_DISPATCH` is `"true"`. |
 
 `create_pr` pushes for you; there is no need to call `push_branch` first.
 

@@ -289,6 +289,7 @@ describe("dispatchInputs", () => {
       ["on:\n  workflow_dispatch:\n    inputs:\n      x: { type: secret }\n", /type 'secret', which this tong does not know/],
       ["on:\n  workflow_dispatch:\n    inputs:\n      x: { type: choice }\n", /lists no options/],
       ['on:\n  workflow_dispatch:\n    inputs:\n      "a b": {}\n', /name GitHub does not accept/],
+      [`on:\n  workflow_dispatch:\n    inputs:\n      a${"b".repeat(100)}: {}\n`, /name GitHub does not accept/],
       ["on: push\non: workflow_dispatch\n", /not valid YAML/],
       ["on: push\n---\non: workflow_dispatch\n", /not valid YAML/],
       ["%YAML 1.1\n---\non: workflow_dispatch\n", /YAML version other than 1\.2/],
@@ -484,7 +485,7 @@ describe("dispatchInstructions", () => {
 
   it("names the verbs, each one dropped, and why the allowlist was unusable", () => {
     assert.match(dispatchInstructions(setup(["a"]))!, /^a dispatches one allowlisted/m);
-    assert.match(dispatchInstructions(setup(["a"]))!, /list_workflows shows the inputs\./);
+    assert.match(dispatchInstructions(setup(["a"]))!, /list_workflows shows each verb's inputs\./);
     assert.match(dispatchInstructions(setup(["a", "b"]))!, /^Each of a, b dispatches one allowlisted/m);
     assert.match(
       dispatchInstructions(setup([], dropped))!,
@@ -567,10 +568,13 @@ on:
     const api = deployApi("on: workflow_dispatch\n", [], { ...TIPS, "refs/heads/a\u202eb": PUSHED });
     assert.match(await listed(api, pushedGit("a\u202eb"), [STAGING]), /^deploy_staging: \S+ on ab \(checked out\), at /);
 
-    const long = new FakeGitHubApi({ "POST /graphql": { status: 502, text: "e".repeat(2000) } });
-    const line = (await listed(long, pushedGit(), [PRODUCTION])).split("\n")[1];
-    assert.equal(line.length, "  cannot dispatch now: ".length + 501);
-    assert.match(line, /e…$/);
+    const long = new FakeGitHubApi({ ...REPO_ROUTE, "POST /graphql": { status: 502, text: "e".repeat(2000) } });
+    const lines = (await listed(long, pushedGit(), [PRODUCTION])).split("\n").slice(1);
+    assert.equal(lines.length, 2);
+    for (const line of lines) {
+      assert.equal(line.length, "  cannot dispatch now: ".length + 501);
+      assert.match(line, /e…$/);
+    }
   });
 
   it("gives every reason a fallback read cannot dispatch", async () => {
@@ -612,9 +616,12 @@ on:
     const lint: DispatchEntry = { verb: "lint", file: "lint.yml", ref: "default" };
     assert.match(await listed(two, pushedGit(), [PRODUCTION, lint]), /^deploy_production: [^\n]*\n {2}a \(string\)\n\nlint: [^\n]*\n {2}b \(string\)$/);
 
-    const failing = new FakeGitHubApi({ "POST /graphql": { status: 502, text: "<html>\n\nBad gateway</html>" } });
+    const failing = new FakeGitHubApi({ ...REPO_ROUTE, "POST /graphql": { status: 502, text: "<html>\n\nBad gateway</html>" } });
     const text = await listed(failing, pushedGit(), [PRODUCTION, other]);
-    assert.match(text, /^deploy_production: \.github\/workflows\/deploy\.yml\n {2}cannot dispatch now: GitHub returned 502: <html> {2}Bad gateway<\/html>\.$/m);
+    assert.match(
+      text,
+      /^deploy_production: \.github\/workflows\/deploy\.yml\n {2}cannot dispatch now: checking \S+ failed: GitHub returned 502: <html> {2}Bad gateway<\/html>\.\n {2}cannot dispatch now: GitHub returned 502: <html> {2}Bad gateway<\/html>\.$/m,
+    );
     assert.match(text, /^deploy_again: \.github\/workflows\/deploy\.yml\n {2}cannot dispatch now: /m);
   });
 
@@ -629,6 +636,17 @@ on:
         "  no inputs",
     );
 
+    const gone = deployApi(one);
+    Object.assign(gone.routes, {
+      ...allowlistRoute("other: { workflow: other.yml, ref: default }\n"),
+      [`GET ${CONTENTS}`]: { status: 404, json: { message: "Not Found" } },
+    });
+    assert.deepEqual((await listed(gone, pushedGit(), [PRODUCTION])).split("\n").slice(0, 3), [
+      "deploy_production: .github/workflows/deploy.yml",
+      "  cannot dispatch now: .github/swarmforge-dispatch.yml on main no longer lists deploy_production as it did at startup.",
+      "  cannot dispatch now: GitHub cannot see that workflow file in acme/widgets (404). Either it is not on that ref, or the token is no longer scoped to this repository.",
+    ]);
+
     const down = deployApi(one);
     Object.assign(down.routes, { [`GET ${ALLOWLIST_PATH}`]: { status: 503, json: { message: "Service Unavailable" } } });
     assert.match(
@@ -641,7 +659,7 @@ on:
     const setup = (unusable?: string) =>
       listWorkflows(contextFor(new FakeGitHubApi(), pushedGit(), { defaultBranch: "main", entries: [], dropped: [], unusable }));
 
-    assert.equal(await setup(), "No dispatch verbs: .github/swarmforge-dispatch.yml on main lists none.");
+    assert.equal(await setup(), "No dispatch verbs this session: .github/swarmforge-dispatch.yml on main had none at startup.");
     assert.equal(await setup("GitHub has no branch main to read it from"), "No dispatch verbs this session: GitHub has no branch main to read it from.");
   });
 

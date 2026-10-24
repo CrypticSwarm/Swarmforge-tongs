@@ -20,7 +20,7 @@ const MAX_OPTIONS_SHOWN = 20;
 export const MAX_LISTING_CHARS = 50_000;
 
 /** What GitHub accepts as an input name. */
-export const INPUT_NAME = /^[A-Za-z_][A-Za-z0-9_-]*$/;
+export const INPUT_NAME = /^[A-Za-z_][A-Za-z0-9_-]{0,99}$/;
 
 const INPUT_TYPES = ["string", "boolean", "choice", "number", "environment"] as const;
 
@@ -411,7 +411,7 @@ export async function listWorkflows(context: Context): Promise<string> {
             : `${clean(branch)} (checked out)`;
       const unsettable = specs && unsetEnvironment(specs);
       const whys = [
-        unlisted(entry),
+        clip(unlisted(entry), 500),
         refusal,
         !specs ? `${entry.file} on ${clean(branch)} has no workflow_dispatch trigger.` : "",
         unsettable ? `the workflow requires environment input ${unsettable}, which this tong never sets.` : "",
@@ -423,14 +423,15 @@ export async function listWorkflows(context: Context): Promise<string> {
       ];
       sections.push([...head, ...withinBudget(inputs, budget - head.join("\n").length)].join("\n"));
     } catch (err) {
-      sections.push(`${entry.verb}: ${file}\n  cannot dispatch now: ${clip((err as Error).message, 500)}`);
+      const whys = [unlisted(entry), (err as Error).message].filter(Boolean).map((why) => clip(why, 500));
+      sections.push([`${entry.verb}: ${file}`, ...whys.map((why) => `  cannot dispatch now: ${why}`)].join("\n"));
     }
   }
   const dropped = config.dropped.map(({ verb, why }) => `${verb}: dropped at startup\n  ${why}.`);
   const none = config.unusable
     ? [`No dispatch verbs this session: ${config.unusable}.`]
     : !sections.length && !dropped.length
-      ? [`No dispatch verbs: ${ALLOWLIST} on ${clean(config.defaultBranch)} lists none.`]
+      ? [`No dispatch verbs this session: ${ALLOWLIST} on ${clean(config.defaultBranch)} had none at startup.`]
       : [];
   return [...sections, ...dropped, ...none].join("\n\n");
 }
