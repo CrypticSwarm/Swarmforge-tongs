@@ -58,8 +58,7 @@ describe("remoteUrl", () => {
   });
 
   it("stays on github.com whatever the workspace's own remote says", () => {
-    // The point of building the URL rather than pushing to the remote named
-    // `origin`: a later `git remote set-url` cannot redirect this.
+    // Built from the pin, so a later `git remote set-url` cannot redirect it.
     assert.equal(
       remoteUrl(parseOrigin("git@github.com:acme/widgets.git")),
       remoteUrl(parseOrigin("https://github.com/acme/widgets")),

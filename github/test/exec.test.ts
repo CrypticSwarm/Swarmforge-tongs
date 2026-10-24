@@ -1,5 +1,4 @@
-// realRun against real child processes. The only binary used is the node running
-// the tests (process.execPath), so the suite still needs no git and no network.
+// realRun against real child processes: only process.execPath, so no git or network.
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";

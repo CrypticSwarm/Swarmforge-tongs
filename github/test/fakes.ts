@@ -1,7 +1,3 @@
-// In-memory stand-ins for `git` and `fetch`, wired in through the seams in
-// src/exec.ts and src/github.ts, so the whole push-and-open-a-PR path is tested
-// without git installed, without a token, and without a network.
-
 import type { Run, RunResult } from "../src/exec.js";
 import { GitHub, type Fetch, type MergeState } from "../src/github.js";
 import { remoteUrl, type Origin } from "../src/origin.js";
@@ -17,11 +13,10 @@ export type GitCall = {
   args: string[];
   env: NodeJS.ProcessEnv;
   stdin: Buffer | undefined;
-  /** argv with the `-c key=value` hardening pairs and `-C <workspace>` removed. */
   verb: string[];
 };
 
-/** Output for a rejection path. `--porcelain` puts the per-ref verdict on stdout. */
+/** `--porcelain` puts the per-ref verdict on stdout. */
 export type GitFailure = { stderr: string; stdout?: string };
 
 export type FakeGitOptions = {
@@ -37,11 +32,8 @@ export type FakeGitOptions = {
   updateRefFails?: boolean;
   /** What rev-list reports as reachable from HEAD but from no origin ref, oldest first. */
   unpushed?: string[];
-  /** Which of those carry a `gpgsig` header. */
   signed?: string[];
-  /** Commit messages, for the shas that need a specific one. Defaults to the sha. */
   messages?: Record<string, string>;
-  /** Shas `cat-file --batch` answers `missing` for, as a truncated batch also would. */
   missingObjects?: string[];
 };
 
@@ -79,7 +71,6 @@ export class FakeGit {
     this.missingObjects = new Set(options.missingObjects ?? []);
   }
 
-  /** The push call, for asserting on argv and environment. */
   get pushCall(): GitCall | undefined {
     return this.calls.find((call) => call.verb[0] === "push");
   }
@@ -111,10 +102,7 @@ export class FakeGit {
     return this.runGit(verb, options?.stdin);
   };
 
-  /**
-   * The bytes git stores, so the signature check runs against a real commit object
-   * rather than against something shaped like the answer it is looking for.
-   */
+  /** Real commit-object bytes, not something shaped like the answer the check wants. */
   private commitObject(sha: string): Buffer {
     const headers = [
       `tree ${"0".repeat(40)}`,
@@ -127,7 +115,6 @@ export class FakeGit {
     return Buffer.from(`${headers.join("\n")}\n\n${this.messages[sha] ?? `commit ${sha}\n`}`, "utf8");
   }
 
-  /** `<oid> <type> <size>\n<contents>\n` per requested object, as git writes it. */
   private catFileBatch(stdin: Buffer | undefined): RunResult {
     const requested = (stdin?.toString("utf8") ?? "")
       .split("\n")
@@ -195,7 +182,6 @@ export class FakeGit {
   }
 }
 
-/** The `-c key=value` pairs of an argv. */
 export function configPairs(args: readonly string[]): Map<string, string> {
   const pairs = new Map<string, string>();
   for (let i = 0; i < args.length - 1; i++) {
@@ -215,7 +201,6 @@ export type FetchCall = {
   signal: AbortSignal | undefined;
 };
 
-/** `text` is sent as is; otherwise `json`, serialized. */
 export type FakeResponse = { status: number; json?: unknown; text?: string; headers?: Record<string, string> };
 
 export class FakeGitHubApi {
@@ -243,7 +228,6 @@ export class FakeGitHubApi {
     this.calls.push(call);
 
     const parsed = new URL(url);
-    // Off api.github.com, the host is part of the route.
     const key = `${method} ${parsed.host === "api.github.com" ? "" : parsed.host}${parsed.pathname}`;
     const route = this.routes[key];
     if (!route) {
@@ -288,7 +272,6 @@ export type PrState = {
   mergedAt?: string | null;
 };
 
-/** A pull request as GitHub reports it, for the read and edit paths. */
 export function prJson(pr: PrState) {
   return {
     number: pr.number,
@@ -307,10 +290,7 @@ export function prJson(pr: PrState) {
   };
 }
 
-/**
- * A pull request as the list endpoint reports it: no `merged` key, only `merged_at`.
- * Reusing prJson here would hide exactly the difference the tong has to cope with.
- */
+/** A pull request as the list endpoint reports it: no `merged` key, only `merged_at`. */
 export function listedPrJson(pr: PrState) {
   const { merged, ...rest } = prJson(pr);
   return rest;
@@ -324,11 +304,6 @@ export function getPrRoute(pr: PrState) {
   return { [`GET /repos/acme/widgets/pulls/${pr.number}`]: { status: 200, json: prJson(pr) } };
 }
 
-/**
- * GET and PATCH over one mutable pull request, so an edit is visible to the read
- * that follows it -- which is what lets a test tell "GitHub changed it" apart from
- * "the tong said it did".
- */
 export function editablePrRoutes(initial: PrState) {
   const state: PrState = { ...initial };
   const path = `/repos/acme/widgets/pulls/${initial.number}`;
@@ -338,8 +313,7 @@ export function editablePrRoutes(initial: PrState) {
       Object.assign(state, call.body as Partial<PrState>);
       return { status: 200, json: prJson(state) };
     },
-    // Draft lives behind GraphQL, which addresses the pull request by node id and
-    // reports failure as an `errors` array inside a 200.
+    // Draft is GraphQL-only: addressed by node id, failing with `errors` inside a 200.
     "POST /graphql": (call: FetchCall) => {
       const { query, variables } = call.body as { query: string; variables: { id?: string } };
       if (variables?.id !== `PR_node_${state.number}`) {
@@ -427,7 +401,6 @@ export function jobJson(job: JobState) {
   };
 }
 
-/** `total` is how many GitHub says there are, when that is more than it lists. */
 export function runsRoute(runs: RunState[], total = runs.length) {
   return { [`GET ${ACTIONS}/runs`]: { status: 200, json: { total_count: total, workflow_runs: runs.map(runJson) } } };
 }
@@ -449,7 +422,6 @@ export function jobRoute(job: JobState) {
   return { [`GET ${ACTIONS}/jobs/${job.id}`]: { status: 200, json: jobJson(job) } };
 }
 
-/** The API's redirect, and the signed URL it points at. */
 export function logRoutes(jobId: number, text: string) {
   return {
     [`GET ${ACTIONS}/jobs/${jobId}/logs`]: {
@@ -464,10 +436,7 @@ export type MergeableState = { number: number; base?: string } & Partial<
   Pick<MergeState, "state" | "draft" | "status" | "mergeQueue" | "headSha">
 >;
 
-/**
- * The GraphQL merge-state read, answering only the fields the query names as GitHub
- * would, and the REST merge, answering `merge`.
- */
+/** Answers only the fields the query names, so a field dropped from the query reads as missing. */
 export function mergeRoutes(pr: MergeableState, merge: FakeResponse = { status: 200, json: { sha: "3".repeat(40) } }) {
   const fields: Record<string, unknown> = {
     url: `https://github.com/acme/widgets/pull/${pr.number}`,
@@ -488,7 +457,6 @@ export function mergeRoutes(pr: MergeableState, merge: FakeResponse = { status: 
   };
 }
 
-/** A verb's context over the fakes, for the pinned acme/widgets. */
 export function contextFor(api = new FakeGitHubApi(), git = new FakeGit(), dispatch?: Context["dispatch"]): Context {
   return {
     repo: new Repo(git.run, WORKSPACE, ASKPASS, false),
@@ -500,7 +468,7 @@ export function contextFor(api = new FakeGitHubApi(), git = new FakeGit(), dispa
   };
 }
 
-/** A workflow file as the Contents API sends it, at any ref. */
+/** A file as the Contents API sends it, at any ref. */
 function contentsRoute(path: string, text: string) {
   const content = Buffer.from(text, "utf8").toString("base64");
   return {
@@ -528,7 +496,7 @@ export function dispatchRoute(file: string, runId = 555) {
   };
 }
 
-/** GraphQL's answer for branch tips: `tips` maps `refs/heads/<branch>` to a sha, and any other ref is absent. */
+/** `tips` is keyed by full ref (`refs/heads/<branch>`); any other ref is absent. */
 export function branchTipRoute(tips: Record<string, string>) {
   return {
     "POST /graphql": (call: FetchCall) => {

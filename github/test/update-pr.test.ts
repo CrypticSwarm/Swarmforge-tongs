@@ -25,8 +25,7 @@ describe("update_pr", () => {
 
     await updatePr(contextFor(api), { number: 7, title: "A better title" });
 
-    // Not `{title, body: undefined, base: undefined, ...}`: a key GitHub sees is a
-    // field it may act on, and nothing here asked to touch the description.
+    // Not `{title, body: undefined, ...}`: GitHub may act on any key it sees.
     assert.deepEqual(api.lastBody, { title: "A better title" });
   });
 
@@ -56,8 +55,7 @@ describe("update_pr", () => {
   });
 
   it("reports what changed, not what was asked", async () => {
-    // GitHub takes an edit that sets a field to the value it already had. Calling
-    // that an update would tell a caller its text landed when nothing moved.
+    // GitHub accepts an edit to the current value; that is not an update.
     const api = apiWithPr();
 
     const text = await updatePr(contextFor(api), { number: 7, title: "Add a thing", body: "why" });
@@ -190,8 +188,7 @@ describe("update_pr draft status", () => {
   });
 
   it("says the text edit landed when only the draft change fails", async () => {
-    // The two halves cannot be one request, so a caller told merely "it failed"
-    // would send the description again and overwrite whatever landed meanwhile.
+    // Told only "it failed", a caller would resend the text and overwrite later edits.
     const api = new FakeGitHubApi({
       ...editablePrRoutes(OPEN_PR),
       "POST /graphql": { status: 200, json: { errors: [{ message: "Resource not accessible" }] } },
@@ -218,8 +215,7 @@ describe("update_pr draft status", () => {
 
 describe("update_pr failures", () => {
   it("blames the number, not the repository, for a 404 on a pull request", async () => {
-    // Startup already proved the token can see the repository, so the generic
-    // "maybe the repo does not exist" would send a caller after the wrong thing.
+    // Startup proved the token sees the repository, so "it may not exist" would mislead.
     const api = new FakeGitHubApi({
       "GET /repos/acme/widgets/pulls/999": { status: 404, json: { message: "Not Found" } },
     });

@@ -26,7 +26,7 @@ describe("find_pr", () => {
   });
 
   it("calls a merged pull request merged, though the list endpoint only sends merged_at", async () => {
-    // The case that motivated the verb: stacking on a base that has already merged.
+    // As when stacking on a base that has already merged.
     const api = new FakeGitHubApi(listPrsRoute([pr(14, { state: "closed", merged: true })]));
 
     const text = await findPr(contextFor(api), { head: "feature" });
@@ -87,8 +87,7 @@ describe("find_pr", () => {
   });
 
   it("keeps a hostile branch name one query value", async () => {
-    // Legal under the branch-name schema, and the one place a caller value lands in
-    // a query string: it must not add a parameter, override one, or end the URL.
+    // Schema-legal but lands in a query string: it must not add or override a parameter or end the URL.
     const api = new FakeGitHubApi(listPrsRoute([]));
     const hostile = "x&state=open&head=evil:y#frag=1";
 

@@ -1,5 +1,4 @@
-// The signed-commit gate: what it inspects, what it refuses, and that a refusal
-// leaves the server untouched.
+// The signed-commit gate: what it inspects and refuses, and that a refusal pushes nothing.
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
@@ -53,8 +52,7 @@ describe("requiring signed commits", () => {
     assert.equal(git.callsTo("cat-file").length, 0);
   });
 
-  // The gate has to name the same commits the refspec does. HEAD is not that: the
-  // agent owns the workspace and can move the branch after the sha is read.
+  // The branch can move after the sha is read, so HEAD is not what gets pushed.
   it("asks about the commits the pushed sha would add, not the ones HEAD would", async () => {
     const git = new FakeGit({ head: HEAD, unpushed: [HEAD], signed: [HEAD] });
 
@@ -65,8 +63,7 @@ describe("requiring signed commits", () => {
     assert.equal(git.callsTo("cat-file")[0].stdin?.toString("utf8"), `${HEAD}\n`);
   });
 
-  // Commit messages are the agent's to write. A check that scanned the whole object
-  // would take one that opens with a signature header for a signed commit.
+  // Only the header block counts; the message is the agent's to write.
   it("does not accept a signature that is only in the commit message", async () => {
     const git = new FakeGit({
       head: HEAD,
@@ -80,7 +77,7 @@ describe("requiring signed commits", () => {
     assert.equal(git.pushCall, undefined);
   });
 
-  // Which is also how a batch truncated at MAX_OUTPUT_BYTES arrives.
+  // A batch truncated at MAX_OUTPUT_BYTES arrives this way too.
   it("refuses when git returns no object for a commit it must judge", async () => {
     const git = new FakeGit({ head: HEAD, unpushed: [OLDER, HEAD], signed: [OLDER, HEAD], missingObjects: [HEAD] });
 
