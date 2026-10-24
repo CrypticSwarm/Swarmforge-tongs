@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { GitHub, GitHubError, MAX_LOG_BYTES, MAX_LOG_READ_BYTES, NoAnswer, type Fetch } from "../src/github.js";
-import { ACTIONS, FakeGitHubApi, LOG_HOST, ORIGIN, TOKEN, getPrRoute, jobsRoute, logRoutes, runsRoute } from "./fakes.js";
+import { ACTIONS, FakeGitHubApi, LOG_HOST, ORIGIN, TOKEN, getPrRoute, jobsRoute, logRoutes, runRoute, runsRoute } from "./fakes.js";
 
 const SHA = "abcdef0123456789abcdef0123456789abcdef01";
 
@@ -98,6 +98,16 @@ describe("workflow runs", () => {
     assert.equal(more, true);
   });
 
+  it("reads one run by id, with the commit and branch it ran on", async () => {
+    const api = new FakeGitHubApi(runRoute({ id: 100, status: "waiting", conclusion: null }));
+
+    const run = await client(api).workflowRun(100);
+
+    assert.equal(new URL(api.calls[0].url).pathname, "/repos/acme/widgets/actions/runs/100");
+    assert.deepEqual([run.id, run.state, run.completed, run.headBranch], [100, "waiting", false, "feature"]);
+    assert.match(run.headSha, /^1{40}$/);
+  });
+
   it("refuses anything but a full sha before calling GitHub", async () => {
     const api = new FakeGitHubApi();
     for (const value of ["abc123", SHA.toUpperCase(), `${SHA}&per_page=1`, "main"]) {
@@ -140,6 +150,7 @@ describe("jobs", () => {
       await assert.rejects(() => github.job(value), /is not a job id/);
       await assert.rejects(() => github.jobLog(value), /is not a job id/);
       await assert.rejects(() => github.runJobs(value), /is not a run id/);
+      await assert.rejects(() => github.workflowRun(value), /is not a run id/);
     }
     assert.equal(api.calls.length, 0);
   });
@@ -158,11 +169,13 @@ describe("jobs", () => {
       [`GET ${ACTIONS}/jobs/7`]: missing,
       [`GET ${ACTIONS}/jobs/7/logs`]: missing,
       [`GET ${ACTIONS}/runs/100/jobs`]: missing,
+      [`GET ${ACTIONS}/runs/100`]: missing,
     });
 
     await assert.rejects(() => client(api).job(7), /cannot see that job in acme\/widgets \(404\)/);
     await assert.rejects(() => client(api).jobLog(7), /cannot see that job log .* no log yet/);
     await assert.rejects(() => client(api).runJobs(100), /cannot see that workflow run/);
+    await assert.rejects(() => client(api).workflowRun(100), /cannot see that workflow run/);
   });
 });
 

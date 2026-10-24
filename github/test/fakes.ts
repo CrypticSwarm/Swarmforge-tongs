@@ -357,7 +357,17 @@ export function editablePrRoutes(initial: PrState) {
 export const ACTIONS = "/repos/acme/widgets/actions";
 export const LOG_HOST = "results-receiver.example";
 
-export type RunState = { id: number; name?: string; status?: string; conclusion?: string | null; attempt?: number };
+export type RunState = {
+  id: number;
+  name?: string;
+  status?: string;
+  conclusion?: string | null;
+  attempt?: number;
+  headBranch?: string | null;
+  headSha?: string;
+};
+
+export const RUN_SHA = "1111111111111111111111111111111111111111";
 
 export function runJson(run: RunState) {
   return {
@@ -368,6 +378,8 @@ export function runJson(run: RunState) {
     conclusion: run.conclusion === undefined ? "success" : run.conclusion,
     run_attempt: run.attempt ?? 1,
     html_url: `https://github.com/acme/widgets/actions/runs/${run.id}`,
+    head_sha: run.headSha ?? RUN_SHA,
+    head_branch: run.headBranch === undefined ? "feature" : run.headBranch,
     run_started_at: "2026-10-07T12:00:00Z",
     updated_at: "2026-10-07T12:03:12Z",
   };
@@ -418,6 +430,10 @@ export function jobJson(job: JobState) {
 /** `total` is how many GitHub says there are, when that is more than it lists. */
 export function runsRoute(runs: RunState[], total = runs.length) {
   return { [`GET ${ACTIONS}/runs`]: { status: 200, json: { total_count: total, workflow_runs: runs.map(runJson) } } };
+}
+
+export function runRoute(run: RunState) {
+  return { [`GET ${ACTIONS}/runs/${run.id}`]: { status: 200, json: runJson(run) } };
 }
 
 export function jobsRoute(runId: number, jobs: JobState[], total = jobs.length) {

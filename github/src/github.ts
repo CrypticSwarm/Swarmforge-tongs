@@ -91,6 +91,9 @@ export type WorkflowRun = Progress & {
   event: string;
   attempt: number;
   url: string;
+  /** The commit the run is for; empty if GitHub omitted it. */
+  headSha: string;
+  headBranch: string;
   startedAt: string | null;
   updatedAt: string | null;
 };
@@ -335,6 +338,10 @@ export class GitHub {
     return { runs: data.workflow_runs.map(parseRun), more: (data.total_count ?? 0) > data.workflow_runs.length };
   }
 
+  async workflowRun(id: number): Promise<WorkflowRun> {
+    return parseRun(await this.request("GET", `/repos/${this.repoPath}/actions/runs/${assertId(id, "run id")}`));
+  }
+
   /** The jobs of a run's latest attempt. */
   async runJobs(runId: number): Promise<{ jobs: Job[]; more: boolean }> {
     const path = `/repos/${this.repoPath}/actions/runs/${assertId(runId, "run id")}/jobs`;
@@ -489,6 +496,8 @@ function parseRun(data: unknown): WorkflowRun {
     conclusion?: string | null;
     run_attempt?: number;
     html_url?: string;
+    head_sha?: string;
+    head_branch?: string | null;
     run_started_at?: string;
     updated_at?: string;
   };
@@ -500,6 +509,8 @@ function parseRun(data: unknown): WorkflowRun {
     event: run.event ?? "",
     attempt: run.run_attempt ?? 1,
     url: run.html_url ?? "",
+    headSha: run.head_sha ?? "",
+    headBranch: run.head_branch ?? "",
     startedAt: run.run_started_at ?? null,
     updatedAt: run.updated_at ?? null,
   };
@@ -640,7 +651,7 @@ function permissionFor(path: string): string | undefined {
 /** What a 404 on each numbered path most likely means. */
 const ADDRESSED: ReadonlyArray<[RegExp, string, string]> = [
   [/\/pulls\/\d+(\/merge)?$/, "pull request", "the number names no pull request"],
-  [/\/actions\/runs\/\d+\/jobs$/, "workflow run", "the id names no run"],
+  [/\/actions\/runs\/\d+(\/jobs)?$/, "workflow run", "the id names no run"],
   [/\/actions\/jobs\/\d+$/, "job", "the id names no job"],
   [/\/actions\/jobs\/\d+\/logs$/, "job log", "the job has no log yet, as while it is running"],
 ];

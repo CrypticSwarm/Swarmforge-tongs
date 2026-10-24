@@ -186,7 +186,7 @@ describe("protocol eras", () => {
       // and every parameter still described.
       const expected: Record<string, { properties: string[]; required: string[] | undefined }> = {
         push_branch: { properties: [], required: undefined },
-        ci_status: { properties: ["pr", "sha"], required: undefined },
+        ci_status: { properties: ["pr", "run", "sha"], required: undefined },
         ci_job: { properties: ["job_id"], required: ["job_id"] },
         ci_log: { properties: ["job_id", "limit", "start", "step"], required: ["job_id"] },
         fetch_origin: { properties: [], required: undefined },
@@ -623,6 +623,8 @@ describe("untrusted arguments", () => {
       ["ci_status", { sha: "abc123" }],
       ["ci_status", { sha: "A".repeat(40) }],
       ["ci_status", { pr: 0 }],
+      ["ci_status", { run: 0 }],
+      ["ci_status", { run: 1.5 }],
       ["ci_job", { job_id: -1 }],
       ["ci_log", { job_id: 7, limit: 0 }],
       ["ci_log", { job_id: 7, limit: MAX_LOG_LINES + 1 }],
