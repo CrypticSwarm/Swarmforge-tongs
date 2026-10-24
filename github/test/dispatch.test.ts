@@ -242,6 +242,13 @@ describe("dispatching", () => {
     }
   });
 
+  it("skips a verb shadowing a built-in one, rather than failing every request", () => {
+    const shadow: DispatchEntry = { verb: "push_branch", file: "deploy.yml", ref: "default" };
+    assert.doesNotThrow(() =>
+      buildServer(contextFor(deployApi(), pushedGit(), { defaultBranch: "main", entries: [shadow, PRODUCTION], dropped: [] })),
+    );
+  });
+
   it("refuses when the tong has no dispatch verbs", async () => {
     await assert.rejects(() => dispatch(contextFor(deployApi()), PRODUCTION, {}), /has no dispatch verbs/);
   });
@@ -290,6 +297,7 @@ describe("dispatchInputs", () => {
       ["on:\n  workflow_dispatch:\n    inputs:\n      x: { type: choice }\n", /lists no options/],
       ['on:\n  workflow_dispatch:\n    inputs:\n      "a b": {}\n', /name GitHub does not accept/],
       [`on:\n  workflow_dispatch:\n    inputs:\n      a${"b".repeat(100)}: {}\n`, /name GitHub does not accept/],
+      ['on:\n  workflow_dispatch:\n    inputs:\n      __proto__: {}\n', /input __proto__ has a name this tong cannot pass/],
       ["on: push\non: workflow_dispatch\n", /not valid YAML/],
       ["on: push\n---\non: workflow_dispatch\n", /not valid YAML/],
       ["%YAML 1.1\n---\non: workflow_dispatch\n", /YAML version other than 1\.2/],
@@ -346,9 +354,20 @@ describe("checkInputs", () => {
   it("needs every required input with no default, and a boolean with none, all named at once", () => {
     const specs = [spec("r", "string", { required: true }), spec("q", "number", { required: true }), spec("b", "boolean")];
 
-    assert.throws(() => checkInputs(specs, {}), /requires r, q, b; pass them\./);
-    assert.throws(() => checkInputs(specs, { r: "x", q: 1 }), /requires b; pass it\./);
-    assert.throws(() => checkInputs(specs, { z: 1 }), /it takes r \(required\), q \(required\), b \(required\)\./);
+    assert.throws(
+      () => checkInputs(specs, {}),
+      /^Error: the workflow requires r, q; pass them\. b is a boolean with no default, which GitHub refuses unset; pass it\.$/,
+    );
+    assert.throws(() => checkInputs(specs, { r: "x", q: 1 }), /^Error: b is a boolean with no default, which GitHub refuses unset; pass it\.$/);
+    assert.throws(
+      () => checkInputs([...specs, spec("c", "boolean")], { r: "x", q: 1 }),
+      /^Error: b, c are booleans with no default, which GitHub refuses unset; pass them\.$/,
+    );
+    assert.throws(
+      () => checkInputs([...specs, spec("t", "boolean", { required: true })], { r: "x", q: 1, b: true }),
+      /^Error: the workflow requires t; pass it\.$/,
+    );
+    assert.throws(() => checkInputs(specs, { z: 1 }), /it takes r \(required\), q \(required\), b \(boolean, must pass\)\./);
     assert.deepEqual(checkInputs([spec("r", "string", { required: true, hasDefault: true }), spec("b", "boolean", { hasDefault: true })], {}), {});
   });
 
@@ -527,7 +546,7 @@ on:
       [
         "deploy_production: .github/workflows/deploy.yml on main (default branch), at 444444444444",
         '  tier (choice): one of "small", "large"; default "small" · Which size of box',
-        `  dry_run (boolean, required) · ${"x".repeat(200)}…`,
+        `  dry_run (boolean, must pass) · ${"x".repeat(200)}…`,
         '  note (string): default ""',
         '  flag (string): default "true"',
         "  count (number): default 3",

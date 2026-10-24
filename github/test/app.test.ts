@@ -668,6 +668,34 @@ describe("untrusted arguments", () => {
     assert.match(listing, /^deploy_old: dropped at startup$/m);
   });
 
+  it("a push waits for a dispatch in flight, so it cannot move the branch the dispatch checked", async () => {
+    git.refs.set("refs/remotes/origin/feature", git.head);
+    Object.assign(api.routes, branchTipRoute({ "refs/heads/main": "4".repeat(40), "refs/heads/feature": git.head }));
+    const route = `POST /repos/acme/widgets/actions/workflows/deploy.yml/dispatches`;
+    const answer = api.routes[route];
+    let release = () => {};
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let reached = () => {};
+    const dispatching = new Promise<void>((resolve) => (reached = resolve));
+    api.routes[route] = async (call) => {
+      reached();
+      await held;
+      return typeof answer === "function" ? answer(call) : answer;
+    };
+    const client = await connect();
+
+    const dispatched = client.callTool({ name: "deploy_staging", arguments: { inputs: { in0: "x" } } });
+    await dispatching;
+    const pushed = client.callTool({ name: "push_branch", arguments: {} });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(git.pushCall, undefined, "the push must wait for the dispatch");
+
+    release();
+    assert.notEqual((await dispatched).isError, true);
+    await pushed;
+    assert.notEqual(git.pushCall, undefined);
+  });
+
   it("an invented argument within the cap is refused by the strict schema", async () => {
     const client = await connect();
     const result = await client.callTool({ name: "get_pr", arguments: { number: 7, repo: "evil/elsewhere" } });
@@ -713,6 +741,7 @@ describe("untrusted arguments", () => {
       ["deploy_production", { inputs: { a: null } }],
       ["deploy_production", { inputs: { a: ["x"] } }],
       ["deploy_production", { inputs: "a=b" }],
+      ["deploy_production", { inputs: JSON.parse('{"__proto__":"x","a":"b"}') }],
       ["deploy_production", { ref: "main" }],
     ];
     for (const [name, args] of refused) {

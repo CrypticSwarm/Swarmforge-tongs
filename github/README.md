@@ -167,8 +167,9 @@ Each verb returns the run id; follow it with `ci_status run=<id>`. A dispatch th
 gets a 5xx or no answer may have started anyway, and the error says so.
 
 `list_workflows` shows each verb's inputs, with options and defaults as the JSON
-the verb takes, and marks `required` the ones a call must pass. It still lists a
-verb that would be refused now, such as on an unpushed branch, saying why.
+the verb takes. It marks `required` the inputs the workflow requires, and `must
+pass` a boolean with no default, which GitHub refuses unset. It still lists a verb
+that would be refused now, such as on an unpushed branch, saying why.
 
 **Startup.** The tong reads the allowlist, and each workflow it names, at the
 default branch's tip. A malformed entry, or a workflow that is missing, unreadable,
@@ -195,8 +196,9 @@ without a dispatch verb. A client prompt on a `current` verb is a prompt, not a
 gate.
 
 **Not airtight.** GitHub dispatches a branch, not a commit, so a push between the
-check and the dispatch runs a file the check never read. `ci_status run=<id>`
-reports the commit that ran.
+check and the dispatch runs a file the check never read. `push_branch` and
+`create_pr` wait for a dispatch in flight, so only a push from outside the tong can
+do that. `ci_status run=<id>` reports the commit that ran.
 
 **Dispatches run as the token's owner.** That account is each run's actor, and with
 "Prevent self-review" on an environment, it cannot approve the agent's deploys.

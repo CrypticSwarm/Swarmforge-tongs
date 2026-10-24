@@ -67,6 +67,7 @@ export function dispatchInputs(text: string): InputSpec[] | null {
     if (!INPUT_NAME.test(name)) {
       throw new Error(`input '${clean(name).slice(0, 80)}' has a name GitHub does not accept.`);
     }
+    if (name === "__proto__") throw new Error("input __proto__ has a name this tong cannot pass.");
     if (!(INPUT_TYPES as readonly unknown[]).includes(type)) {
       throw new Error(`input ${name} has type '${clean(String(type)).slice(0, 40)}', which this tong does not know.`);
     }
@@ -105,10 +106,16 @@ export function checkInputs(
   }
   const unsettable = unsetEnvironment(specs);
   if (unsettable) throw new Error(`the workflow requires environment input ${unsettable}, which this tong never sets.`);
-  const missing = specs.filter((spec) => mustPass(spec) && !out.has(spec.name)).map((spec) => spec.name);
-  if (missing.length) {
-    throw new Error(`the workflow requires ${missing.join(", ")}; pass ${missing.length === 1 ? "it" : "them"}.`);
-  }
+  const unset = specs.filter((spec) => mustPass(spec) && !out.has(spec.name));
+  const missing = unset.filter((spec) => spec.required).map((spec) => spec.name);
+  const booleans = unset.filter((spec) => !spec.required).map((spec) => spec.name);
+  const pass = (names: string[]) => (names.length === 1 ? "it" : "them");
+  const are = booleans.length === 1 ? "is a boolean" : "are booleans";
+  const whys = [
+    ...(missing.length ? [`the workflow requires ${missing.join(", ")}; pass ${pass(missing)}.`] : []),
+    ...(booleans.length ? [`${booleans.join(", ")} ${are} with no default, which GitHub refuses unset; pass ${pass(booleans)}.`] : []),
+  ];
+  if (whys.length) throw new Error(whys.join(" "));
   return Object.fromEntries(out);
 }
 
@@ -122,11 +129,13 @@ function unsetEnvironment(specs: readonly InputSpec[]): string | undefined {
   return specs.find((spec) => spec.type === "environment" && spec.required && !spec.hasDefault)?.name;
 }
 
-/** `a (required), b`, or `none`, leaving out environment inputs. */
+/** `a (required), b (boolean, must pass), c`, or `none`, leaving out environment inputs. */
 function describeInputs(specs: readonly InputSpec[]): string {
   const settable = specs.filter((spec) => spec.type !== "environment");
   if (!settable.length) return "none";
-  return settable.map((spec) => (mustPass(spec) ? `${spec.name} (required)` : spec.name)).join(", ");
+  const label = (spec: InputSpec) =>
+    !mustPass(spec) ? spec.name : spec.required ? `${spec.name} (required)` : `${spec.name} (boolean, must pass)`;
+  return settable.map(label).join(", ");
 }
 
 function checkValue(spec: InputSpec, value: InputValue): string {
@@ -320,7 +329,8 @@ function asPassed(spec: InputSpec, value: string): string {
 
 /** `tier (choice): one of "small", "large"; default "small" · Which size.` */
 function renderInput(spec: InputSpec): string {
-  const kind = mustPass(spec) || unsetEnvironment([spec]) ? `${spec.type}, required` : spec.type;
+  const required = (mustPass(spec) && spec.required) || unsetEnvironment([spec]);
+  const kind = required ? `${spec.type}, required` : mustPass(spec) ? "boolean, must pass" : spec.type;
   const shown = spec.options.slice(0, MAX_OPTIONS_SHOWN).map((option) => asPassed(spec, option));
   const more = spec.options.length - shown.length;
   const parts = [

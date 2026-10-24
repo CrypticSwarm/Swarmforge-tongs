@@ -9,7 +9,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod";
 import { ciJob, ciLog, ciStatus, clean, DEFAULT_LOG_LINES, MAX_LOG_LINES } from "./ci.js";
 import { ALLOWLIST, type DispatchEntry, type Dropped } from "./allowlist.js";
-import { dispatch, INPUT_NAME, listWorkflows, MAX_INPUT_CHARS, MAX_INPUTS } from "./dispatch.js";
+import { dispatch, INPUT_NAME, listWorkflows, MAX_INPUT_CHARS, MAX_INPUTS, type InputValue } from "./dispatch.js";
 import {
   COMMIT_SHA,
   GitHubError,
@@ -423,13 +423,16 @@ export function buildIdleServer(reason: string): McpServer {
 }
 
 /** Module-wide, since every request builds a fresh server. */
-let pullRequestWrites: Promise<unknown> = Promise.resolve();
+let writes: Promise<unknown> = Promise.resolve();
 
-/** One at a time, so update_pr cannot retarget a base between merge_pr's check and its merge. */
+/**
+ * One at a time, so update_pr cannot retarget a base between merge_pr's check and its merge, and a push
+ * cannot move a branch between a dispatch's check and its dispatch.
+ */
 function serially<I>(run: (context: Context, input: I) => Promise<string>) {
   return (context: Context, input: I): Promise<string> => {
-    const result = pullRequestWrites.then(() => run(context, input));
-    pullRequestWrites = result.catch(() => {});
+    const result = writes.then(() => run(context, input));
+    writes = result.catch(() => {});
     return result;
   };
 }
@@ -453,12 +456,15 @@ export function buildServer(context: Context): McpServer {
     },
   );
 
+  const registered = new Set<string>();
+
   // Registers a verb whose handler returns text; a throw becomes an `isError` result.
   function verb<Shape extends z.ZodRawShape>(
     name: string,
     config: { description: string; inputSchema: z.ZodObject<Shape> },
     run: (context: Context, input: z.infer<z.ZodObject<Shape>>) => Promise<string>,
   ): void {
+    registered.add(name);
     server.registerTool(name, { title: name, ...config }, async (input) => {
       try {
         return { content: [{ type: "text" as const, text: await run(context, input) }] };
@@ -484,7 +490,7 @@ export function buildServer(context: Context): McpServer {
       ),
       inputSchema: z.strictObject({}),
     },
-    pushBranch,
+    serially(pushBranch),
   );
 
   verb(
@@ -516,7 +522,7 @@ export function buildServer(context: Context): McpServer {
         draft: z.boolean().optional().describe("Open the pull request as a draft."),
       }),
     },
-    createPr,
+    serially(createPr),
   );
 
   verb(
@@ -643,11 +649,21 @@ export function buildServer(context: Context): McpServer {
   );
 
   const inputs = z
-    .record(
-      z.string().regex(INPUT_NAME, "must be a workflow input name"),
-      z.union([z.string().max(MAX_INPUT_CHARS), z.number(), z.boolean()]),
+    .preprocess(
+      (raw, ctx) => {
+        // zod drops this key without a word, so refuse it before the record sees it.
+        if (typeof raw === "object" && raw !== null && Object.hasOwn(raw, "__proto__")) {
+          ctx.addIssue({ code: "custom", message: "__proto__ is not an input this tong can pass" });
+        }
+        return raw;
+      },
+      z
+        .record(
+          z.string().regex(INPUT_NAME, "must be a workflow input name"),
+          z.union([z.string().max(MAX_INPUT_CHARS), z.number(), z.boolean()]),
+        )
+        .refine((value) => Object.keys(value).length <= MAX_INPUTS, `at most ${MAX_INPUTS} inputs`),
     )
-    .refine((value) => Object.keys(value).length <= MAX_INPUTS, `at most ${MAX_INPUTS} inputs`)
     .optional()
     .describe("Workflow inputs by name, each a string, number, or boolean, as the workflow file types it.");
   if (dispatchText) {
@@ -665,6 +681,11 @@ export function buildServer(context: Context): McpServer {
   }
 
   for (const entry of dispatchVerbs) {
+    // A name RESERVED_VERBS missed would make registerTool throw, failing every request.
+    if (registered.has(entry.verb)) {
+      console.error(`github: dispatch verb ${entry.verb} shadows a built-in verb; skipping it`);
+      continue;
+    }
     const on =
       entry.ref === "default"
         ? `the default branch, ${context.dispatch!.defaultBranch}`
@@ -678,7 +699,7 @@ export function buildServer(context: Context): McpServer {
           "the run with ci_status run=<id>.",
         inputSchema: z.strictObject({ inputs }),
       },
-      (context, input) => dispatch(context, entry, input),
+      serially((context, input: { inputs?: Record<string, InputValue> }) => dispatch(context, entry, input)),
     );
   }
 
