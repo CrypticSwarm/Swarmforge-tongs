@@ -1,7 +1,3 @@
-// The signing orchestration: which commits are eligible, which are refused, and
-// what the rewrite walk produces. Driven entirely through the fake git/gpg in
-// fake-git.ts, so this runs with no docker, no gpg, and no key.
-
 import { strict as assert } from "node:assert";
 import { test, describe } from "node:test";
 import { isSigned, parentShas, parseCommit, serializeCommit, stripSignature } from "../src/commit.js";
@@ -24,7 +20,6 @@ function repoFor(git: FakeGit, exists?: (path: string) => Promise<boolean>): Rep
   );
 }
 
-/** A branch with `count` unsigned commits on top of a published base. */
 function branchWithUnsigned(count: number, options: { committerEmail?: string } = {}): FakeGit {
   const git = new FakeGit();
   const base = commit(git, { message: "published base" });
@@ -57,9 +52,7 @@ describe("inspect", () => {
   test("falls back to origin's default branch when nothing is tracked", async () => {
     const git = branchWithUnsigned(1);
     git.upstream = null;
-    // Both @{upstream} and refs/remotes/origin/HEAD are unavailable here, which is
-    // reported as "none tracked" rather than treated as a blocker -- the candidate
-    // set does not depend on it.
+    // The fake's origin/HEAD also reads `upstream`, so the fallback finds nothing too.
     assert.equal((await inspect(repoFor(git), KEY)).upstreamRef, null);
   });
 
@@ -77,8 +70,6 @@ describe("inspect", () => {
   });
 
   test("re-signs a signed commit whose parent must be rewritten", async () => {
-    // Rewriting the parent changes its SHA, so the child's object changes too and
-    // its old signature can no longer be valid.
     const git = new FakeGit();
     const base = commit(git, { message: "published base" });
     git.published.add(base);
@@ -125,8 +116,7 @@ describe("blockers", () => {
     git.originRefs = [];
     const status = await inspect(repoFor(git), KEY);
     assert.match(status.blockers.join("\n"), /no refs\/remotes\/origin/);
-    // Without a published baseline the candidate list is meaningless, so it is not
-    // reported at all rather than shown as the whole history.
+    // No baseline, so nothing is listed.
     assert.deepEqual(status.commits, []);
   });
 
@@ -209,8 +199,6 @@ describe("signCommits", () => {
     const outcome = await signCommits(repoFor(git), git.run, KEY, undefined);
 
     const after = git.objects.get(outcome.rewritten[0].to)!;
-    // Removing the signature we just added must give back the original bytes:
-    // nothing else about the commit changed.
     assert.deepEqual(serializeCommit(stripSignature(parseCommit(after))), before);
   });
 
@@ -235,7 +223,6 @@ describe("signCommits", () => {
       ["refs/swarmforge/git-signing/pre-sign/feature", "refs/heads/feature"],
       "the backup must be written before the branch moves",
     );
-    // The branch move is a compare-and-swap against the head we inspected.
     assert.equal(git.refUpdates[1].expected, originalHead);
   });
 

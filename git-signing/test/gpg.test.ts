@@ -1,6 +1,4 @@
-// Key selection and gpg argv construction. Both are security boundaries: picking
-// the wrong key of several would sign as the wrong person, and a passphrase that
-// slipped onto argv would be readable from /proc.
+// Key selection and gpg argv: the wrong key signs as someone else; argv is readable from /proc.
 
 import { strict as assert } from "node:assert";
 import { test, describe } from "node:test";
@@ -50,8 +48,7 @@ describe("parseSecretKeys", () => {
   });
 
   test("rejects a public-key-only import", () => {
-    // A public key export produces `pub`/`sub` records and no `sec`, so there is
-    // nothing to sign with.
+    // A public export has `pub`/`sub` records and no `sec`.
     const colons = ONE_KEY.replace("sec:", "pub:").replace("ssb:", "sub:");
     assert.throws(() => parseSecretKeys(colons), /imported no secret key/);
   });
@@ -91,8 +88,7 @@ describe("detachSignArgv", () => {
 
   test("uses loopback pinentry only when a passphrase is supplied", () => {
     assert.equal(detachSignArgv(FPR, true).join(" ").includes("--pinentry-mode loopback"), true);
-    // With no passphrase, a key that turns out to be protected must fail rather
-    // than block on a pinentry that does not exist in this container.
+    // A protected key must fail rather than block on a missing pinentry.
     assert.equal(detachSignArgv(FPR, false).join(" ").includes("--pinentry-mode error"), true);
   });
 

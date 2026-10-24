@@ -1,9 +1,3 @@
-// The signing pass: decide what may be rewritten, then rewrite it.
-//
-// Split into `inspect` (read-only, everything `signing_status` reports) and
-// `signCommits` (the same inspection followed by the writes), so the dry run and
-// the real run can never disagree about what is eligible.
-
 import { attachSignature, isSigned, parentShas, parseCommit, rewriteParents, serializeCommit, stripSignature, identity } from "./commit.js";
 import { detachSign, type SigningKey } from "./gpg.js";
 import type { Run } from "./exec.js";
@@ -16,7 +10,7 @@ export type CommitSummary = {
   subject: string;
   committerEmail: string | null;
   signed: boolean;
-  /** Whether this commit would be (or was) rebuilt with our signature. */
+  /** Whether this commit would be (or was) rebuilt with this key's signature. */
   rewrite: boolean;
 };
 
@@ -26,13 +20,12 @@ export type Status = {
   head: string;
   key: { fingerprint: string; uids: string[] };
   commits: CommitSummary[];
-  /** Empty means `sign_commits` will proceed. */
   blockers: string[];
 };
 
 export type SignOutcome = {
   status: Status;
-  /** Oldest first. Empty when there was nothing to do. */
+  /** Parents first. */
   rewritten: Array<{ from: string; to: string }>;
   newHead: string;
   backupRef: string | null;
@@ -46,10 +39,6 @@ function subjectOf(message: Buffer): string {
   return firstLine.length > 120 ? `${firstLine.slice(0, 117)}...` : firstLine;
 }
 
-/**
- * Collects *every* blocker rather than throwing at the first, so `signing_status`
- * can report everything that needs fixing in one round trip.
- */
 export async function inspect(repo: Repo, key: SigningKey): Promise<Status> {
   await repo.assertIsRepo();
 
@@ -76,14 +65,11 @@ export async function inspect(repo: Repo, key: SigningKey): Promise<Status> {
 
   const head = await repo.headSha();
 
-  // Without a published baseline the candidate set is meaningless, so stop here
-  // rather than listing the entire history as pending signature.
   if (originRefs.length === 0) {
     return { branch, upstreamRef: await repo.upstreamRef(), head, key: { fingerprint: key.fingerprint, uids: key.uids }, commits: [], blockers };
   }
 
-  // The single forward pass below is only correct because unpublishedCommits
-  // returns parents before children (see its `--topo-order` note).
+  // One forward pass: candidates come parents first.
   const candidates = await repo.unpublishedCommits();
   const mustRewrite = new Set<string>();
   const commits: CommitSummary[] = [];
@@ -91,9 +77,7 @@ export async function inspect(repo: Repo, key: SigningKey): Promise<Status> {
   for (const sha of candidates) {
     const commit = parseCommit(await repo.readCommit(sha));
     const alreadySigned = isSigned(commit);
-    // A rewritten parent changes this commit's own bytes, so its existing
-    // signature could not survive anyway. With untouched parents a signed commit
-    // is left exactly as it is, which keeps somebody else's signature intact.
+    // A rewritten parent invalidates this commit's signature; otherwise keep it, preserving another signer's.
     const parentRewritten = parentShas(commit).some((parent) => mustRewrite.has(parent));
     const rewrite = !alreadySigned || parentRewritten;
     if (rewrite) mustRewrite.add(sha);
@@ -107,8 +91,6 @@ export async function inspect(repo: Repo, key: SigningKey): Promise<Status> {
     });
   }
 
-  // A signature is a claim about who made the commit, so refuse to make that
-  // claim on behalf of an email the key does not carry.
   const keyEmails = new Set(key.emails);
   const mismatched = commits.filter(
     (c) => c.rewrite && (c.committerEmail === null || !keyEmails.has(c.committerEmail.toLowerCase())),
@@ -132,12 +114,7 @@ export async function inspect(repo: Repo, key: SigningKey): Promise<Status> {
   };
 }
 
-/**
- * The working tree and index are never touched: each rewritten commit keeps its
- * original tree, so the branch move is a pure ref update and a dirty checkout is
- * unaffected. The pre-signing head is saved under `refs/swarmforge/git-signing/`
- * (on top of the reflog entry git writes anyway) so the rewrite is reversible.
- */
+/** Trees are unchanged, so the working tree and index still match the new HEAD. */
 export async function signCommits(
   repo: Repo,
   run: Run,
@@ -159,27 +136,23 @@ export async function signCommits(
 
   for (const summary of toRewrite) {
     const original = parseCommit(await repo.readCommit(summary.sha));
-    // Strip before signing: the payload gpg signs, and that git later reconstructs
-    // to verify, is the commit without its signature header.
-    const rebased = stripSignature(rewriteParents(original, mapping));
-    const payload = serializeCommit(rebased);
+    const unsignedRewrite = stripSignature(rewriteParents(original, mapping));
+    const payload = serializeCommit(unsignedRewrite);
     const signature = await detachSign(run, payload, key, passphrase);
-    const newSha = await repo.writeCommit(serializeCommit(attachSignature(rebased, signature)));
+    const newSha = await repo.writeCommit(serializeCommit(attachSignature(unsignedRewrite, signature)));
     mapping.set(summary.sha, newSha);
     rewritten.push({ from: summary.sha, to: newSha });
   }
 
   const newHead = mapping.get(status.head);
   if (!newHead) {
-    // HEAD is unpublished and every rewritten commit is an ancestor of it, so a
-    // rewrite that did not reach HEAD means the walk missed a commit.
+    // Rewrites propagate to descendants, so HEAD is always rewritten.
     throw new SigningError(
       `internal error: rewrote ${rewritten.length} commit(s) but HEAD ${status.head} was not among them`,
     );
   }
 
-  // Nothing has been signed if git cannot see a signature on what we just wrote --
-  // a malformed header must fail loudly rather than leave commits that only look signed.
+  // A malformed header must fail loudly, not leave commits that only look signed.
   const state = await repo.signatureState(newHead);
   if (state === "N") {
     throw new SigningError(

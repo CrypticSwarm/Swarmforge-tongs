@@ -1,14 +1,4 @@
-// The one place this tong starts a subprocess.
-//
-// Everything else in the tong reaches `git` and `gpg` through the `Run` seam
-// below, which means two things: unit tests can drive the whole signing path with
-// a recorded transcript and no binaries installed, and there is a single audited
-// spot to check that no value ever reaches a shell.
-//
-// `spawn` is always called with an argv array and no `shell` option, so a caller
-// value is a single argv word no matter what it contains -- it cannot become a
-// flag, a path, or a shell metacharacter. The MCP surface takes no free-form
-// strings at all (see server.ts), so nothing the agent sends even reaches here.
+// The only subprocess seam: argv arrays, never a shell.
 
 import { spawn } from "node:child_process";
 
@@ -16,10 +6,6 @@ export class RunError extends Error {}
 
 export type RunOptions = {
   stdin?: Buffer;
-  /**
-   * For gpg's `--passphrase-fd 3`, which keeps the passphrase off argv
-   * (`/proc/<pid>/cmdline` is world-readable) and off the filesystem.
-   */
   fd3?: Buffer;
   cwd?: string;
   env?: NodeJS.ProcessEnv;
@@ -33,7 +19,7 @@ export type RunResult = {
 
 export type Run = (command: string, args: readonly string[], options?: RunOptions) => Promise<RunResult>;
 
-/** So a pathological repository cannot exhaust memory. */
+/** Output past this is silently dropped, so a pathological repository cannot exhaust memory. */
 export const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 
 function collect(stream: NodeJS.ReadableStream, chunks: Buffer[], state: { bytes: number }): void {
@@ -48,8 +34,6 @@ function collect(stream: NodeJS.ReadableStream, chunks: Buffer[], state: { bytes
 
 export const realRun: Run = (command, args, options = {}) =>
   new Promise((resolve, reject) => {
-    // fd 3 is a pipe only when the caller has something to put on it; otherwise
-    // the child must not inherit a stray descriptor.
     const stdio: Array<"pipe" | "ignore"> = ["pipe", "pipe", "pipe"];
     if (options.fd3) stdio.push("pipe");
 
@@ -67,13 +51,13 @@ export const realRun: Run = (command, args, options = {}) =>
     if (options.fd3) {
       const extra = child.stdio[3] as NodeJS.WritableStream;
       extra.on("error", () => {
-        /* the child may exit before reading; that surfaces as a non-zero exit */
+        /* EPIPE if the child never reads it; the exit code carries any real failure */
       });
       extra.end(options.fd3);
     }
 
     child.stdin!.on("error", () => {
-      /* likewise for a child that exits without draining stdin */
+      /* likewise for stdin */
     });
     child.stdin!.end(options.stdin ?? Buffer.alloc(0));
 
