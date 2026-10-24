@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { GitHub, GitHubError, MAX_LOG_BYTES, MAX_LOG_READ_BYTES, NoAnswer, type Fetch } from "../src/github.js";
-import { ACTIONS, FakeGitHubApi, LOG_HOST, ORIGIN, TOKEN, branchTipRoute, dispatchRoute, getPrRoute, jobsRoute, logRoutes, runRoute, runsRoute, workflowFileRoute } from "./fakes.js";
+import { ACTIONS, FakeGitHubApi, LOG_HOST, ORIGIN, TOKEN, branchTipRoute, dispatchRoute, getPrRoute, jobsRoute, logRoutes, runRoute, runsRoute, workflowFileRoute, allowlistRoute } from "./fakes.js";
 
 const SHA = "abcdef0123456789abcdef0123456789abcdef01";
 
@@ -309,6 +309,24 @@ describe("workflows", () => {
     await assert.rejects(() => client(answer({ type: "file", encoding: "base64", size: 2_000_000, content: "" })).workflowFile("deploy.yml", "main"), /over 1 MB/);
     await assert.rejects(() => client(answer({ type: "file", encoding: "none", size: 10, content: "" })).workflowFile("deploy.yml", "main"), /over 1 MB/);
     await assert.rejects(() => client(answer([{ type: "file" }])).workflowFile("deploy.yml", "main"), /is not a file on main/);
+  });
+
+  it("reads the allowlist at a ref, and reads none where GitHub has none", async () => {
+    const api = new FakeGitHubApi(allowlistRoute("a: {}\n"));
+
+    assert.equal(await client(api).allowlistFile(SHA), "a: {}\n");
+    const url = new URL(api.calls[0].url);
+    assert.equal(url.pathname, "/repos/acme/widgets/contents/.github/swarmforge-dispatch.yml");
+    assert.deepEqual([...url.searchParams], [["ref", SHA]]);
+    const at = (status: number) =>
+      client(new FakeGitHubApi({ [`GET ${url.pathname}`]: { status, json: { message: "x" } } })).allowlistFile(SHA);
+    assert.equal(await at(404), null);
+    await assert.rejects(() => at(403), /Contents: read,/);
+    await assert.rejects(() => at(500), /GitHub returned 500/);
+    const sent = (json: unknown) =>
+      client(new FakeGitHubApi({ [`GET ${url.pathname}`]: { status: 200, json } })).allowlistFile(SHA);
+    await assert.rejects(() => sent([{ type: "file" }]), /swarmforge-dispatch\.yml is not a file on/);
+    await assert.rejects(() => sent({ type: "file", encoding: "none", size: 2_000_000 }), /it may be over 1 MB\.$/);
   });
 
   it("dispatches on a branch, asking for the run's details", async () => {

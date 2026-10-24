@@ -3,7 +3,7 @@
 // Caller values reach a URL only as an `assertId` path segment or a URLSearchParams
 // value; everything else travels as a JSON body. `fetch` is injected for tests.
 
-import { WORKFLOW_FILE } from "./config.js";
+import { ALLOWLIST, WORKFLOW_FILE } from "./allowlist.js";
 import type { Origin } from "./origin.js";
 
 export class GitHubError extends Error {
@@ -50,7 +50,7 @@ export const MAX_LOG_READ_BYTES = 256 * 1024 * 1024;
 const TIMEOUT_MS = 60_000;
 
 /** The Contents API inlines a file only up to 1 MB. */
-export const MAX_WORKFLOW_BYTES = 1024 * 1024;
+export const MAX_FILE_BYTES = 1024 * 1024;
 
 /** GitHub has no SHA-256 repositories, so a commit id is 40 hex digits. */
 export const COMMIT_SHA = /^[0-9a-f]{40}$/;
@@ -365,16 +365,30 @@ export class GitHub {
 
   /** A workflow file's text at `ref`, a branch or commit; `ref` is a query value only. */
   async workflowFile(file: string, ref: string): Promise<string> {
+    return this.fileAt(`.github/workflows/${file}`, this.workflowPath(file, "contents"), ref);
+  }
+
+  /** The dispatch allowlist's text at `ref`, or null when the repository has none there. */
+  async allowlistFile(ref: string): Promise<string | null> {
+    try {
+      return await this.fileAt(ALLOWLIST, `/repos/${this.repoPath}/contents/${ALLOWLIST}`, ref);
+    } catch (err) {
+      if (err instanceof GitHubError && err.status === 404) return null;
+      throw err;
+    }
+  }
+
+  private async fileAt(name: string, path: string, ref: string): Promise<string> {
     const query = new URLSearchParams({ ref });
-    const data = (await this.request("GET", `${this.workflowPath(file, "contents")}?${query}`)) as {
+    const data = (await this.request("GET", `${path}?${query}`)) as {
       type?: string;
       encoding?: string;
       content?: string;
       size?: number;
     };
-    if (data?.type !== "file") throw new GitHubError(`.github/workflows/${file} is not a file on ${ref}`, 0);
-    if ((data.size ?? 0) > MAX_WORKFLOW_BYTES || data.encoding !== "base64" || typeof data.content !== "string") {
-      throw new GitHubError(`GitHub did not send .github/workflows/${file} inline; is it over 1 MB?`, 0);
+    if (data?.type !== "file") throw new GitHubError(`${name} is not a file on ${ref}`, 0);
+    if ((data.size ?? 0) > MAX_FILE_BYTES || data.encoding !== "base64" || typeof data.content !== "string") {
+      throw new GitHubError(`GitHub did not send ${name} inline; it may be over 1 MB.`, 0);
     }
     return Buffer.from(data.content, "base64").toString("utf8");
   }

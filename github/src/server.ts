@@ -8,8 +8,8 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod";
 import { ciJob, ciLog, ciStatus, clean, DEFAULT_LOG_LINES, MAX_LOG_LINES } from "./ci.js";
-import type { DispatchEntry } from "./config.js";
-import { dispatch, INPUT_NAME, MAX_INPUT_CHARS, MAX_INPUTS, type Dropped } from "./dispatch.js";
+import { ALLOWLIST, type DispatchEntry, type Dropped } from "./allowlist.js";
+import { dispatch, INPUT_NAME, MAX_INPUT_CHARS, MAX_INPUTS } from "./dispatch.js";
 import {
   COMMIT_SHA,
   GitHubError,
@@ -31,8 +31,8 @@ export type Context = {
   origin: Origin;
   remoteUrl: string;
   token: string;
-  /** The configured dispatch verbs that passed the startup check; absent means none. */
-  dispatch?: { defaultBranch: string; entries: readonly DispatchEntry[]; dropped: readonly Dropped[] };
+  /** The allowlisted dispatch verbs that passed the startup check; absent means dispatch is off. */
+  dispatch?: { defaultBranch: string; entries: readonly DispatchEntry[]; dropped: readonly Dropped[]; unusable?: string };
 };
 
 /** Names a dispatch verb may not take: the built-in verbs, plus list_workflows. */
@@ -83,19 +83,27 @@ unsigned commit to the repository is refused, and nothing is pushed. Sign the
 commits you have not pushed yet -- the git-signing tong's sign_commits verb signs
 exactly the set this checks -- and then call again.`;
 
-/** Nothing when there are no dispatch verbs and none were dropped. */
-export function dispatchInstructions(verbs: readonly string[], dropped: readonly Dropped[]): string | undefined {
-  if (!verbs.length && !dropped.length) return undefined;
-  const lines = verbs.length
-    ? [
-        `${verbs.length === 1 ? verbs[0] : `Each of ${verbs.join(", ")}`} dispatches one configured GitHub Actions`,
-        "workflow on its configured branch, checking 'inputs' against the workflow file there",
-        "first. A dispatch cannot be undone here; follow its run with ci_status run=<id>.",
-      ]
-    : [];
+/** Nothing when dispatch is off. */
+export function dispatchInstructions(
+  setup: { entries: readonly DispatchEntry[]; dropped: readonly Dropped[]; unusable?: string } | undefined,
+): string | undefined {
+  if (!setup) return undefined;
+  const verbs = setup.entries.map((entry) => entry.verb);
+  const lines = [
+    `Dispatch verbs come from ${ALLOWLIST} on the default branch. A verb added there appears from the next`,
+    "session; one removed or changed is refused at once.",
+  ];
+  if (verbs.length) {
+    lines.push(
+      `${verbs.length === 1 ? verbs[0] : `Each of ${verbs.join(", ")}`} dispatches one allowlisted GitHub Actions`,
+      "workflow on the branch its entry names, checking 'inputs' against the workflow file there first. A",
+      "dispatch cannot be undone here; follow its run with ci_status run=<id>.",
+    );
+  }
   // So an agent missing a verb can say why, rather than that it was never there.
-  const gone = dropped.map(({ verb, why }) => `Dispatch verb ${verb} was dropped at startup: ${why}.`);
-  return [...lines, ...gone].join("\n");
+  lines.push(...setup.dropped.map(({ verb, why }) => `Dispatch verb ${verb} was dropped at startup: ${why}.`));
+  if (setup.unusable) lines.push(`No dispatch verbs this session: ${setup.unusable}.`);
+  return lines.join("\n");
 }
 
 const SIGNED_COMMITS_SENTENCE =
@@ -427,11 +435,7 @@ function serially<I>(run: (context: Context, input: I) => Promise<string>) {
 
 export function buildServer(context: Context): McpServer {
   const dispatchVerbs = context.dispatch?.entries ?? [];
-  const dropped = context.dispatch?.dropped ?? [];
-  const dispatchText = dispatchInstructions(
-    dispatchVerbs.map((entry) => entry.verb),
-    dropped,
-  );
+  const dispatchText = dispatchInstructions(context.dispatch);
   const instructions = [
     INSTRUCTIONS,
     ...(dispatchText ? [dispatchText] : []),

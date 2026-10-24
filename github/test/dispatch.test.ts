@@ -1,15 +1,17 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import type { DispatchEntry } from "../src/config.js";
-import { checkInputs, dispatch, dispatchInputs, usableEntries, type InputSpec } from "../src/dispatch.js";
-import { dispatchInstructions } from "../src/server.js";
+import type { DispatchEntry, Dropped } from "../src/allowlist.js";
+import { checkInputs, dispatch, dispatchInputs, loadDispatch, type InputSpec } from "../src/dispatch.js";
+import { RESERVED_VERBS, dispatchInstructions } from "../src/server.js";
 import { GitHub } from "../src/github.js";
 import {
   ACTIONS,
   FakeGit,
   FakeGitHubApi,
   ORIGIN,
+  REPO_ROUTE,
   TOKEN,
+  allowlistRoute,
   branchTipRoute,
   contextFor,
   dispatchRoute,
@@ -23,6 +25,10 @@ const TIPS = { "refs/heads/main": MAIN, "refs/heads/feature": PUSHED };
 const PRODUCTION: DispatchEntry = { verb: "deploy_production", file: "deploy.yml", ref: "default" };
 const STAGING: DispatchEntry = { verb: "deploy_staging", file: "deploy.yml", ref: "current" };
 const CONTENTS = "/repos/acme/widgets/contents/.github/workflows/deploy.yml";
+const ALLOWLIST_PATH = "/repos/acme/widgets/contents/.github/swarmforge-dispatch.yml";
+const LISTING = "deploy_production: { workflow: deploy.yml, ref: default }\ndeploy_staging: { workflow: deploy.yml, ref: current }\n";
+/** What every dispatch re-reads first: the default branch's name and its allowlist. */
+const LISTED = { ...REPO_ROUTE, ...allowlistRoute(LISTING) };
 const DISPATCHES = `POST ${ACTIONS}/workflows/deploy.yml/dispatches`;
 
 const DEPLOY = `
@@ -45,6 +51,7 @@ function pushedGit(branch = "feature"): FakeGit {
 function deployApi(yaml = DEPLOY, dispatched: FetchCall[] = [], tips: Record<string, string> = TIPS): FakeGitHubApi {
   const route = dispatchRoute("deploy.yml")[DISPATCHES];
   return new FakeGitHubApi({
+    ...LISTED,
     ...branchTipRoute(tips),
     ...workflowFileRoute("deploy.yml", yaml),
     [DISPATCHES]: (call) => {
@@ -97,7 +104,7 @@ describe("dispatching", () => {
 
     const text = await dispatch(contextWith(api), STAGING, {});
 
-    assert.deepEqual(askedTips(api), ["refs/heads/feature"]);
+    assert.deepEqual(askedTips(api), ["refs/heads/main", "refs/heads/feature"]);
     assert.deepEqual(readRefs(api), [PUSHED]);
     assert.equal((dispatched[0].body as { ref: string }).ref, "refs/heads/feature");
     assert.match(text, /^Dispatched deploy\.yml on feature, checked at 111111111111, as run 555\./);
@@ -134,7 +141,7 @@ describe("dispatching", () => {
     const git = new FakeGit({ branch: "refs/heads/main", head: MAIN });
 
     await assert.rejects(() => dispatch(contextWith(api, git), STAGING, {}), /GitHub has no branch refs\/heads\/main/);
-    assert.deepEqual(askedTips(api), ["refs/heads/refs/heads/main"]);
+    assert.deepEqual(askedTips(api), ["refs/heads/main", "refs/heads/refs/heads/main"]);
     assert.equal(dispatched.length, 0);
   });
 
@@ -159,6 +166,7 @@ describe("dispatching", () => {
 
   it("says when GitHub reports no run id, and where to look", async () => {
     const api = new FakeGitHubApi({
+      ...LISTED,
       ...branchTipRoute(TIPS),
       ...workflowFileRoute("deploy.yml", DEPLOY),
       [DISPATCHES]: { status: 204 },
@@ -172,7 +180,7 @@ describe("dispatching", () => {
 
   it("says a dispatch behind a 5xx or no answer may have started, and a 4xx did not", async () => {
     const respond = (answer: () => Response | Promise<Response>) => {
-      const api = new FakeGitHubApi({ ...branchTipRoute(TIPS), ...workflowFileRoute("deploy.yml", DEPLOY) });
+      const api = new FakeGitHubApi({ ...LISTED, ...branchTipRoute(TIPS), ...workflowFileRoute("deploy.yml", DEPLOY) });
       const fetch = api.fetch;
       const context = contextWith(api);
       context.github = new GitHub(
@@ -200,8 +208,35 @@ describe("dispatching", () => {
     );
   });
 
-  it("refuses when the tong has no dispatch configuration", async () => {
-    await assert.rejects(() => dispatch(contextFor(deployApi()), PRODUCTION, {}), /not configured/);
+  it("refuses a verb the allowlist no longer lists as at startup, or a renamed default branch", async () => {
+    const cases: Array<[Record<string, unknown>, RegExp]> = [
+      [allowlistRoute("deploy_staging: { workflow: deploy.yml, ref: current }\n"), /no longer lists deploy_production as it did/],
+      [allowlistRoute("deploy_production: { workflow: other.yml, ref: default }\n"), /no longer lists deploy_production/],
+      [allowlistRoute("deploy_production: { workflow: deploy.yml, ref: current }\n"), /no longer lists deploy_production/],
+      [{ [`GET ${ALLOWLIST_PATH}`]: { status: 404, json: { message: "Not Found" } } }, /no longer lists deploy_production/],
+      [allowlistRoute("- deploy\n"), /swarmforge-dispatch\.yml on main is unusable now: it is not a map/],
+      [{ "GET /repos/acme/widgets": { status: 200, json: { default_branch: "trunk" } } }, /default branch is now trunk, not main/],
+      [branchTipRoute({ "refs/heads/feature": PUSHED }), /^Error: GitHub has no branch main\.$/],
+      [
+        { [`GET ${ALLOWLIST_PATH}`]: { status: 503, json: { message: "Service Unavailable" } } },
+        /^Error: checking \.github\/swarmforge-dispatch\.yml failed, so nothing was dispatched: GitHub returned 503/,
+      ],
+      [
+        { [`GET ${ALLOWLIST_PATH}`]: { status: 403, json: { message: "no" } } },
+        /^Error: checking .* failed, so nothing was dispatched: GitHub refused the request \(403\)/,
+      ],
+    ];
+    for (const [routes, expected] of cases) {
+      const dispatched: FetchCall[] = [];
+      const api = deployApi(DEPLOY, dispatched);
+      Object.assign(api.routes, routes);
+      await assert.rejects(() => dispatch(contextWith(api), PRODUCTION, {}), expected);
+      assert.deepEqual([readRefs(api), dispatched.length], [[], 0], String(expected));
+    }
+  });
+
+  it("refuses when the tong has no dispatch verbs", async () => {
+    await assert.rejects(() => dispatch(contextFor(deployApi()), PRODUCTION, {}), /has no dispatch verbs/);
   });
 });
 
@@ -260,7 +295,7 @@ describe("dispatchInputs", () => {
       rows.push(`${name}: &${name} [${Array(10).fill(i === 1 ? "*a" : `*${"b".repeat(i - 1)}`).join(", ")}]`);
     }
     const bomb = `${rows.join("\n")}\non:\n  workflow_dispatch:\n    inputs:\n      x: { options: *${"b".repeat(11)} }\n`;
-    assert.throws(() => dispatchInputs(bomb), /not valid YAML/);
+    assert.throws(() => dispatchInputs(bomb), /the workflow file's 'on' cannot be read: Excessive alias count/);
   });
 });
 
@@ -327,12 +362,18 @@ describe("checkInputs", () => {
   });
 });
 
-describe("usableEntries", () => {
-  const entry = (verb: string, file: string): DispatchEntry => ({ verb, file, ref: "default" });
+describe("loadDispatch", () => {
+  const load = (api: FakeGitHubApi) => loadDispatch(new GitHub(api.fetch, ORIGIN, TOKEN), "main", RESERVED_VERBS);
+  const listing = (...entries: Array<[string, string]>) =>
+    entries.map(([verb, file]) => `${verb}: { workflow: ${file}, ref: default }`).join("\n");
 
-  it("keeps the entries dispatchable from the default branch's tip, and says why it drops each other one", async () => {
+  it("keeps the verbs dispatchable from the default branch's tip, and says why it drops each other one", async () => {
     const api = new FakeGitHubApi({
       ...branchTipRoute(TIPS),
+      ...allowlistRoute(
+        listing(["deploy", "deploy.yml"], ["lint", "lint.yml"], ["broken", "broken.yml"], ["pick", "pick.yml"], ["gone", "gone.yml"]) +
+          "\nBad: { workflow: deploy.yml, ref: default }\n",
+      ),
       ...workflowFileRoute("deploy.yml", DEPLOY),
       ...workflowFileRoute("lint.yml", "on: push\n"),
       ...workflowFileRoute("broken.yml", "on: [\n"),
@@ -340,13 +381,7 @@ describe("usableEntries", () => {
       "GET /repos/acme/widgets/contents/.github/workflows/gone.yml": { status: 404, json: { message: "Not Found" } },
     });
 
-    const { entries, dropped } = await usableEntries(new GitHub(api.fetch, ORIGIN, TOKEN), "main", [
-      entry("deploy", "deploy.yml"),
-      entry("lint", "lint.yml"),
-      entry("broken", "broken.yml"),
-      entry("pick", "pick.yml"),
-      entry("gone", "gone.yml"),
-    ]);
+    const { entries, dropped, unusable } = await load(api);
 
     assert.deepEqual(
       entries.map((e) => e.verb),
@@ -354,58 +389,95 @@ describe("usableEntries", () => {
     );
     assert.deepEqual(
       dropped.map((d) => d.verb),
-      ["lint", "broken", "pick", "gone"],
+      ["at entry 6", "lint", "broken", "pick", "gone"],
     );
-    assert.equal(dropped[0].why, "lint.yml: no workflow_dispatch trigger on main");
-    assert.match(dropped[1].why, /^broken\.yml: the workflow file is not valid YAML/);
-    assert.equal(dropped[2].why, "pick.yml: it requires environment input e, which this tong never sets");
-    assert.match(dropped[3].why, /^gone\.yml: GitHub cannot see that workflow file .* not on that ref/);
+    assert.match(dropped[0].why, /^\.github\/swarmforge-dispatch\.yml: a verb name takes/);
+    assert.equal(dropped[1].why, "lint.yml: no workflow_dispatch trigger on main");
+    assert.match(dropped[2].why, /^broken\.yml: the workflow file is not valid YAML/);
+    assert.equal(dropped[3].why, "pick.yml: it requires environment input e, which this tong never sets");
+    assert.match(dropped[4].why, /^gone\.yml: GitHub cannot see that workflow file .* not on that ref/);
+    assert.equal(unusable, undefined);
     assert.deepEqual(askedTips(api), ["refs/heads/main"]);
     assert.deepEqual(readRefs(api), [MAIN]);
+    const allowlistRead = api.calls.map((call) => new URL(call.url)).find((url) => url.pathname === ALLOWLIST_PATH);
+    assert.equal(allowlistRead?.searchParams.get("ref"), MAIN);
   });
 
-  it("drops every entry when GitHub has no default branch tip, and asks nothing without entries", async () => {
-    const api = new FakeGitHubApi(branchTipRoute({}));
-    const github = new GitHub(api.fetch, ORIGIN, TOKEN);
+  it("serves no verbs, and says nothing, when the default branch has no allowlist", async () => {
+    const api = new FakeGitHubApi({
+      ...branchTipRoute(TIPS),
+      [`GET ${ALLOWLIST_PATH}`]: { status: 404, json: { message: "Not Found" } },
+    });
 
-    const { dropped } = await usableEntries(github, "main", [entry("deploy", "deploy.yml")]);
-    assert.deepEqual(dropped, [{ verb: "deploy", why: "deploy.yml: GitHub has no branch main" }]);
-
-    api.calls.length = 0;
-    assert.deepEqual(await usableEntries(github, "main", []), { entries: [], dropped: [] });
-    assert.equal(api.calls.length, 0);
+    assert.deepEqual(await load(api), { entries: [], dropped: [] });
+    assert.equal(api.calls.length, 2);
   });
 
-  it("drops the verbs, asking once, when the tip lookup itself fails", async () => {
-    const api = new FakeGitHubApi({ "POST /graphql": { status: 502, json: { message: "Bad Gateway" } } });
-
-    const { entries, dropped } = await usableEntries(new GitHub(api.fetch, ORIGIN, TOKEN), "main", [
-      entry("a", "a.yml"),
-      entry("b", "b.yml"),
-    ]);
-
-    assert.deepEqual(entries, []);
-    assert.deepEqual(
-      dropped.map((d) => [d.verb, /^[ab]\.yml: GitHub returned 502/.test(d.why)]),
+  it("serves no verbs, saying why, when the allowlist cannot be read or used", async () => {
+    const cases: Array<[FakeGitHubApi, string | RegExp]> = [
+      [new FakeGitHubApi(branchTipRoute({})), "GitHub has no branch main to read .github/swarmforge-dispatch.yml from"],
       [
-        ["a", true],
-        ["b", true],
+        new FakeGitHubApi({ "POST /graphql": { status: 502, json: { message: "Bad Gateway" } } }),
+        ".github/swarmforge-dispatch.yml on main cannot be read: GitHub returned 502: Bad Gateway; a new session tries again",
       ],
-    );
-    assert.equal(api.calls.length, 1);
+      [
+        new FakeGitHubApi({ ...branchTipRoute(TIPS), [`GET ${ALLOWLIST_PATH}`]: { status: 403, json: { message: "no" } } }),
+        /^\.github\/swarmforge-dispatch\.yml on main cannot be read: GitHub refused the request \(403\).*Contents: read, on a fine-grained token$/,
+      ],
+      [
+        new FakeGitHubApi({ ...branchTipRoute(TIPS), ...allowlistRoute("- deploy\n") }),
+        ".github/swarmforge-dispatch.yml on main is unusable: it is not a map of verb names to entries",
+      ],
+    ];
+    for (const [api, why] of cases) {
+      const { entries, dropped, unusable } = await load(api);
+      assert.deepEqual([entries, dropped], [[], []]);
+      if (typeof why === "string") assert.equal(unusable, why);
+      else assert.match(unusable ?? "", why);
+      assert.equal(readRefs(api).length, 0);
+    }
+  });
+
+  it("says a workflow GitHub did not answer for may be fine", async () => {
+    const api = new FakeGitHubApi({
+      ...branchTipRoute(TIPS),
+      ...allowlistRoute(listing(["deploy", "deploy.yml"])),
+      [`GET ${CONTENTS}`]: { status: 503, json: { message: "Service Unavailable" } },
+    });
+
+    assert.deepEqual((await load(api)).dropped, [
+      { verb: "deploy", why: "deploy.yml: GitHub returned 503: Service Unavailable; a new session tries again" },
+    ]);
   });
 });
 
 describe("dispatchInstructions", () => {
+  const setup = (verbs: string[], dropped: Dropped[] = [], unusable?: string) => ({
+    entries: verbs.map((verb) => ({ verb, file: "deploy.yml", ref: "default" as const })),
+    dropped,
+    unusable,
+  });
   const dropped = [{ verb: "deploy_old", why: "old.yml: no workflow_dispatch trigger on main" }];
 
-  it("names the verbs, and each one dropped, even when every one was dropped", () => {
-    assert.match(dispatchInstructions(["a"], [])!, /^a dispatches one configured/);
-    assert.match(dispatchInstructions(["a", "b"], [])!, /^Each of a, b dispatches one configured/);
+  it("says nothing when dispatch is off, and where verbs come from when it is on", () => {
+    assert.equal(dispatchInstructions(undefined), undefined);
     assert.equal(
-      dispatchInstructions([], dropped),
-      "Dispatch verb deploy_old was dropped at startup: old.yml: no workflow_dispatch trigger on main.",
+      dispatchInstructions(setup([])),
+      "Dispatch verbs come from .github/swarmforge-dispatch.yml on the default branch. A verb added there appears from the next\n" +
+        "session; one removed or changed is refused at once.",
     );
-    assert.equal(dispatchInstructions([], []), undefined);
+  });
+
+  it("names the verbs, each one dropped, and why the allowlist was unusable", () => {
+    assert.match(dispatchInstructions(setup(["a"]))!, /^a dispatches one allowlisted/m);
+    assert.match(dispatchInstructions(setup(["a", "b"]))!, /^Each of a, b dispatches one allowlisted/m);
+    assert.match(
+      dispatchInstructions(setup([], dropped))!,
+      /\nDispatch verb deploy_old was dropped at startup: old\.yml: no workflow_dispatch trigger on main\.$/,
+    );
+    assert.match(
+      dispatchInstructions(setup([], [], "GitHub has no branch main to read it from"))!,
+      /\nNo dispatch verbs this session: GitHub has no branch main to read it from\.$/,
+    );
   });
 });

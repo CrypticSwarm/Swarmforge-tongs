@@ -1,9 +1,10 @@
-// Dispatch verbs: run a configured workflow, inputs checked against its file first.
+// Dispatch verbs: run an allowlisted workflow, inputs checked against its file first.
 
-import { isNode, parseDocument } from "yaml";
+import { isNode } from "yaml";
 import { clean } from "./ci.js";
-import type { DispatchEntry } from "./config.js";
+import { ALLOWLIST, parseAllowlist, type DispatchEntry, type Dropped } from "./allowlist.js";
 import { GitHubError, NoAnswer, type GitHub } from "./github.js";
+import { strictYaml } from "./yaml.js";
 import type { Context } from "./server.js";
 
 /** GitHub's own cap on inputs per dispatch. */
@@ -28,20 +29,14 @@ export type InputValue = string | number | boolean;
 
 /** The workflow's `workflow_dispatch` inputs, or null without that trigger. Throws on a file it cannot read. */
 export function dispatchInputs(text: string): InputSpec[] | null {
-  const invalid = (why: string) => new Error(`the workflow file is not valid YAML: ${clean(why).slice(0, 200)}`);
-  const doc = parseDocument(text);
-  if (doc.errors.length) throw invalid(doc.errors[0].message);
-  // GitHub reads YAML 1.2; under 1.1, `on` and `yes` read as booleans.
-  if (doc.directives?.yaml.version !== "1.2") {
-    throw new Error("the workflow file declares a YAML version other than 1.2.");
-  }
+  const doc = strictYaml(text, "the workflow file");
   // Only `on` is expanded, so anchors used elsewhere in the file count against nothing.
   let on: unknown;
   try {
     const node = doc.get("on", true);
     on = isNode(node) ? node.toJS(doc, { maxAliasCount: 100 }) : node;
   } catch (err) {
-    throw invalid((err as Error).message);
+    throw new Error(`the workflow file's 'on' cannot be read: ${clean((err as Error).message).slice(0, 200)}`);
   }
   let trigger: unknown;
   if (on === "workflow_dispatch") trigger = null;
@@ -142,7 +137,7 @@ function checkValue(spec: InputSpec, value: InputValue): string {
 }
 
 /** The branch, and its tip as GitHub has it (not the agent-writable origin/ ref), where the file is read. */
-async function resolveRef(context: Context, entry: DispatchEntry, defaultBranch: string) {
+async function resolveRef(context: Context, entry: DispatchEntry, defaultBranch: string, defaultTip: string) {
   let branch = defaultBranch;
   if (entry.ref === "current") {
     const current = await context.repo.currentBranch();
@@ -152,7 +147,8 @@ async function resolveRef(context: Context, entry: DispatchEntry, defaultBranch:
       throw new Error(`${clean(branch)} is the default branch; this verb runs only on other branches.`);
     }
   }
-  const tip = await context.github.branchTip(branch);
+  // The default branch's tip is the one its allowlist was just read at.
+  const tip = entry.ref === "default" ? defaultTip : await context.github.branchTip(branch);
   if (!tip) throw new Error(`GitHub has no branch ${clean(branch)}; push it first.`);
   if (entry.ref === "current") {
     const head = await context.repo.headSha();
@@ -164,14 +160,45 @@ async function resolveRef(context: Context, entry: DispatchEntry, defaultBranch:
   return { branch, tip };
 }
 
+/** The default branch's tip, if its allowlist still binds the verb as at startup, so removing an entry revokes it at once. */
+async function stillListed(context: Context, entry: DispatchEntry, defaultBranch: string): Promise<string> {
+  let now: string;
+  let tip: string | null;
+  let text: string | null;
+  try {
+    ({ defaultBranch: now } = await context.github.repository());
+    tip = await context.github.branchTip(defaultBranch);
+    text = tip && (await context.github.allowlistFile(tip));
+  } catch (err) {
+    throw new Error(`checking ${ALLOWLIST} failed, so nothing was dispatched: ${clause(err)}.`);
+  }
+  if (now !== defaultBranch) {
+    throw new Error(`the default branch is now ${clean(now)}, not ${clean(defaultBranch)}; restart the session.`);
+  }
+  if (!tip) throw new Error(`GitHub has no branch ${clean(defaultBranch)}.`);
+  let listed: DispatchEntry[];
+  try {
+    // The names passed the reserved check at startup; this only compares bindings.
+    listed = text === null ? [] : parseAllowlist(text, new Set()).entries;
+  } catch (err) {
+    throw new Error(`${ALLOWLIST} on ${clean(defaultBranch)} is unusable now: ${clause(err)}.`);
+  }
+  const current = listed.find((listedEntry) => listedEntry.verb === entry.verb);
+  if (current?.file !== entry.file || current.ref !== entry.ref) {
+    throw new Error(`${ALLOWLIST} on ${clean(defaultBranch)} no longer lists ${entry.verb} as it did at startup.`);
+  }
+  return tip;
+}
+
 export async function dispatch(
   context: Context,
   entry: DispatchEntry,
   input: { inputs?: Record<string, InputValue> },
 ): Promise<string> {
   const defaultBranch = context.dispatch?.defaultBranch;
-  if (!defaultBranch) throw new Error("dispatch is not configured.");
-  const { branch, tip } = await resolveRef(context, entry, defaultBranch);
+  if (!defaultBranch) throw new Error("this tong has no dispatch verbs.");
+  const defaultTip = await stillListed(context, entry, defaultBranch);
+  const { branch, tip } = await resolveRef(context, entry, defaultBranch, defaultTip);
   const specs = dispatchInputs(await context.github.workflowFile(entry.file, tip));
   if (!specs) throw new Error(`${entry.file} on ${clean(branch)} has no workflow_dispatch trigger.`);
   const inputs = checkInputs(specs, input.inputs ?? {});
@@ -190,31 +217,61 @@ export async function dispatch(
   return `${what} as run ${result.runId}.\n${result.url}\nFollow it with ci_status run=${result.runId}.`;
 }
 
-export type Dropped = { verb: string; why: string };
+/** The allowlist's verbs dispatchable from the default branch, those dropped, and why the file was unusable, if it was. */
+export type DispatchSetup = { entries: DispatchEntry[]; dropped: Dropped[]; unusable?: string };
 
-/** Splits the entries into those dispatchable from the default branch and those dropped, with why. */
-export async function usableEntries(
+/** An error's message as one clause. */
+function clause(err: unknown): string {
+  return clean((err as Error).message).replace(/[.?]$/, "");
+}
+
+/** As `clause`, saying when GitHub, not the file, failed. */
+function reason(err: unknown): string {
+  const message = clause(err);
+  const transient = err instanceof GitHubError && (err instanceof NoAnswer || err.status >= 500);
+  return transient ? `${message}; a new session tries again` : message;
+}
+
+/** Reads the allowlist and the workflows it names at one tip of the default branch. Never throws. */
+export async function loadDispatch(
   github: GitHub,
   defaultBranch: string,
-  entries: readonly DispatchEntry[],
-): Promise<{ entries: DispatchEntry[]; dropped: Dropped[] }> {
-  const usable: DispatchEntry[] = [];
-  const dropped: Dropped[] = [];
-  // Asked once, inside each entry's try, so a failed lookup drops the verbs rather than the tong.
-  let lookup: Promise<string | null> | undefined;
-  for (const entry of entries) {
-    try {
-      lookup ??= github.branchTip(defaultBranch);
-      const tip = await lookup;
-      if (!tip) throw new Error(`GitHub has no branch ${defaultBranch}`);
-      const specs = dispatchInputs(await github.workflowFile(entry.file, tip));
-      if (!specs) throw new Error(`no workflow_dispatch trigger on ${defaultBranch}`);
-      const unsettable = unsetEnvironment(specs);
-      if (unsettable) throw new Error(`it requires environment input ${unsettable}, which this tong never sets`);
-      usable.push(entry);
-    } catch (err) {
-      dropped.push({ verb: entry.verb, why: `${entry.file}: ${clean((err as Error).message).replace(/\.$/, "")}` });
-    }
+  reserved: ReadonlySet<string>,
+): Promise<DispatchSetup> {
+  const none = (unusable: string): DispatchSetup => ({ entries: [], dropped: [], unusable });
+  const branch = clean(defaultBranch);
+  let tip: string | null;
+  let text: string | null;
+  try {
+    tip = await github.branchTip(defaultBranch);
+    text = tip && (await github.allowlistFile(tip));
+  } catch (err) {
+    return none(`${ALLOWLIST} on ${branch} cannot be read: ${reason(err)}`);
   }
-  return { entries: usable, dropped };
+  if (!tip) return none(`GitHub has no branch ${branch} to read ${ALLOWLIST} from`);
+  if (text === null) return { entries: [], dropped: [] };
+  let listed: { entries: DispatchEntry[]; dropped: Dropped[] };
+  try {
+    listed = parseAllowlist(text, reserved);
+  } catch (err) {
+    return none(`${ALLOWLIST} on ${branch} is unusable: ${reason(err)}`);
+  }
+
+  const checked = await Promise.all(
+    listed.entries.map(async (entry): Promise<Dropped | null> => {
+      try {
+        const specs = dispatchInputs(await github.workflowFile(entry.file, tip));
+        if (!specs) throw new Error(`no workflow_dispatch trigger on ${branch}`);
+        const unsettable = unsetEnvironment(specs);
+        if (unsettable) throw new Error(`it requires environment input ${unsettable}, which this tong never sets`);
+        return null;
+      } catch (err) {
+        return { verb: entry.verb, why: `${entry.file}: ${reason(err)}` };
+      }
+    }),
+  );
+  return {
+    entries: listed.entries.filter((_, i) => checked[i] === null),
+    dropped: [...listed.dropped, ...checked.filter((drop): drop is Dropped => drop !== null)],
+  };
 }

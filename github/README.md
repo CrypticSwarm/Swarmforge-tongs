@@ -29,7 +29,7 @@ with `initialize`.
 | `ci_status` | `sha?`, `pr?`, `run?` | Lists the Actions runs for one commit, newest first and up to 10, or one run by id with the commit it is for. Shows each job's id, state, queue and run time, skipped steps, and the step it failed at. See [Reading CI](#reading-ci). |
 | `ci_job` | `job_id` | Lists a job's steps with their state, start offset, and duration, plus its runner. |
 | `ci_log` | `job_id`, `step?`, `start?`, `limit?` | Returns part of a job's plain-text log, timestamps included. Defaults to the end of the failed step, or of the whole log. |
-| a configured verb | `inputs?` | Dispatches one workflow on its configured branch and returns the run id. See [Dispatching workflows](#dispatching-workflows). |
+| an allowlisted verb | `inputs?` | Dispatches one workflow on the branch its entry names and returns the run id. See [Dispatching workflows](#dispatching-workflows). |
 
 `create_pr` pushes for you; there is no need to call `push_branch` first.
 
@@ -122,18 +122,33 @@ branch is deleted. A `rebase` merge has GitHub re-create the commits, unsigned.
 
 ## Dispatching workflows
 
-Off unless configured. Each entry adds one verb that runs one workflow on one branch:
+Off unless the tong definition sets `GITHUB_TONG_DISPATCH: "true"`. The verbs then
+come from `.github/swarmforge-dispatch.yml` on the repository's default branch, one
+per entry, each running one workflow on one branch:
 
 ```yaml
-env:
-  GITHUB_TONG_DISPATCH: "deploy_production=deploy-production.yml@default,deploy_staging=deploy-staging.yml@current"
+deploy_production: { workflow: deploy-production.yml, ref: default }
+deploy_staging: { workflow: deploy-staging.yml, ref: current }
 ```
 
-- `@default` runs on the repository's default branch.
-- `@current` runs on the checked-out branch, which GitHub must have at `HEAD`, and
-  which must not be the default branch.
+- `ref: default` runs on the default branch.
+- `ref: current` runs on the checked-out branch, which GitHub must have at `HEAD`,
+  and which must not be the default branch.
+- An entry takes `workflow`, a file name in `.github/workflows/`, and `ref`, and
+  nothing else.
+- A verb name is up to 64 lowercase letters, digits, and `_`, starting with a
+  letter. The file lists at most 20 verbs.
 - One verb per entry, so a client can approve each on its own: say, ask before a
-  `@current` staging deploy, which runs branch code, and allow a `@default` one.
+  `current` staging deploy, which runs branch code, and allow a `default` one. An
+  approval covers a name, not what the allowlist binds it to, so grant it per
+  project, not globally.
+
+The allowlist lives in the repository because a workspace layer can disable a
+trusted tong but not redefine it, so one org-level tong has to serve every
+repository. The tong reads it only from the default branch, through GitHub, never
+from the workspace, so it is as trustworthy as that branch. Protect the branch,
+require code-owner review with a code owner on `.github/`, and use a token whose
+account cannot bypass either.
 
 Each call asks GitHub for the branch's tip, not the workspace's `origin/` ref, and
 dispatches `refs/heads/<branch>`, so a tag of the same name cannot stand in. It
@@ -150,23 +165,28 @@ reads the workflow file at that tip and checks `inputs` against its
 It returns the run id; follow the run with `ci_status run=<id>`. A dispatch that
 gets a 5xx or no answer may have started anyway, and the error says so.
 
-**Startup.** A malformed `GITHUB_TONG_DISPATCH` stops the tong. A listed workflow
-that is missing, unreadable, has no `workflow_dispatch`, or requires an
-`environment` input, on the default branch, drops only its verb, so the verbs that
-would land a fix stay up. Each one dropped is logged, and named in the server
+**Startup.** The tong reads the allowlist, and each workflow it names, at the
+default branch's tip. A malformed entry, or a workflow that is missing, unreadable,
+has no `workflow_dispatch`, or requires an `environment` input, drops its verb. An
+allowlist that cannot be read, is not valid YAML 1.2, is over 16 KiB, is not a map,
+or lists over 20 verbs drops every verb. Either way the tong still starts, so the
+verbs that would land a fix stay up, and each drop is logged and named in the server
 instructions.
+
+An added verb appears at the next session. A removed or changed one is refused at
+once: each dispatch reads the allowlist again first.
 
 **The allowlist guards against mistakes, not misuse.** The agent can already run
 code it wrote with the repository's secrets: `push_branch` and `create_pr` start
-its branch's `push` and `pull_request` workflows, and `@current` runs its branch's
-copy of the file. Protect production outside the tong, with both:
+its branch's `push` and `pull_request` workflows, and `current` runs its branch's
+copy of the workflow file. Protect production outside the tong, with both:
 
 - the `production` environment deploying only from the default branch;
 - the cloud role's OIDC trust requiring `sub` to be exactly
   `repo:<owner>/<repo>:environment:production`.
 
 Without both, the agent can deploy to production from a branch it pushed, with or
-without a dispatch verb. A client prompt on a `@current` verb is a prompt, not a
+without a dispatch verb. A client prompt on a `current` verb is a prompt, not a
 gate.
 
 **Not airtight.** GitHub dispatches a branch, not a commit, so a push between the
@@ -302,7 +322,7 @@ so a commit whose message opens with `gpgsig ` does not pass.
 | `lifecycle: session` | It holds a credential and mounts the workspace. A `shared` tong outlives the session and cannot mount the workspace at all. |
 | `env: GITHUB_TOKEN` | The token itself. |
 | `env: GITHUB_TONG_REQUIRE_SIGNED_COMMITS` | Optional, not a credential. `"true"` refuses to push unsigned commits; see above. |
-| `env: GITHUB_TONG_DISPATCH` | Optional, not a credential. The dispatch verbs; see [Dispatching workflows](#dispatching-workflows). |
+| `env: GITHUB_TONG_DISPATCH` | Optional, not a credential. `"true"` serves the repository's dispatch verbs; see [Dispatching workflows](#dispatching-workflows). |
 
 No `docker-socket`. The only hosts this tong contacts are `github.com`,
 `api.github.com`, and the log storage `api.github.com` redirects a log download to —
@@ -311,7 +331,9 @@ itself; actually restricting egress to those hosts is the launcher's job.
 
 ## The token
 
-Use a **fine-grained personal access token scoped to this one repository**, with:
+Use a **fine-grained personal access token scoped to the repositories the tong
+serves**: the workspace's own for a workspace tong, each one it serves for an
+org-level tong, with:
 
 - **Contents: read and write** — fetching, pushing, and merging
 - **Pull requests: read and write** — opening, reading, and editing pull requests,
@@ -320,6 +342,10 @@ Use a **fine-grained personal access token scoped to this one repository**, with
   those verbs fail with a `403` that names it, and the rest still work.
 - **Actions: read and write**, in place of read, only for dispatch verbs. It also
   lets the token re-run, cancel, and delete runs, and enable or disable workflows.
+
+A token's permissions apply to every repository it lists, so its Actions permission
+cannot keep one repository from dispatching. `GITHUB_TONG_DISPATCH` is the switch,
+for the whole tong.
 
 A classic `repo` token also works but is account-wide, which throws away the
 containment the rest of this design is built on. An SSH deploy key is not an
@@ -432,9 +458,10 @@ edit landed, and the CI path: that a log redirect is followed without the token 
 only to `https` and that a failed download never reports its URL, that a sha or id is
 checked before it reaches a URL, that log lines and GitHub's names lose control
 characters, and how a log is cut by step and capped, and the dispatch path:
-config rejection, that a workflow file name reaches a URL only checked and encoded
-and a branch only as a GraphQL variable or in a request body, input checks against
-the file at the branch's tip on GitHub, and that `@current` runs only a pushed,
+allowlist parsing, what startup drops, and that a dispatch re-reads the allowlist,
+that a workflow file name reaches a URL only checked and encoded and a branch only
+as a GraphQL variable or in a request body, input checks against
+the file at the branch's tip on GitHub, and that `current` runs only a pushed,
 non-default branch, and the merge path: that only a status mergeable without a
 bypass reaches GitHub's merge, pinned to the checked head, never with a draft, a
 merge queue, or a field GitHub left out, and with no `update_pr` in between. It
