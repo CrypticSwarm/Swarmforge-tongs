@@ -15,6 +15,17 @@ the session network.
 Each top-level directory is one tong. The root holds only documentation and a
 `Makefile` that recurses into tong directories.
 
+## Prose conventions
+
+These apply across the whole repo. Subdirectories can add their own `AGENTS.md` for conventions that only apply there.
+
+- No agent attribution trailers on commits or PR bodies: no `Co-Authored-By` or `Generated with`.
+- READMEs cover how to run and use the project, with short examples. Leave out project history and design rationale.
+- Merge-conflict commits: list what each side changed, then how the conflict was resolved.
+- Keep docs (READMEs, specs, PR bodies) short and direct. Use lists and short sentences, not long prose.
+- Name variables and functions so the code explains itself.
+- Comment only what nearby code can't show, such as a non-obvious constraint or the reason for a workaround. Keep these comments to one line where possible.
+
 ## The one hard constraint
 
 **Each top-level directory is a standalone tong.** Never couple the root to a
