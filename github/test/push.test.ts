@@ -56,16 +56,12 @@ describe("push argv", () => {
     ]);
   });
 
-  // The agent owns the workspace and can move the branch between the sha read and
-  // the push. A branch-name refspec would push the moved tip while update-ref
-  // records the old one — a stale tracking ref, which is what lets git-signing
-  // rewrite commits that are already on the server.
+  // A branch-name refspec would push a moved tip while update-ref records the old one, so git-signing could rewrite pushed commits.
   it("pushes and records the same sha even when the branch moves mid-push", async () => {
     const git = new FakeGit({ branch: "feature", head: "abc123abc123abc123abc123abc123abc123abcd" });
     const read = git.head;
     const movingBranch: typeof git.run = async (command, args, options) => {
       const result = await git.run(command, args, options);
-      // The moment the sha has been read, the agent moves the branch.
       if (args.includes("rev-parse")) git.head = "def456def456def456def456def456def456def4";
       return result;
     };
@@ -102,8 +98,6 @@ describe("push argv", () => {
     assert.ok(args.includes("--no-verify"));
   });
 
-  // Not command execution like the keys above: these two send the token, or refs
-  // the caller never asked for, somewhere the workspace chose.
   it("keeps the push to the one branch, and to the pinned remote only", async () => {
     const git = new FakeGit();
     await repoFor(git).push(ORIGIN, URL, TOKEN);
@@ -161,7 +155,6 @@ describe("push outcome", () => {
   });
 
   it("reports the porcelain verdict, not just git's generic summary", async () => {
-    // The half that names the cause is on stdout; stderr carries only the summary.
     const git = new FakeGit({
       pushFails: {
         stdout: "To github.com\n!\trefs/heads/feature:refs/heads/feature\t[remote rejected] (permission denied)\n",

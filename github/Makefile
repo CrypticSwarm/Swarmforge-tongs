@@ -5,8 +5,7 @@ IMG ?= swarmforge-tong-github:latest
 
 .PHONY: build test image publish clean
 
-# `npm ci` needs a lockfile, so a clone without one falls back to `npm install`.
-# The touch is what stops make re-running this on every target.
+# The touch stops make re-running this on every target.
 node_modules: package.json
 	@if [ -f package-lock.json ]; then npm ci; else npm install; fi
 	@touch node_modules
@@ -21,11 +20,8 @@ test: node_modules
 image:
 	docker build -t $(IMG) .
 
-# Multi-arch build pushed straight to a registry; nothing is loaded locally.
-# Needs `docker login` and a buildx builder that can target every platform in
-# PLATFORMS, both of which CI sets up. REPO must be given on the command line:
-# one inherited from the environment is refused, so an unrelated exported REPO
-# cannot send a bare `make publish` somewhere by accident.
+# Needs `docker login` and a multi-platform buildx builder.
+# REPO from the environment is refused, so a stray export cannot redirect a bare `make publish`.
 TAGS ?= latest
 PLATFORMS ?= linux/amd64,linux/arm64
 

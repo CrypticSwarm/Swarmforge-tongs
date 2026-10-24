@@ -1,13 +1,3 @@
-// The MCP endpoint end to end, in process: the real express app from src/app.ts
-// on an ephemeral port, driven by the SDK's own client over real HTTP, with the
-// fake git/gpg from fake-git.ts behind it. No docker, no gpg, no key.
-//
-// Covers what the unit suites cannot: that both protocol eras are served, that
-// the per-request server construction holds up under repeated and concurrent
-// requests -- an MCP server instance connects to exactly one transport, so any
-// instance reuse across requests fails here -- and that malformed, oversized,
-// and non-POST requests get JSON-RPC errors rather than express error pages.
-
 import { strict as assert } from "node:assert";
 import { request as httpRequest, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -25,7 +15,6 @@ const KEY: SigningKey = {
   emails: ["ada@example.com"],
 };
 
-/** A branch with two unsigned commits on top of a published base. */
 function freshGit(): FakeGit {
   const git = new FakeGit();
   const base = commit(git, { message: "published base" });
@@ -35,11 +24,6 @@ function freshGit(): FakeGit {
   return git;
 }
 
-/**
- * How the client negotiates: pinned to 2026-07-28, probing with
- * `server/discover` (which must land on 2026-07-28 here), or the plain 2025
- * `initialize` handshake.
- */
 type Mode = "pinned" | "auto" | "legacy";
 const MODES: readonly Mode[] = ["pinned", "auto", "legacy"];
 
@@ -49,10 +33,7 @@ const NEGOTIATION = {
   legacy: { mode: "legacy" },
 } as const;
 
-/**
- * The body cap from src/app.ts, written out rather than imported so that moving
- * the cap in either direction breaks a test here.
- */
+/** Written out rather than imported, so moving the cap breaks a test. */
 const BODY_CAP = 1024 * 1024;
 
 type Recorded = { method: string; status: number; protocolVersion: string | null; bodyBytes: number };
@@ -89,8 +70,7 @@ function text(result: Awaited<ReturnType<Client["callTool"]>>): string {
 }
 
 before(async () => {
-  // The context is read per request, so swapping `git` in beforeEach reaches
-  // every server the factory builds afterwards.
+  // Getters, so the `git` swapped in by beforeEach reaches every later server.
   const context: Context = {
     get repo() {
       return new Repo(git.run, "/workspace", async () => false);
@@ -123,7 +103,6 @@ describe("protocol eras", () => {
       assert.equal(client.getProtocolEra(), "modern");
       assert.equal(client.getNegotiatedProtocolVersion(), "2026-07-28");
       assert.match(client.getInstructions() ?? "", /Call signing_status first/);
-      // The tool set never changes, so nothing invites a client to hold a listen stream open.
       assert.equal(client.getServerCapabilities()?.tools?.listChanged, false);
 
       const { tools } = await client.listTools();
@@ -134,8 +113,6 @@ describe("protocol eras", () => {
         assert.equal(tool.inputSchema.additionalProperties, false, `${tool.name} refuses invented parameters`);
       }
 
-      // Every request on the wire was a POST with a body, carrying the modern
-      // revision; no `initialize`.
       assert.ok(requests.length > 0);
       for (const request of requests) {
         assert.equal(request.method, "POST");
@@ -159,8 +136,7 @@ describe("protocol eras", () => {
 
 describe("client envelope size", () => {
   test("a 2026-07-28 client whose clientInfo carries a ~96 KB inline icon still connects", async () => {
-    // The envelope repeats clientInfo on every request, so this weight rides
-    // along on server/discover, tools/list and tools/call alike.
+    // clientInfo rides on every request.
     const icon = `data:image/png;base64,${"A".repeat(96 * 1024)}`;
     const client = await connect("pinned", icon);
     assert.equal(client.getProtocolEra(), "modern");
@@ -208,7 +184,6 @@ describe("per-request server construction", () => {
         const result = await client.callTool({ name: "signing_status", arguments: {} });
         assert.notEqual(result.isError, true, `call ${i}: ${text(result)}`);
       }
-      // A second sign is a no-op against the already-signed branch, and still succeeds.
       assert.match(text(await client.callTool({ name: "sign_commits", arguments: {} })), /Signed 2/);
       assert.match(text(await client.callTool({ name: "sign_commits", arguments: {} })), /Nothing to sign/);
     });
@@ -273,10 +248,7 @@ describe("untrusted arguments", () => {
 describe("plain HTTP", () => {
   const POST_HEADERS = { "content-type": "application/json", accept: "application/json, text/event-stream" };
 
-  /**
-   * A JSON-RPC error with nothing of the server's internals in the body. Its id
-   * is null unless the request was read far enough to recover one.
-   */
+  /** `id` stays null unless the request was readable. */
   async function assertJsonRpcError(
     response: Response,
     status: number,
@@ -299,11 +271,7 @@ describe("plain HTTP", () => {
     }
   });
 
-  /**
-   * Valid JSON of exactly `length` bytes, shaped like a request but with a
-   * top-level member JSON-RPC does not allow -- so one that passes the size
-   * check is still refused, as an invalid message rather than as too large.
-   */
+  /** The extra "pad" member fails the SDK's strict JSON-RPC schema, so even an under-cap body is refused. */
   function paddedBody(length: number): string {
     const head = '{"jsonrpc":"2.0","id":1,"method":"tools/list","pad":"';
     const tail = '"}';
@@ -322,7 +290,6 @@ describe("plain HTTP", () => {
   ];
   for (const [what, body, status, code, id] of badBodies) {
     test(`${what} gets a JSON-RPC error, not an HTML page`, async (t) => {
-      // The handler's onerror logs each rejection; expected here, so kept quiet.
       t.mock.method(console, "error", () => {});
       await assertJsonRpcError(await fetch(endpoint, { method: "POST", headers: POST_HEADERS, body }), status, code, id);
       assert.deepEqual(git.refUpdates, []);
@@ -330,9 +297,7 @@ describe("plain HTTP", () => {
   }
 
   test("a declared over-cap body is refused before it is sent", async () => {
-    // Only the first byte is ever written. A 413 can only arrive if the Node
-    // adapter checks Content-Length up front; without its own cap it would sit
-    // buffering toward the 4 MiB SDK default and this would time out.
+    // Only one byte is written, so this times out unless Content-Length is checked up front.
     const req = httpRequest(endpoint, {
       method: "POST",
       headers: { ...POST_HEADERS, "content-length": String(BODY_CAP + 1) },

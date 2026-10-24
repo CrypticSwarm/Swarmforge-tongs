@@ -1,8 +1,6 @@
-# Both stages pin the same node:24-alpine index by digest, so a published image
-# is built from exactly what was reviewed; Dependabot proposes the bumps.
+# Keep both FROM digests identical.
 
-# The build stage runs on the builder's own platform: its output is plain
-# JavaScript, so only the runtime stage has to be built per target platform.
+# Build output is plain JavaScript, so only the runtime stage is built per target platform.
 FROM --platform=$BUILDPLATFORM node:26-alpine@sha256:0b36e8c136b94cd4fcf02188228e76c31ad5872eef3fec8cbd2eee500cfd9e80 AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
@@ -25,5 +23,4 @@ ENV PORT=8080
 ENV GITHUB_TONG_WORKSPACE=/workspace
 EXPOSE 8080
 
-# The launcher wraps this with a /bin/sh prologue that reads the secret FIFO.
 CMD ["/app/entrypoint.sh"]

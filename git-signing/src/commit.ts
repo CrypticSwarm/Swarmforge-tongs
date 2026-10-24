@@ -1,30 +1,5 @@
-// Raw git commit objects, as bytes.
-//
-// This module is pure and total: no subprocesses, no filesystem, no key
-// material. It exists so the one operation that must be byte-exact -- turning an
-// unsigned commit object into the same commit object carrying a `gpgsig` header
-// -- is testable without git or gpg present.
-//
-// A commit object is a header block, a blank line, then the message:
-//
-//     tree <sha>\n
-//     parent <sha>\n            (zero or more)
-//     author Name <mail> <ts> <tz>\n
-//     committer Name <mail> <ts> <tz>\n
-//     [gpgsig <armor line>\n <armor line>\n ...]\n
-//     [encoding ...]\n
-//     [mergetag <tag object>\n ...]\n
-//     \n
-//     message bytes
-//
-// A header value continues onto following lines when they begin with a single
-// space; that space is stripped to recover the value. Everything this module does
-// not explicitly touch is copied through untouched, which is why `encoding` and
-// `mergetag` survive a rewrite that `git commit-tree` would have dropped.
-//
-// Buffers, not strings, throughout: commit messages and author names are
-// arbitrary bytes, and git does not promise them to be valid UTF-8. Decoding and
-// re-encoding would corrupt a latin-1 name and change the object's hash.
+// Raw commit objects as Buffers: names and messages need not be UTF-8, and re-encoding would change the hash.
+// Unknown headers (encoding, mergetag) are copied through; git commit-tree -S would drop them.
 
 const LF = 0x0a;
 const SPACE = 0x20;
@@ -42,8 +17,7 @@ export type Commit = {
   message: Buffer;
 };
 
-// git ends the header block at the *first* `\n\n`, so a mergetag's own blank
-// lines (indented to ` \n`) cannot be mistaken for it.
+// git ends headers at the first `\n\n`; a mergetag's blank lines are indented to ` \n`, so they never match.
 function indexOfHeaderEnd(raw: Buffer): number {
   for (let i = 0; i + 1 < raw.length; i++) {
     if (raw[i] === LF && raw[i + 1] === LF) return i;
@@ -101,7 +75,6 @@ function serializeHeader(header: CommitHeader): Buffer {
   return Buffer.concat(parts);
 }
 
-/** The exact bytes git would hash. */
 export function serializeCommit(commit: Commit): Buffer {
   return Buffer.concat([
     ...commit.headers.map(serializeHeader),
@@ -110,8 +83,7 @@ export function serializeCommit(commit: Commit): Buffer {
   ]);
 }
 
-// `gpgsig-sha256` is the sha256-repository spelling. Both are dropped before
-// re-signing: a signature over the old bytes is meaningless once the object changes.
+// `gpgsig-sha256` is the sha256-repository spelling.
 const SIGNATURE_HEADERS = new Set(["gpgsig", "gpgsig-sha256"]);
 
 export function isSigned(commit: Commit): boolean {
@@ -125,17 +97,12 @@ export function stripSignature(commit: Commit): Commit {
   };
 }
 
-/** Parent SHAs in order -- which matters: the first is the merge's first parent. */
 export function parentShas(commit: Commit): string[] {
   return commit.headers
     .filter((h) => h.name === "parent")
     .map((h) => h.value.toString("utf8"));
 }
 
-/**
- * Leaving unmapped parents alone is the normal case for a merge whose second
- * parent is already published: it keeps its SHA, and the merge still points at it.
- */
 export function rewriteParents(commit: Commit, mapping: ReadonlyMap<string, string>): Commit {
   return {
     headers: commit.headers.map((header) => {
@@ -148,17 +115,11 @@ export function rewriteParents(commit: Commit, mapping: ReadonlyMap<string, stri
   };
 }
 
-// Only the name and email are read; the trailing `<timestamp> <tz>` is matched
-// loosely because it is copied through untouched and historical repositories
-// contain timezone spellings git still accepts but no longer writes.
+// The timestamp is matched loosely: old repositories hold timezone spellings git no longer writes.
 const IDENTITY_RE = /^(?<name>.*?) <(?<email>[^>]*)>(?: .*)?$/s;
 
 export type Identity = { name: string; email: string };
 
-/**
- * Null when the header is absent or does not have git's shape -- callers treat
- * that as "cannot confirm this identity" and fail closed rather than guessing.
- */
 export function identity(commit: Commit, field: "author" | "committer"): Identity | null {
   const header = commit.headers.find((h) => h.name === field);
   if (!header) return null;
@@ -167,20 +128,10 @@ export function identity(commit: Commit, field: "author" | "committer"): Identit
   return { name: match.groups.name, email: match.groups.email };
 }
 
-/**
- * Attach an armored signature, reproducing git's own byte layout (`do_sign_commit`
- * in commit.c): the header goes last in the header block, immediately before the
- * blank line, and *every* line of the armor -- including the first -- is prefixed
- * with one space. `serializeHeader` re-adds those spaces, so the value stored here
- * is the armor with its newlines intact and no indentation.
- *
- * Signing is over the commit *without* this header, so callers serialize first,
- * sign those bytes, then call this with the result.
- */
+/** gpgsig goes last in the header block, where git puts it. */
 export function attachSignature(commit: Commit, armoredSignature: Buffer): Commit {
   const stripped = stripSignature(commit);
-  // gpg's armor ends with a newline. Keeping it would serialize as a trailing
-  // continuation line holding nothing, which is not what git writes.
+  // A trailing newline would serialize as an empty continuation line.
   let value = armoredSignature;
   while (value.length > 0 && value[value.length - 1] === LF) {
     value = value.subarray(0, value.length - 1);

@@ -1,11 +1,3 @@
-// An in-memory stand-in for the `git` and `gpg` binaries, wired in through the
-// `Run` seam from src/exec.ts.
-//
-// It exists so the signing orchestration -- candidate selection, the rewrite walk,
-// parent remapping, the ref moves -- is tested without docker, without gpg, and
-// without a real key, as AGENTS.md requires of `make test`. Object IDs are computed
-// the way git computes them, so the SHAs these tests assert on are real ones.
-
 import { createHash } from "node:crypto";
 import type { Run, RunResult } from "../src/exec.js";
 
@@ -15,10 +7,9 @@ export function hashCommit(raw: Buffer): string {
 }
 
 export type FakeGitOptions = {
-  /** Null for a detached HEAD. */
   branch?: string | null;
   originRefs?: string[];
-  /** In-progress sequencer state, e.g. "rebase-merge". */
+  /** A name from Repo's SEQUENCER_PATHS, e.g. "rebase-merge". */
   inProgress?: string | null;
   upstream?: string | null;
   /** Excluded from `rev-list --not --remotes=origin`. */
@@ -28,7 +19,6 @@ export type FakeGitOptions = {
 export class FakeGit {
   readonly objects = new Map<string, Buffer>();
   readonly refs = new Map<string, string>();
-  /** In order, so tests can assert the write *sequence*, not just the result. */
   readonly refUpdates: Array<{ ref: string; sha: string; expected?: string }> = [];
   readonly signedPayloads: Buffer[] = [];
 
@@ -38,7 +28,6 @@ export class FakeGit {
   inProgress: string | null;
   upstream: string | null;
   published: Set<string>;
-  /** Set to make the fake gpg fail, exercising the mid-walk error path. */
   gpgFails = false;
 
   constructor(options: FakeGitOptions = {}) {

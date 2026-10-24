@@ -1,4 +1,3 @@
-// Dispatch verbs: run an allowlisted workflow, inputs checked against its file first, and list_workflows.
 
 import { isNode } from "yaml";
 import { clean } from "./ci.js";
@@ -12,11 +11,10 @@ export const MAX_INPUTS = 25;
 /** The tong's own cap per value; GitHub caps only the whole payload. */
 export const MAX_INPUT_CHARS = 1024;
 
-/** Caps on what list_workflows shows of a file, which on the checked-out branch is the agent's. */
+/** list_workflows caps, since a checked-out branch's workflow file is agent-written. */
 const MAX_DESCRIPTION_CHARS = 200;
 const MAX_VALUE_CHARS = 80;
 const MAX_OPTIONS_SHOWN = 20;
-/** Shared among the verbs a listing shows. */
 export const MAX_LISTING_CHARS = 50_000;
 
 /** What GitHub accepts as an input name. */
@@ -29,7 +27,6 @@ export type InputSpec = {
   type: (typeof INPUT_TYPES)[number];
   required: boolean;
   hasDefault: boolean;
-  /** As text, and empty without a default. */
   default: string;
   options: string[];
   description: string;
@@ -37,10 +34,10 @@ export type InputSpec = {
 
 export type InputValue = string | number | boolean;
 
-/** The workflow's `workflow_dispatch` inputs, or null without that trigger. Throws on a file it cannot read. */
+/** null without a workflow_dispatch trigger; throws on a file it cannot use. */
 export function dispatchInputs(text: string): InputSpec[] | null {
   const doc = strictYaml(text, "the workflow file");
-  // Only `on` is expanded, so anchors used elsewhere in the file count against nothing.
+  // Only `on` is expanded, so aliases elsewhere in the file cost nothing and cannot hit the cap.
   let on: unknown;
   try {
     const node = doc.get("on", true);
@@ -90,7 +87,6 @@ function isMap(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** Every value as the string GitHub takes, or why the call is refused. */
 export function checkInputs(
   specs: readonly InputSpec[],
   given: Readonly<Record<string, InputValue>>,
@@ -104,7 +100,7 @@ export function checkInputs(
     if (!spec) throw new Error(`the workflow has no input ${clean(name)}; it takes ${describeInputs(specs)}.`);
     out.set(name, checkValue(spec, value));
   }
-  const unsettable = unsetEnvironment(specs);
+  const unsettable = unsettableEnvironmentInput(specs);
   if (unsettable) throw new Error(`the workflow requires environment input ${unsettable}, which this tong never sets.`);
   const unset = specs.filter((spec) => mustPass(spec) && !out.has(spec.name));
   const missing = unset.filter((spec) => spec.required).map((spec) => spec.name);
@@ -124,12 +120,10 @@ function mustPass(spec: InputSpec): boolean {
   return spec.type !== "environment" && !spec.hasDefault && (spec.required || spec.type === "boolean");
 }
 
-/** A required environment input with no default, which no call can satisfy. */
-function unsetEnvironment(specs: readonly InputSpec[]): string | undefined {
+function unsettableEnvironmentInput(specs: readonly InputSpec[]): string | undefined {
   return specs.find((spec) => spec.type === "environment" && spec.required && !spec.hasDefault)?.name;
 }
 
-/** `a (required), b (boolean, must pass), c`, or `none`, leaving out environment inputs. */
 function describeInputs(specs: readonly InputSpec[]): string {
   const settable = specs.filter((spec) => spec.type !== "environment");
   if (!settable.length) return "none";
@@ -160,7 +154,7 @@ function checkValue(spec: InputSpec, value: InputValue): string {
   }
 }
 
-/** The branch, and its tip as GitHub has it (not the agent-writable origin/ ref), where the file is read. */
+/** The tip comes from GitHub, never the agent-writable origin/ ref. */
 export async function resolveRef(
   context: Context,
   entry: DispatchEntry,
@@ -188,7 +182,6 @@ export async function resolveRef(
   return { branch, tip };
 }
 
-/** The default branch's tip, and the verbs its allowlist lists there now. */
 async function listedNow(
   context: Context,
   defaultBranch: string,
@@ -216,7 +209,7 @@ async function listedNow(
   }
 }
 
-/** Refuses a verb the allowlist no longer binds as at startup, so removing an entry revokes it at once. */
+/** So removing or changing an entry revokes its verb at once. */
 function checkListed(entry: DispatchEntry, listed: readonly DispatchEntry[], defaultBranch: string): void {
   const current = listed.find((listedEntry) => listedEntry.verb === entry.verb);
   if (current?.file !== entry.file || current.ref !== entry.ref) {
@@ -254,22 +247,19 @@ export async function dispatch(
   return `${what} as run ${result.runId}.\n${result.url}\nFollow it with ci_status run=${result.runId}.`;
 }
 
-/** The allowlist's verbs dispatchable from the default branch, those dropped, and why the file was unusable, if it was. */
 export type DispatchSetup = { entries: DispatchEntry[]; dropped: Dropped[]; unusable?: string };
 
-/** An error's message as one clause. */
 function clause(err: unknown): string {
   return clean((err as Error).message).replace(/[.?]$/, "");
 }
 
-/** As `clause`, saying when GitHub, not the file, failed. */
 function reason(err: unknown): string {
   const message = clause(err);
   const transient = err instanceof GitHubError && (err instanceof NoAnswer || err.status >= 500);
   return transient ? `${message}; a new session tries again` : message;
 }
 
-/** Reads the allowlist and the workflows it names at one tip of the default branch. Never throws. */
+/** Reads the allowlist and its workflows at one default-branch tip, where review gates them; never throws. */
 export async function loadDispatch(
   github: GitHub,
   defaultBranch: string,
@@ -299,7 +289,7 @@ export async function loadDispatch(
       try {
         const specs = dispatchInputs(await github.workflowFile(entry.file, tip));
         if (!specs) throw new Error(`no workflow_dispatch trigger on ${branch}`);
-        const unsettable = unsetEnvironment(specs);
+        const unsettable = unsettableEnvironmentInput(specs);
         if (unsettable) throw new Error(`it requires environment input ${unsettable}, which this tong never sets`);
         return null;
       } catch (err) {
@@ -327,9 +317,8 @@ function asPassed(spec: InputSpec, value: string): string {
   return clip(literal, MAX_VALUE_CHARS);
 }
 
-/** `tier (choice): one of "small", "large"; default "small" · Which size.` */
 function renderInput(spec: InputSpec): string {
-  const required = (mustPass(spec) && spec.required) || unsetEnvironment([spec]);
+  const required = (mustPass(spec) && spec.required) || unsettableEnvironmentInput([spec]);
   const kind = required ? `${spec.type}, required` : mustPass(spec) ? "boolean, must pass" : spec.type;
   const shown = spec.options.slice(0, MAX_OPTIONS_SHOWN).map((option) => asPassed(spec, option));
   const more = spec.options.length - shown.length;
@@ -342,7 +331,6 @@ function renderInput(spec: InputSpec): string {
   return `  ${spec.name} (${kind})${parts.length ? `: ${parts.join("; ")}` : ""}${about ? ` · ${about}` : ""}`;
 }
 
-/** The lines that fit in `budget` characters, and a count of the rest. */
 function withinBudget(lines: readonly string[], budget: number): string[] {
   let used = 0;
   const kept = lines.filter((line) => (used += line.length + 1) <= budget);
@@ -350,10 +338,7 @@ function withinBudget(lines: readonly string[], budget: number): string[] {
   return rest ? [...kept, `  ...and ${rest} more input${rest === 1 ? "" : "s"}`] : kept;
 }
 
-/**
- * Where to read a verb's file for the listing, and why a dispatch would refuse now.
- * A refusal still lists inputs: from GitHub's copy of the branch if it has one, else the default branch's.
- */
+/** On a refusal, still lists inputs: from the branch on GitHub if it is there, else the default branch. */
 async function listingRef(
   context: Context,
   entry: DispatchEntry,
@@ -374,11 +359,9 @@ async function listingRef(
   }
 }
 
-/** Each dispatch verb's workflow and inputs, read on its branch now, and each verb dropped at startup. */
 export async function listWorkflows(context: Context): Promise<string> {
   const config = context.dispatch;
   if (!config) throw new Error("this tong has no dispatch verbs.");
-  // Verbs sharing a branch or a file at one tip ask GitHub once.
   const tipsAsked = new Map<string, Promise<string | null>>();
   let unlisted = (_entry: DispatchEntry) => "";
   if (config.entries.length) {
@@ -412,14 +395,13 @@ export async function listWorkflows(context: Context): Promise<string> {
       const key = `${entry.file}@${tip}`;
       if (!files.has(key)) files.set(key, context.github.workflowFile(entry.file, tip));
       const specs = dispatchInputs(await files.get(key)!);
-      // Labelled by the verb's own branch; a fallback read says whose inputs these are.
       const where =
         entry.ref === "default"
           ? `${clean(branch)} (default branch)`
           : branch === config.defaultBranch
             ? `the checked-out branch (inputs as on ${clean(branch)})`
             : `${clean(branch)} (checked out)`;
-      const unsettable = specs && unsetEnvironment(specs);
+      const unsettable = specs && unsettableEnvironmentInput(specs);
       const whys = [
         clip(unlisted(entry), 500),
         refusal,

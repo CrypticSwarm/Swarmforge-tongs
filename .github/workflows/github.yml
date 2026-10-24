@@ -18,9 +18,6 @@ concurrency:
   group: github-${{ github.ref }}
   cancel-in-progress: true
 
-# Every action is pinned to a full commit SHA, with the release it was taken
-# from in a trailing comment: a tag can be moved to new code, a SHA cannot.
-# Dependabot proposes the bumps (.github/dependabot.yml).
 jobs:
   test:
     name: make test
@@ -30,7 +27,7 @@ jobs:
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          # Tracks the Dockerfile's node:24-alpine.
+          # Keep in step with the Dockerfile's node major; Dependabot bumps only the Dockerfile.
           node-version: '24'
           cache: npm
           cache-dependency-path: github/package-lock.json
@@ -38,21 +35,16 @@ jobs:
       - run: make -C github test
 
   publish:
-    # Only a push to master publishes, and only after the suite passes. The
-    # paths filter above already limits that to changes touching this tong, so
-    # a merge that leaves it alone pushes nothing.
     name: publish to Docker Hub
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     needs: test
     runs-on: ubuntu-latest
-    # Holds DOCKERHUB_USERNAME and DOCKERHUB_TOKEN. Restricting the environment's
-    # deployment branches to master keeps the push token away from workflows
-    # running on any other branch, including a PR branch that edits this file.
+    # Holds the Docker Hub credentials; its deployment branches are restricted to master.
     environment: docker-hub
     env:
       REPO: crypticswarm/github-tong
     steps:
-      # Nothing here pushes to git, so the job token is not left in .git/config.
+      # No git push here, so keep the job token out of .git/config.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -66,10 +58,8 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # `latest` moves; the sha tag names exactly which commit an image is.
       - run: make -C github publish REPO="$REPO" TAGS="latest sha-${GITHUB_SHA::12}"
 
-      # The digest is what a tong definition should pin, so surface it.
       - name: Record the digest
         run: |
           digest=$(docker buildx imagetools inspect "$REPO:sha-${GITHUB_SHA::12}" --format '{{.Manifest.Digest}}')

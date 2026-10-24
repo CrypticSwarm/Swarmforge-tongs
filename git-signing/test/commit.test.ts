@@ -1,7 +1,3 @@
-// Byte-fidelity tests for the commit-object module. This is the part of the tong
-// that must be exactly right: a stray byte changes the object's hash, and a
-// mis-shaped `gpgsig` header produces commits git reports as unsigned.
-
 import { strict as assert } from "node:assert";
 import { test, describe } from "node:test";
 import {
@@ -38,8 +34,6 @@ describe("parse/serialize round-trip", () => {
   });
 
   test("preserves headers git commit-tree cannot reproduce", () => {
-    // `encoding` and `mergetag` are exactly why this tong builds commit objects
-    // itself instead of shelling out to `git commit-tree -S`.
     const raw = Buffer.from(
       [
         `tree ${TREE}`,
@@ -63,8 +57,7 @@ describe("parse/serialize round-trip", () => {
   });
 
   test("preserves non-UTF-8 bytes in an author name", () => {
-    // Latin-1 'é' (0xe9) is not valid UTF-8; decoding it to a string and back
-    // would replace it and change the commit's hash.
+    // Latin-1 'é' (0xe9) is not valid UTF-8; a string round trip would change the hash.
     const name = Buffer.from([0x41, 0xe9]);
     const raw = Buffer.concat([
       Buffer.from(`tree ${TREE}\nauthor `, "utf8"),
@@ -106,8 +99,6 @@ describe("parents", () => {
   });
 
   test("rewrites only mapped parents, keeping order", () => {
-    // The unmapped second parent is the common case for a merge whose other side
-    // is already published: it must keep its SHA.
     const raw = Buffer.from(
       [`tree ${TREE}`, "parent aaa", "parent bbb", "author A <a@x> 1 +0000", "committer A <a@x> 1 +0000", "", "m", ""].join("\n"),
       "utf8",
@@ -124,9 +115,7 @@ describe("signatures", () => {
     const unsigned = parseCommit(Buffer.from(PLAIN, "utf8"));
     const signed = serializeCommit(attachSignature(unsigned, Buffer.from(ARMOR, "utf8")));
 
-    // git's do_sign_commit: the header goes last in the header block, and every
-    // armor line -- including the first, and including the blank one -- is
-    // prefixed with exactly one space.
+    // Matches git's do_sign_commit: last header, every armor line (blank too) indented one space.
     const expected = [
       `tree ${TREE}`,
       `parent ${PARENT}`,
@@ -147,8 +136,6 @@ describe("signatures", () => {
   });
 
   test("stripping the attached signature restores the signed payload exactly", () => {
-    // This is the invariant git relies on to verify: the payload it reconstructs
-    // by removing the gpgsig header must equal the bytes that were signed.
     const unsigned = parseCommit(Buffer.from(PLAIN, "utf8"));
     const payload = serializeCommit(unsigned);
     const signed = attachSignature(unsigned, Buffer.from(ARMOR, "utf8"));
@@ -199,8 +186,6 @@ describe("identity", () => {
   });
 
   test("tolerates a timestamp git no longer writes", () => {
-    // Only the email is used; the trailing date is copied through untouched, so a
-    // historical spelling must not block signing.
     const raw = Buffer.from(
       `tree ${TREE}\nauthor A <a@x> 1 +00:00\ncommitter A <a@x> 1 +00:00\n\nm\n`,
       "utf8",

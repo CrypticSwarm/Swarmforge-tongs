@@ -1,9 +1,4 @@
-// Turning the workspace's `origin` URL into the one repository this tong may touch.
-//
-// There is no verb parameter for owner/repo and no configuration knob: the answer
-// is derived here, once, at startup, from what the human checked out. `owner` and
-// `repo` are interpolated into the fetch and push URL, so anything that is not a
-// plain name is rejected rather than escaped.
+// `owner` and `repo` go unescaped into the git URL and REST paths, so anything but a plain name is rejected.
 
 export class OriginError extends Error {}
 
@@ -14,19 +9,14 @@ export type Origin = {
 
 const GITHUB_HOSTS = new Set(["github.com", "www.github.com"]);
 
-// GitHub logins: alphanumeric with single internal hyphens, 39 characters max.
 const OWNER = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/;
-// `.` and `..` match this class too, and are excluded separately.
 const REPO = /^[A-Za-z0-9._-]{1,100}$/;
 
-/** `scheme://[user@]host[:port]/path`, and the scp-like `[user@]host:path`. */
 function splitUrl(url: string): { host: string; path: string } {
   const schemeMatch = /^([A-Za-z][A-Za-z0-9+.-]*):\/\/(.*)$/.exec(url);
 
   if (schemeMatch) {
     const [, scheme, rest] = schemeMatch;
-    // git understands many more, `ext::` and `file://` among them. Only the three
-    // that can name github.com over a network are accepted.
     if (!["ssh", "https", "git"].includes(scheme.toLowerCase())) {
       throw new OriginError(`origin uses the '${scheme}' transport; only ssh, https, and git are understood`);
     }
@@ -85,13 +75,6 @@ export function parseOrigin(rawUrl: string): Origin {
   return { owner, repo };
 }
 
-/**
- * Built from the pinned owner/repo rather than from the remote named `origin`,
- * which is what makes the pin enforceable rather than merely remembered: the agent
- * owns the workspace and can `git remote set-url origin` at any moment.
- *
- * `x-access-token` is a username. The token is not in this string.
- */
 export function remoteUrl(origin: Origin): string {
   return `https://x-access-token@github.com/${origin.owner}/${origin.repo}.git`;
 }

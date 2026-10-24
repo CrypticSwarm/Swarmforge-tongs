@@ -1,16 +1,3 @@
-// The MCP endpoint end to end, in process: the real express app from src/app.ts
-// on an ephemeral port, driven over real HTTP -- by the SDK's own client and by
-// hand -- with the fake git and fake GitHub API from fakes.ts behind it. No
-// token, no repository, no network.
-//
-// Covers what the unit suites cannot: that both protocol eras are served; that
-// the per-request server construction holds up under repeated and concurrent
-// requests -- an MCP server instance connects to exactly one transport, so any
-// instance reuse across requests fails here; that the largest schema-legal call
-// fits through the body cap; that untrusted arguments are refused before they
-// reach git or GitHub; and that malformed, oversized, and non-POST requests get
-// JSON-RPC errors rather than express error pages.
-
 import assert from "node:assert/strict";
 import { request as httpRequest, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -62,21 +49,13 @@ const VERBS = [
   "update_pr",
 ];
 
-/** As many inputs as GitHub allows, and a workflow taking them all. */
+/** GitHub's workflow_dispatch input limit. */
 const FULL_INPUTS = Object.fromEntries(Array.from({ length: 25 }, (_, i) => [`in${i}`, "x"]));
 const DEPLOY_YAML = `on:\n  workflow_dispatch:\n    inputs:\n${Object.keys(FULL_INPUTS).map((name) => `      ${name}: {}\n`).join("")}`;
 
-/**
- * The body cap from src/app.ts, written out rather than imported so that moving
- * the cap in either direction breaks a test here.
- */
+/** Copied, not imported from MAX_REQUEST_BODY_BYTES, so a change to the cap breaks a test. */
 const BODY_CAP = 1024 * 1024;
 
-/**
- * How the client negotiates: pinned to 2026-07-28, probing with
- * `server/discover` (which must land on 2026-07-28 here), or the plain 2025
- * `initialize` handshake.
- */
 type Mode = "pinned" | "auto" | "legacy";
 const MODES: readonly Mode[] = ["pinned", "auto", "legacy"];
 
@@ -101,7 +80,6 @@ let endpoint: URL;
 let requests: Recorded[];
 const clients: Client[] = [];
 
-/** Nothing the tong did reached git's push or the GitHub API. */
 function assertUntouched(): void {
   assert.deepEqual(api.calls, [], "the GitHub API must not have been called");
   assert.equal(git.pushCall, undefined, "nothing must have been pushed");
@@ -126,10 +104,6 @@ async function connect(mode: Mode = "pinned"): Promise<Client> {
   return client;
 }
 
-/**
- * A Streamable-HTTP response may arrive as SSE rather than a bare JSON body; both
- * carry the same JSON-RPC payload.
- */
 async function readRpc(res: Response): Promise<unknown> {
   const body = await res.text();
   const payload = res.headers.get("content-type")?.includes("text/event-stream")
@@ -147,8 +121,7 @@ function text(result: Awaited<ReturnType<Client["callTool"]>>): string {
 }
 
 before(async () => {
-  // The context is read per request, so swapping the fakes in beforeEach reaches
-  // every server the factory builds afterwards.
+  // Getters, so the fakes beforeEach swaps in reach every later server.
   const context: Context = {
     get repo() {
       return new Repo(git.run, WORKSPACE, ASKPASS, false);
@@ -212,20 +185,16 @@ describe("protocol eras", () => {
       assert.match(client.getInstructions() ?? "", /The GitHub token lives only in this tong/);
       assert.match(client.getInstructions() ?? "", /^Each of deploy_production, deploy_staging dispatches one allowlisted/m);
       assert.match(client.getInstructions() ?? "", /^Dispatch verb deploy_old was dropped at startup: old\.yml: no workflow_dispatch trigger on main\.$/m);
-      // The tool set never changes, so nothing invites a client to hold a listen stream open.
       assert.equal(client.getServerCapabilities()?.tools?.listChanged, false);
 
       const { tools } = await client.listTools();
       const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool.inputSchema]));
       assert.deepEqual(Object.keys(byName).sort(), VERBS);
-      // Every built-in verb is reserved, so a dispatch verb cannot collide with one.
       assert.deepEqual(
         VERBS.filter((verb) => !verb.startsWith("deploy_")),
         [...RESERVED_VERBS].sort(),
       );
 
-      // What the strict zod 4 schemas list: no extra keys, the right required set,
-      // and every parameter still described.
       const expected: Record<string, { properties: string[]; required: string[] | undefined }> = {
         push_branch: { properties: [], required: undefined },
         ci_status: { properties: ["pr", "run", "sha"], required: undefined },
@@ -258,10 +227,8 @@ describe("protocol eras", () => {
       assert.deepEqual(updateProps.state.enum, ["open", "closed"]);
       const mergeProps = byName.merge_pr.properties as Record<string, Record<string, unknown>>;
       assert.deepEqual(mergeProps.method.enum, ["merge", "squash", "rebase"]);
-      // The branch-name rule is a regex so clients can see it, not a refinement they cannot.
       for (const name of ["create_pr", "update_pr"]) {
         const baseProp = (byName[name].properties as Record<string, Record<string, unknown>>).base;
-        // Portable: no lookahead, only \xHH escapes, and an escaped hyphen.
         const pattern = baseProp.pattern as string;
         assert.equal(pattern, "^[^\\-\\s\\x00-\\x1f\\x7f][^\\s\\x00-\\x1f\\x7f]*$", `${name}.base lists its pattern`);
         // A client may compile it under any ECMA-262 flag set; each must accept it.
@@ -273,8 +240,6 @@ describe("protocol eras", () => {
         }
       }
 
-      // Every request on the wire was a POST with a body, carrying the modern
-      // revision; no `initialize`.
       assert.ok(requests.length > 0);
       for (const request of requests) {
         assert.equal(request.method, "POST");
@@ -435,28 +400,19 @@ describe("find_pr over HTTP", () => {
 });
 
 describe("the largest schema-legal call", () => {
-  // zod 4 measures string lengths in Unicode code points, and the most bytes one
-  // code point can cost on the wire is twelve: an astral character written as an
-  // escaped surrogate pair, which is what Python's json.dumps sends by default.
-  // The SDK client's JSON.stringify writes it as four raw UTF-8 bytes instead, so
-  // these requests are built by hand.
+  // Up to 12 wire bytes per code point (escaped surrogate pair, Python's default); JSON.stringify sends 4, so build by hand.
   const ASTRAL = "\u{1F600}";
   const ESCAPED = "\\ud83d\\ude00";
   const BRANCH_MAX = 255;
   const WORST_CASE_STRING_BYTES = 12 * (MAX_TITLE + MAX_BODY + BRANCH_MAX);
-  /** app.ts promises the 2026-07-28 envelope about 250 KiB beyond the worst-case call. */
+  /** Under the ~250 KiB the 1 MiB cap leaves above the ~774 KiB worst-case call. */
   const ENVELOPE_HEADROOM = 240 * 1024;
 
-  /** A JSON string literal of `count` escaped astral code points. */
   const escaped = (count: number) => `"${ESCAPED.repeat(count)}"`;
 
   type Era = "2026-07-28" | "2025";
 
-  /**
-   * One raw `tools/call`, `args` already serialized. The 2026-07-28 request
-   * carries the envelope with a `clientInfo` icon sized to the documented
-   * headroom, so the cap has to fit both at once.
-   */
+  /** A 2026-07-28 call fills the headroom with a `clientInfo` icon. */
   async function rawCall(era: Era, name: string, args: string) {
     const params =
       era === "2026-07-28"
@@ -529,8 +485,6 @@ describe("the largest schema-legal call", () => {
   }
 
   it("lengths are counted in code points, not UTF-16 units", async () => {
-    // MAX_BODY astral characters are twice MAX_BODY UTF-16 units: accepted, as the
-    // listed `maxLength` promises a client; one more is not.
     const client = await connect();
     const fits = await client.callTool({ name: "create_pr", arguments: { title: "t", body: ASTRAL.repeat(MAX_BODY) } });
     assert.notEqual(fits.isError, true, text(fits));
@@ -545,6 +499,7 @@ describe("the largest schema-legal call", () => {
   });
 });
 
+// A server connects to one transport, so reusing one across requests fails these.
 describe("per-request server construction", () => {
   for (const mode of MODES) {
     it(`many sequential requests on one connection each succeed (${mode})`, async () => {
@@ -756,10 +711,7 @@ describe("untrusted arguments", () => {
 describe("plain HTTP", () => {
   const POST_HEADERS = { "content-type": "application/json", accept: "application/json, text/event-stream" };
 
-  /**
-   * A JSON-RPC error with nothing of the server's internals in the body. Its id
-   * is null unless the request was read far enough to recover one.
-   */
+  /** `id` is null unless the request was read far enough to have one. */
   async function assertJsonRpcError(
     response: Response,
     status: number,
@@ -782,11 +734,7 @@ describe("plain HTTP", () => {
     });
   }
 
-  /**
-   * Valid JSON of exactly `length` bytes, shaped like a request but with a
-   * top-level member JSON-RPC does not allow -- so one that passes the size
-   * check is still refused, as an invalid message rather than as too large.
-   */
+  /** Valid JSON of `length` bytes with a member JSON-RPC forbids: under the cap, refused as invalid. */
   function paddedBody(length: number): string {
     const head = '{"jsonrpc":"2.0","id":1,"method":"tools/list","pad":"';
     const tail = '"}';
@@ -799,7 +747,6 @@ describe("plain HTTP", () => {
     ["malformed JSON", '{"jsonrpc": "2.0", "id": 1, "method":', 400, -32700],
     ["a JSON value that is not a JSON-RPC message", '"hello"', 400, -32600],
     ["an empty body", "", 400, -32700],
-    // The pair pins the cap exactly: lowering it breaks the first, raising it the second.
     ["a body of exactly the size cap", paddedBody(BODY_CAP), 400, -32600, 1],
     ["a body one byte over the size cap", paddedBody(BODY_CAP + 1), 413, -32000],
   ];
@@ -813,9 +760,7 @@ describe("plain HTTP", () => {
   }
 
   it("a declared over-cap body is refused before it is sent", async () => {
-    // Only the first byte is ever written. A 413 can only arrive if the Node
-    // adapter checks Content-Length up front; without its own cap it would sit
-    // buffering toward the 4 MiB SDK default and this would time out.
+    // Only the first byte is sent: a 413 means Content-Length was checked up front, a timeout that it was not.
     const req = httpRequest(endpoint, {
       method: "POST",
       headers: { ...POST_HEADERS, "content-length": String(BODY_CAP + 1) },

@@ -92,8 +92,7 @@ describe("pull request number validation", () => {
   });
 
   it("keeps a number that slipped past the schema out of the URL", async () => {
-    // The client re-checks rather than trusting its caller: this is the only
-    // parameter in the tong that becomes a path segment.
+    // The client re-checks rather than trusting its caller: the number becomes a path segment.
     const api = new FakeGitHubApi();
     const github = new GitHub(api.fetch, ORIGIN, TOKEN);
 

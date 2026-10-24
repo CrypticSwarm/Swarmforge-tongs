@@ -1,32 +1,16 @@
-# Example tong definition for the git-signing tong.
-#
-# This file is deliberately NOT auto-discovered. Tong discovery only reads
-# top-level *.yaml in a layer's tongs/ directory, and this lives a level down, so
-# checking out this repo does not hand every session a signing key.
-#
-# To enable it:
-#   1. make image TONG=git-signing         # builds swarmforge-tong-git-signing:latest
-#      (or pull crypticswarm/git-signing-tong, pinned by digest -- see the README)
+# Example definition; not auto-discovered. To enable it:
+#   1. make image TONG=git-signing   # or pull crypticswarm/git-signing-tong by digest (see README)
 #   2. cp git-signing/git-signing.tong.yaml ~/.swarmforge/tongs/git-signing.yaml
-#   3. edit the copy's ${secret:...} references to point at your own vault
-#
-# The secret references below are PLACEHOLDERS. `REPLACE-ME` is not a real vault
-# path and will fail to resolve until you edit it. `op` is whatever provider name
-# you declared in ~/.swarmforge/secret-providers.yaml; use yours.
+#   3. edit the copy's ${secret:...} PLACEHOLDERS: REPLACE-ME will not resolve, and op is a provider from ~/.swarmforge/secret-providers.yaml
 description: Signs the workspace's unpublished commits with a GPG key the agent never holds.
 lifecycle: session
 image: swarmforge-tong-git-signing:latest
 env:
-  # An ASCII-armored *private* key export:
-  #   gpg --armor --export-secret-keys <fingerprint>
+  # gpg --armor --export-secret-keys <fingerprint>
   GIT_SIGNING_KEY: ${secret:op:op://REPLACE-ME/git-signing/private-key}
-  # Delete the GIT_SIGNING_KEY_PASSPHRASE line below if your key has no
-  # passphrase: an unresolvable reference stops the launch, and there is no
-  # empty-value fallback.
+  # Delete this line if your key has no passphrase; an unresolvable reference stops the launch.
   GIT_SIGNING_KEY_PASSPHRASE: ${secret:op:op://REPLACE-ME/git-signing/passphrase}
-# Declared explicitly rather than left to the image's CMD: injecting secrets
-# replaces the entrypoint with a shell prologue, and the launcher needs something
-# to exec afterwards.
+# Required with secret env: the image's CMD is not used.
 command: ["/app/entrypoint.sh"]
 interface:
   kind: mcp
@@ -34,8 +18,7 @@ interface:
   port: 8080
   name: git-signing
 mounts:
-  # rw: signing rewrites commit objects and moves the branch ref, both writes
-  # into .git. Trees are never modified, so no working-tree file is touched.
+  # rw: signing writes commit objects and moves the branch ref; the working tree is untouched.
   - workspace:rw
 readiness:
   mode: tcp

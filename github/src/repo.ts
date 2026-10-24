@@ -1,36 +1,9 @@
-// Every git invocation the tong makes against the mounted workspace.
-
 import { type Run, type RunResult, runOrThrow } from "./exec.js";
 import type { Origin } from "./origin.js";
 
 export class RepoError extends Error {}
 
-/**
- * The workspace is the agent's, so its `.git/config` would otherwise be an input
- * to the one git process that holds the token.
- *
- * What contains that is the anvil's mount, not this function: `.git/config` and
- * `.git/hooks` (along with `.git/branches`, `.git/remotes`, and `.git/commondir`)
- * are mounted read-only in the agent's container, so a hostile entry cannot be
- * written in the first place. These overrides are a second layer for the case
- * where that mount is absent or incomplete.
- *
- * Read the list as a second layer rather than as the boundary. It cannot be
- * exhaustive, and one gap is structural: git resolves `http.<url>.*` by longest
- * URL match, so a workspace `http.https://github.com/.proxy` outranks any generic
- * `-c http.proxy=` given here.
- *
- *   safe.directory             git refuses a repository owned by another uid without it
- *   core.hooksPath             a directory with no hooks in it
- *   core.fsmonitor             an arbitrary command git would otherwise run
- *   core.gitProxy              the same, for any URL an `insteadOf` rewrote to git://
- *   credential.helper          empty, so no helper can intercept or persist the token
- *   protocol.ext.allow         `ext::` transports execute their URL
- *   push.recurseSubmodules     a submodule push carries GIT_ASKPASS to its own remote
- *   push.followTags            tags are outside what this tong is asked to push
- *   fetch.bundleURI            askpass would hand the token to the bundle's host
- *   core.alternateRefsCommand  a command fetch runs when objects/info/alternates exists
- */
+/** Not exhaustive; a workspace `http.<url>.*` outranks any `-c http.*` by longest match. */
 function hardening(workspace: string): string[] {
   return [
     "-c",
@@ -38,36 +11,27 @@ function hardening(workspace: string): string[] {
     "-c",
     "core.hooksPath=/dev/null",
     "-c",
-    "core.fsmonitor=",
+    "core.fsmonitor=", // a command git would run
     "-c",
-    "core.gitProxy=",
+    "core.gitProxy=", // the same, for a URL an `insteadOf` rewrote to git://
     "-c",
-    "credential.helper=",
+    "credential.helper=", // could intercept or persist the token
     "-c",
-    "protocol.ext.allow=never",
+    "protocol.ext.allow=never", // `ext::` transports execute their URL
     "-c",
-    "push.recurseSubmodules=no",
+    "push.recurseSubmodules=no", // a submodule push carries GIT_ASKPASS to its own remote
     "-c",
     "push.followTags=false",
     "-c",
-    "fetch.bundleURI=",
+    "fetch.bundleURI=", // askpass would hand the token to the bundle's host
     "-c",
-    "core.alternateRefsCommand=true",
+    "core.alternateRefsCommand=true", // a command fetch runs when objects/info/alternates exists
   ];
 }
 
 const LF = 0x0a;
 
-/**
- * `cat-file --batch` output: `<oid> <type> <size>\n`, the object's bytes, then a
- * newline, repeated once per requested object.
- *
- * Framed by the declared size rather than by scanning for the next line that looks
- * like a header, so no byte of a commit message can be read as the start of another
- * entry. An `<oid> missing` line has no body and is skipped; the caller fails on any
- * sha it got no object for, which is also what catches output truncated at
- * MAX_OUTPUT_BYTES.
- */
+/** Framed by declared size, so no commit-message byte can start an entry. */
 function parseBatch(output: Buffer): Map<string, Buffer> {
   const objects = new Map<string, Buffer>();
   let cursor = 0;
@@ -89,22 +53,7 @@ function parseBatch(output: Buffer): Map<string, Buffer> {
   return objects;
 }
 
-/**
- * Whether a commit object carries a signature header, which is all this tong can
- * honestly answer. It holds no keyring, so it cannot verify one; that is the
- * server's job, and GitHub's branch protection is what decides whether a signature
- * is trusted.
- *
- * `git log --format=%G?` is not an alternative: this image has no gpg, and git
- * reports a signed commit as `N` when it cannot run one -- every signed commit
- * would read as unsigned.
- *
- * Only the header block is scanned. The message below it is the agent's to write,
- * so scanning the whole object would let a commit message beginning `gpgsig `
- * pass the check. Continuation lines start with a space and cannot match either.
- * latin1 decodes byte-for-byte, so an author name that is not valid UTF-8 stays
- * exactly as many bytes as it was.
- */
+/** Header presence only: with no keyring, `%G?` reads `N`. The agent-written message is never scanned. */
 function isSigned(raw: Buffer): boolean {
   const headerEnd = raw.indexOf("\n\n");
   const headerBlock = headerEnd === -1 ? raw : raw.subarray(0, headerEnd);
@@ -127,16 +76,11 @@ function assertUsableBranch(branch: string): void {
   if (bad) throw new RepoError(`branch name '${branch}' is not one this tong will build a refspec from`);
 }
 
-/**
- * Both streams, because with --porcelain they carry different halves of the reason:
- * the per-ref verdict is on stdout, git's generic summary on stderr.
- */
 function failureDetail(result: RunResult): string {
   const detail = [result.stdout.toString("utf8").trim(), result.stderr.trim()].filter(Boolean).join("\n");
   return detail || `git exited ${result.exitCode}`;
 }
 
-/** `git fetch origin`'s default refspec. */
 const FETCH_REFSPEC = "+refs/heads/*:refs/remotes/origin/*";
 
 const FETCH_FLAGS = {
@@ -154,7 +98,6 @@ export type FetchedRef = {
   to: string;
 };
 
-/** `fetch --porcelain`: `<flag> <old> <new> <ref>` per updated ref. */
 function parseFetch(output: Buffer): FetchedRef[] {
   const refs: FetchedRef[] = [];
   for (const line of output.toString("utf8").split("\n")) {
@@ -166,7 +109,7 @@ function parseFetch(output: Buffer): FetchedRef[] {
   return refs;
 }
 
-/** `failure` is git's stderr when it exited non-zero after moving some refs. */
+/** `failure` is set when git exited non-zero after moving some refs. */
 export type FetchOutcome = {
   refs: FetchedRef[];
   failure: string | null;
@@ -180,10 +123,6 @@ export type PushOutcome = {
 };
 
 export class Repo {
-  /**
-   * `requireSignedCommits` is held here rather than passed to `push`, so it applies
-   * to every verb that pushes without any of them having to remember it.
-   */
   constructor(
     private readonly run: Run,
     private readonly workspace: string,
@@ -191,16 +130,15 @@ export class Repo {
     private readonly requireSignedCommits: boolean,
   ) {}
 
-  /** For the MCP surface, which tells the agent about the gate before it trips over it. */
   get requiresSignedCommits(): boolean {
     return this.requireSignedCommits;
   }
 
-  private git(args: readonly string[]): string[] {
+  private gitArgv(args: readonly string[]): string[] {
     return [...hardening(this.workspace), "-C", this.workspace, ...args];
   }
 
-  /** Built rather than inherited: everything omitted is something a subprocess cannot read. */
+  /** Built, not inherited, so no other variable reaches git. */
   private env(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
     return {
       PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
@@ -213,25 +151,21 @@ export class Repo {
     };
   }
 
-  /**
-   * The only git calls that get the token. A remote named after `url` would redirect
-   * it; an empty value clears that remote's URLs (git 2.46+).
-   */
+  /** Clears any remote named after `url`, which would redirect the token; needs git 2.46+. */
   private runWithToken(args: readonly string[], url: string, refspec: string, token: string): Promise<RunResult> {
     return this.run(
       "git",
-      ["-c", `remote.${url}.url=`, "-c", `remote.${url}.pushurl=`, ...this.git([...args, url, refspec])],
+      ["-c", `remote.${url}.url=`, "-c", `remote.${url}.pushurl=`, ...this.gitArgv([...args, url, refspec])],
       { env: this.env({ GIT_ASKPASS: this.askpass, GITHUB_TONG_TOKEN: token }) },
     );
   }
 
   private async capture(args: readonly string[], stdin?: Buffer): Promise<Buffer> {
-    return runOrThrow(this.run, "git", this.git(args), { env: this.env(), stdin });
+    return runOrThrow(this.run, "git", this.gitArgv(args), { env: this.env(), stdin });
   }
 
-  /** For queries whose failure is meaningful rather than exceptional. */
   private async tryCapture(args: readonly string[]): Promise<string | null> {
-    const result = await this.run("git", this.git(args), { env: this.env() });
+    const result = await this.run("git", this.gitArgv(args), { env: this.env() });
     if (result.exitCode !== 0) return null;
     const text = result.stdout.toString("utf8").trim();
     return text.length > 0 ? text : null;
@@ -241,15 +175,11 @@ export class Repo {
     return (await this.tryCapture(["rev-parse", "--is-inside-work-tree"])) === "true";
   }
 
-  /**
-   * Read once at startup and never again. `config --get` rather than
-   * `remote get-url`, which resolves workspace-controlled `insteadOf` rewrites.
-   */
+  /** `config --get`, not `remote get-url`, which applies workspace `insteadOf` rewrites. */
   async originUrl(): Promise<string | null> {
     return this.tryCapture(["config", "--get", "remote.origin.url"]);
   }
 
-  /** Null when HEAD is detached. */
   async currentBranch(): Promise<string | null> {
     return this.tryCapture(["symbolic-ref", "--quiet", "--short", "HEAD"]);
   }
@@ -264,24 +194,13 @@ export class Repo {
     return this.tryCapture(["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`]);
   }
 
-  /**
-   * The commits pushing `sha` would add to the server: reachable from it, and from
-   * no `refs/remotes/origin/*` ref. Oldest first.
-   *
-   * `--not --remotes=origin` rather than the branch's own upstream, for two reasons
-   * that point the same way. It is the more accurate answer to "what would this push
-   * add", since a commit already on some other origin branch is one the server has
-   * and git will not send. And it is the exact set the git-signing tong signs, so
-   * `sign_commits` followed by a push always satisfies the gate below -- a narrower
-   * or wider set here would make the two tongs disagree about which commits matter.
-   */
+  /** Any origin branch counts as published; must match git-signing's set. */
   private async commitsToPush(sha: string): Promise<string[]> {
     const out = await this.capture(["rev-list", "--topo-order", "--reverse", sha, "--not", "--remotes=origin"]);
     const text = out.toString("utf8").trim();
     return text.length > 0 ? text.split("\n") : [];
   }
 
-  /** Those of `shas` whose commit object carries no signature header, in the order given. */
   private async unsignedCommits(shas: readonly string[]): Promise<string[]> {
     if (shas.length === 0) return [];
 
@@ -291,8 +210,6 @@ export class Repo {
     const unsigned: string[] = [];
     for (const sha of shas) {
       const raw = objects.get(sha);
-      // Fail closed. Not knowing whether a commit is signed is not the same as it
-      // being signed, and this is the branch a truncated batch would arrive on.
       if (!raw) {
         throw new RepoError(
           `git cat-file returned no commit object for ${sha}, so this tong cannot tell whether it is signed. ` +
@@ -304,11 +221,7 @@ export class Repo {
     return unsigned;
   }
 
-  /**
-   * Refuse before the push rather than let the server do it: a repository whose
-   * branch protection requires signatures would reject the whole push anyway, and a
-   * repository without that protection would silently accept unsigned history.
-   */
+  /** Checked locally: a repository without signature protection would accept unsigned history silently. */
   private async assertPushIsSigned(origin: Origin, sha: string): Promise<void> {
     const commits = await this.commitsToPush(sha);
     const unsigned = await this.unsignedCommits(commits);
@@ -325,13 +238,6 @@ export class Repo {
     );
   }
 
-  /**
-   * `git fetch origin`, from the pinned URL rather than the workspace's remote.
-   *
-   * Never prunes, whatever the workspace config says, so a deleted branch's commits
-   * stay published to git-signing. No FETCH_HEAD: with a URL and refspec git marks
-   * every branch for merge, unlike `git fetch origin`.
-   */
   async fetch(origin: Origin, url: string, token: string): Promise<FetchOutcome> {
     const result = await this.runWithToken(
       [
@@ -339,7 +245,9 @@ export class Repo {
         "--porcelain",
         // A submodule fetch would carry GIT_ASKPASS to its own remote.
         "--no-recurse-submodules",
+        // So a deleted branch's commits still count as published.
         "--no-prune",
+        // With a URL and refspec, FETCH_HEAD would mark every branch for merge.
         "--no-write-fetch-head",
         "--no-auto-maintenance",
       ],
@@ -349,30 +257,13 @@ export class Repo {
     );
     const refs = parseFetch(result.stdout);
     if (result.exitCode === 0) return { refs, failure: null };
-    // Refs git reported on had already moved before it gave up.
     if (refs.length === 0) {
       throw new RepoError(`fetching from ${origin.owner}/${origin.repo} failed: ${failureDetail(result)}`);
     }
     return { refs, failure: result.stderr.trim() || `git exited ${result.exitCode}` };
   }
 
-  /**
-   * Push the branch to the pinned repository, then move `refs/remotes/origin/<branch>`
-   * to match.
-   *
-   * That second step is not bookkeeping. The git-signing tong decides what it may
-   * rewrite by asking which commits are reachable from no `refs/remotes/origin/*`.
-   * Pushing to a URL rather than to the remote `origin` means git does not update
-   * the tracking ref itself, and a stale one would let a later `sign_commits`
-   * rewrite commits that are now on the server.
-   *
-   * The refspec source is the sha read here, not the branch name: the agent owns
-   * the workspace and can move the branch between that read and the push, and a
-   * branch-name refspec would then push commits the tracking-ref update below
-   * never records — the stale state described above, on demand.
-   *
-   * No force, ever.
-   */
+  /** Pushes HEAD's sha, not the branch name, which the agent can move mid-push. */
   async push(origin: Origin, url: string, token: string): Promise<PushOutcome> {
     const branch = await this.currentBranch();
     if (!branch) {
@@ -381,9 +272,6 @@ export class Repo {
     assertUsableBranch(branch);
     const sha = await this.headSha();
 
-    // Against the sha being pushed, not HEAD: the agent can move the branch, and a
-    // gate that inspected a different commit than the refspec names would be one it
-    // could push unsigned commits past.
     if (this.requireSignedCommits) await this.assertPushIsSigned(origin, sha);
 
     const result = await this.runWithToken(
@@ -399,6 +287,7 @@ export class Repo {
     }
 
     const alreadyUpToDate = stdout.includes("[up to date]");
+    // A URL push leaves the tracking ref stale, which would mark the pushed commits unpublished.
     try {
       await this.capture([
         "update-ref",
@@ -408,8 +297,6 @@ export class Repo {
         sha,
       ]);
     } catch (err) {
-      // The push itself succeeded; a generic failure here would hide that, and
-      // the stale tracking ref is exactly the state that makes signing unsafe.
       throw new RepoError(
         `pushed ${branch} to ${origin.owner}/${origin.repo} at ${sha}, but updating ` +
           `refs/remotes/origin/${branch} failed: ${(err as Error).message}. The commits ARE on the server; ` +

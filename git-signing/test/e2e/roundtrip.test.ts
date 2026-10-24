@@ -1,13 +1,3 @@
-// End-to-end against the real binaries: a throwaway GPG key, a real repository
-// with a real `origin`, and real `git verify-commit` on the output.
-//
-// The unit tests prove the byte layout matches what git's source says it writes.
-// This one proves git agrees -- which is the claim that actually matters, and the
-// only one that catches a wrong assumption about git's own behaviour.
-//
-// Kept out of `make test` because it needs `git` and `gpg` on PATH. Run it with
-// `make test-e2e`.
-
 import { strict as assert } from "node:assert";
 import { after, before, describe, test } from "node:test";
 import { mkdir, mkdtemp, rm, writeFile, access } from "node:fs/promises";
@@ -29,7 +19,6 @@ let key: SigningKey;
 
 const exists = (path: string) => access(path).then(() => true, () => false);
 
-/** Run git in `cwd` with a fixed identity, so commits are reproducible. */
 async function git(cwd: string, args: string[]): Promise<string> {
   const out = await runOrThrow(realRun, "git", args, {
     cwd,
@@ -60,9 +49,7 @@ before(async () => {
   workspace = join(root, "workspace");
   remote = join(root, "remote.git");
 
-  // A throwaway key, generated here and thrown away with the temp directory. It
-  // never leaves this test and signs nothing outside it, so the empty passphrase
-  // on argv below is not the thing the tong itself must avoid.
+  // A throwaway test key, so an empty passphrase on argv is fine here.
   await mkdir(gnupgHome, { recursive: true, mode: 0o700 });
   await runOrThrow(
     realRun,
@@ -86,7 +73,6 @@ before(async () => {
     })
   ).toString("utf8");
 
-  // Import through the tong's own code path, exactly as index.ts does at startup.
   key = await importSigningKey(
     (command, args, options) =>
       realRun(command, args, { ...options, env: { ...process.env, GNUPGHOME: gnupgHome } }),
@@ -102,7 +88,7 @@ before(async () => {
 
 after(async () => {
   if (!root) return;
-  // gpg-agent holds the socket in GNUPGHOME open; stop it before removing.
+  // Stop gpg-agent first so it neither outlives the test nor races the rm.
   await realRun("gpgconf", ["--homedir", gnupgHome, "--kill", "all"]).catch(() => undefined);
   await rm(root, { recursive: true, force: true });
 });
@@ -151,11 +137,9 @@ describe("signing a real repository", () => {
 
     await git(workspace, ["fsck", "--no-progress", "--no-dangling"]);
 
-    // Signing changed no file content.
     assert.equal(await git(workspace, ["rev-parse", "HEAD^{tree}"]), treeBefore);
     assert.equal(await git(workspace, ["diff", "--stat", `${localB}..HEAD`]), "");
 
-    // Identity and timestamps survived verbatim.
     for (const { from, to } of outcome.rewritten) {
       assert.equal(
         await git(workspace, ["show", "-s", "--format=%an|%ae|%ad|%cn|%ce|%cd|%s|%T", to]),
@@ -164,7 +148,6 @@ describe("signing a real repository", () => {
       );
     }
 
-    // The published commit kept its SHA and is still an ancestor.
     assert.equal(await git(workspace, ["rev-parse", "HEAD~2"]), published);
 
     assert.equal(await git(workspace, ["rev-parse", "HEAD"]), outcome.newHead);
@@ -188,7 +171,6 @@ describe("signing a real repository", () => {
     const outcome = await signCommits(repo(), runWithGnupg, key, undefined);
     assert.equal(outcome.rewritten.length, 1);
 
-    // The rewrite is a pure ref move, so uncommitted work is untouched.
     assert.equal(await git(workspace, ["status", "--porcelain"]), dirtyBefore);
     await git(workspace, ["verify-commit", "HEAD"]);
   });

@@ -1,8 +1,6 @@
-// One strict YAML reader for workflow files and the allowlist.
-
 import { type Document, parseDocument } from "yaml";
 
-/** The document, or why `subject` cannot be read, naming a line and an error code but quoting no file text. */
+/** Errors name a line and an error code but quote no file text. */
 export function strictYaml(text: string, subject: string): Document.Parsed {
   const doc = parseDocument(text, { prettyErrors: false });
   if (doc.errors.length) {

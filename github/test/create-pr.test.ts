@@ -145,8 +145,7 @@ describe("base branch validation", () => {
   });
 
   it("refuses every kind of whitespace and control character, anywhere", () => {
-    // JS `\s` is wider than ASCII space: no-break space, line and paragraph
-    // separators, the BOM, and the ideographic space all count.
+    // JS `\s` also matches no-break space, line/paragraph separators, the BOM, and ideographic space.
     for (const char of ["\u0000", "\u001b", "\u001f", "\u007f", "\u00a0", "\u2028", "\u2029", "\ufeff", "\u3000"]) {
       for (const value of [char, `a${char}`, `a${char}b`]) {
         assert.equal(branchName.safeParse(value).success, false, JSON.stringify(value));

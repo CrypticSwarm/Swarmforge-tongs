@@ -1,10 +1,3 @@
-// Process entrypoint. Reads its configuration from the environment, imports the
-// signing key into the tmpfs keyring entrypoint.sh prepared, and serves MCP.
-//
-// Startup is fail-closed: a missing key, a key that is not a usable secret key, or
-// a workspace that is not a git work tree stops the process here rather than
-// leaving a tong that accepts calls and fails every one of them.
-
 import { access } from "node:fs/promises";
 import { realRun } from "./exec.js";
 import { importSigningKey } from "./gpg.js";
@@ -17,8 +10,7 @@ const workspace = process.env.GIT_SIGNING_WORKSPACE ?? "/workspace";
 const armoredKey = process.env.GIT_SIGNING_KEY;
 const passphrase = process.env.GIT_SIGNING_KEY_PASSPHRASE;
 
-// Child processes inherit this process's environment, so drop the key material
-// from it as soon as it is read. git and gpg get what they need over pipes.
+// Before any spawn: children inherit the environment; key material goes over pipes instead.
 delete process.env.GIT_SIGNING_KEY;
 delete process.env.GIT_SIGNING_KEY_PASSPHRASE;
 

@@ -1,7 +1,6 @@
 SHELL := /bin/bash
 .SHELLFLAGS := -euo pipefail -c
 
-# A tong directory is any top-level directory holding a `*.tong.yaml`.
 ALL_TONGS := $(sort $(patsubst %/,%,$(dir $(wildcard */*.tong.yaml))))
 
 ifdef TONG
@@ -13,8 +12,7 @@ else
 TONGS := $(ALL_TONGS)
 endif
 
-# Delegate one target into every selected tong directory. Each tong owns its own
-# Makefile; this file never learns a tong's build system.
+# Delegate to each tong's own Makefile; never call a tong's build tools from here.
 define recurse
 	@if [ -z "$(TONGS)" ]; then echo "no tongs found (looked for */*.tong.yaml)"; fi
 	@for tong in $(TONGS); do \
@@ -50,7 +48,6 @@ build:
 test:
 	$(call recurse,test)
 
-# `images` is the plural convenience name; the per-tong target is `image`.
 image images:
 	$(call recurse,image)
 

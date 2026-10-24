@@ -1,33 +1,19 @@
-# Example tong definition for the github tong.
-#
-# Not auto-discovered: tong discovery reads only top-level *.yaml in a layer's
-# tongs/ directory, and this lives a level down.
-#
-# To enable it:
-#   1. make image TONG=github            # builds swarmforge-tong-github:latest
-#      (or pull crypticswarm/github-tong, pinned by digest -- see the README)
+# Example definition; not auto-discovered. To enable it:
+#   1. make image TONG=github   # or pull crypticswarm/github-tong by digest (see README)
 #   2. cp github/github.tong.yaml ~/.swarmforge/tongs/github.yaml
-#   3. edit the copy's ${secret:...} reference to point at your own vault
-#
-# The secret reference below is a PLACEHOLDER. `REPLACE-ME` is not a real vault
-# path and will fail to resolve until you edit it. `op` is whatever provider name
-# you declared in ~/.swarmforge/secret-providers.yaml; use yours.
+#   3. edit the copy's ${secret:...} PLACEHOLDER: REPLACE-ME will not resolve, and op is a provider from ~/.swarmforge/secret-providers.yaml
 description: Fetches and pushes branches, manages pull requests, reads Actions CI, and dispatches allowlisted workflows for the workspace's repository, with a token the agent never holds.
 lifecycle: session
 image: swarmforge-tong-github:latest
 env:
-  # A fine-grained personal access token scoped to the repositories this tong
-  # serves, with Contents: read and write, Pull requests: read and write, and
-  # Actions: read (read and write with GITHUB_TONG_DISPATCH).
+  # Fine-grained PAT for the served repositories: Contents rw, Pull requests rw,
+  # Actions read (rw with GITHUB_TONG_DISPATCH).
   GITHUB_TOKEN: ${secret:op:op://REPLACE-ME/github-tong/token}
-  # "true" refuses any push that would add a commit carrying no signature, which
-  # pairs with the git-signing tong: it signs exactly the commits this checks.
-  # Only "true" and "false" are accepted; anything else stops the tong at startup.
+  # "true" refuses pushing unsigned commits. Only "true" and "false"; anything else stops startup.
   GITHUB_TONG_REQUIRE_SIGNED_COMMITS: "false"
-  # "true" serves the dispatch verbs listed in each repository's
-  # .github/swarmforge-dispatch.yml on its default branch. Takes "true" or
-  # "false", as above.
+  # "true" serves the verbs in .github/swarmforge-dispatch.yml on the default branch. Same values.
   GITHUB_TONG_DISPATCH: "false"
+# Required with secret env: the image's CMD is not used.
 command: ["/app/entrypoint.sh"]
 interface:
   kind: mcp
@@ -35,10 +21,7 @@ interface:
   port: 8080
   name: github
 mounts:
-  # rw: the tong reads `origin` to learn which repository it serves, and updates
-  # refs/remotes/origin/<branch> after a push so the git-signing tong can still
-  # tell published commits from unpublished ones. fetch_origin writes objects,
-  # refs/remotes/origin/*, and new tags. No working-tree file is touched.
+  # rw: push and fetch write refs and objects under .git; working tree untouched.
   - workspace:rw
 readiness:
   mode: tcp

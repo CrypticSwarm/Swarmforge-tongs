@@ -1,9 +1,4 @@
-// The MCP surface: two verbs, neither of which takes a parameter.
-//
-// That is deliberate. A ref, a path, or a key id crossing this boundary would be
-// untrusted input reaching git's argv; instead the tong derives all three itself
-// from the repository and the key it was given. There is nothing here for a
-// caller to inject into.
+// No verb takes a parameter, so no caller value can reach git's argv.
 
 import { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod";
@@ -19,12 +14,11 @@ export type Context = {
   passphrase: string | undefined;
 };
 
-const INSTRUCTIONS = `Signs the commits in this workspace that have not been published to origin.
+const INSTRUCTIONS = `Signs this workspace's commits that are not yet on origin.
 
-The signing key lives only in this tong; it is never exposed to the caller and no
-verb accepts a key, ref, or path. Signing rewrites each affected commit object, so
-their SHAs change -- the working tree and index are untouched, and the pre-signing
-head is saved to a backup ref.
+The signing key stays in this tong; no verb takes a key, ref, or path. Signing
+changes the rewritten commits' SHAs, leaves the working tree and index alone, and
+saves the old head to a backup ref.
 
 Call signing_status first to see what would change.`;
 
@@ -81,20 +75,10 @@ function renderOutcome(outcome: SignOutcome): string {
   return lines.join("\n");
 }
 
-/**
- * Strict, so an argument a caller invents is refused rather than silently
- * dropped, and the listed schema says `additionalProperties: false` to match.
- */
+/** Strict, so an invented argument is refused rather than dropped. */
 const NO_ARGUMENTS = z.strictObject({});
 
-/**
- * The cap on array elements plus object members in a `tools/call` `arguments`
- * payload, checked before schema validation runs. No verb takes an argument, so
- * any member at all is already refused by NO_ARGUMENTS; the cap only makes an
- * oversized payload fail on a bounded count instead of a full walk. 1 is the
- * smallest value the SDK accepts. A verb that ever does take parameters must
- * raise it deliberately.
- */
+/** Bounds the pre-validation walk of `arguments`; 1 is the SDK's minimum. Raise it for a verb with parameters. */
 export const MAX_TOOL_INPUT_ELEMENTS = 1;
 
 export function buildServer(context: Context): McpServer {
@@ -102,8 +86,7 @@ export function buildServer(context: Context): McpServer {
     { name: "git-signing", version: "0.1.0" },
     {
       instructions: INSTRUCTIONS,
-      // The tool set is fixed for the life of the process; registerTool would
-      // otherwise advertise `listChanged: true`.
+      // The tool set is fixed; registerTool would otherwise advertise `listChanged: true`.
       capabilities: { tools: { listChanged: false } },
       maxToolInputElements: MAX_TOOL_INPUT_ELEMENTS,
     },
@@ -114,8 +97,7 @@ export function buildServer(context: Context): McpServer {
     {
       title: "signing_status",
       description:
-        "Report which commits in the workspace are not yet on origin, which of them already carry a " +
-        "signature, which would be signed, and anything currently blocking signing. Read-only.",
+        "List commits not yet on origin: which are signed, which would be signed, and any blockers. Read-only.",
       inputSchema: NO_ARGUMENTS,
     },
     async () => {
@@ -135,10 +117,9 @@ export function buildServer(context: Context): McpServer {
     {
       title: "sign_commits",
       description:
-        "Sign every commit reachable from HEAD that is not on any origin ref. Each affected commit is " +
-        "re-created with a signature, so its SHA changes; the branch is moved and the previous head is " +
-        "saved to a backup ref. The working tree and index are not modified. No-op if everything is " +
-        "already signed.",
+        "Sign every commit reachable from HEAD that is on no origin ref, then move the branch. Rewritten commits get " +
+        "new SHAs and the old head is saved to a backup ref. Working tree and index untouched. No-op if " +
+        "all are already signed.",
       inputSchema: NO_ARGUMENTS,
     },
     async () => {

@@ -1,17 +1,8 @@
-// Operator configuration, read from the environment at startup.
-//
-// Parsing is strict on purpose. Every knob here decides whether a check runs, so a
-// value nobody recognizes has to stop the process: "the value was a typo" must
-// never come out as "the check is off". Unset is a different thing from misspelled
-// and keeps the documented default.
+// Strict on purpose: each knob decides whether a check runs, so a typo must stop startup, not turn the check off.
 
 export class ConfigError extends Error {}
 
-/**
- * Unset -- and empty, which is what a shell prologue exporting an unset variable
- * produces -- means false. Anything else is either `true` or `false`, in any case
- * and with surrounding whitespace ignored, or it is a startup failure.
- */
+/** Unset or empty means false; otherwise `true` or `false`, case- and whitespace-insensitive, or a ConfigError. */
 export function booleanFromEnv(name: string, raw: string | undefined): boolean {
   const value = (raw ?? "").trim().toLowerCase();
   if (value === "") return false;

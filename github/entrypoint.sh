@@ -1,11 +1,5 @@
 #!/bin/sh
-# By the time this runs, the launcher's secret prologue has exported GITHUB_TOKEN.
-#
-# Privileges are dropped to the workspace's owner because pushing writes a
-# remote-tracking ref into .git; doing that as root would leave the ref root-owned
-# and break the anvil's next git write.
-#
-# The image is Alpine, so /bin/sh is busybox ash, which supports `pipefail`.
+# busybox ash supports `pipefail`.
 set -euo pipefail
 
 WORKSPACE="${GITHUB_TONG_WORKSPACE:-/workspace}"
@@ -20,14 +14,14 @@ owner="$(stat -c '%u:%g' "$WORKSPACE")" || {
     exit 1
 }
 
-# git needs a writable HOME for its own config lookups; keep it off the workspace
-# and off any disk-backed layer.
+# git needs a writable HOME; keep it on tmpfs, off the workspace.
 HOME="/dev/shm/github-home"
 export HOME
 rm -rf "$HOME"
 mkdir -p "$HOME"
 chmod 700 "$HOME"
 
+# Drop to the workspace owner so refs written into .git stay the anvil's to write.
 if [ "$(id -u)" = "0" ]; then
     chown "$owner" "$HOME"
     exec su-exec "$owner" node /app/dist/src/index.js

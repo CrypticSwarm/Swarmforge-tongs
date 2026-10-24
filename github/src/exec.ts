@@ -1,9 +1,5 @@
-// The one place this tong starts a subprocess.
-//
-// `spawn` is always called with an argv array and no `shell` option, so a value is
-// a single argv word no matter what it contains. The token is not among them:
-// `/proc/<pid>/cmdline` is readable by any process in this container, so it reaches
-// git through GIT_ASKPASS and the environment instead (see repo.ts).
+// The one place this tong starts a subprocess: argv array, no shell, so each value is one argv word.
+// Never put the token in argv; /proc/<pid>/cmdline is readable in the container.
 
 import { spawn } from "node:child_process";
 
@@ -56,8 +52,7 @@ export const realRun: Run = (command, args, options = {}) =>
 
     child.on("error", (err) => reject(new RunError(`cannot run ${command}: ${err.message}`)));
     child.on("close", (code, signal) => {
-      // A signal-killed child has no exit code; `code ?? 0` would report it as
-      // success, and a killed push must never read as a completed one.
+      // A killed push must never read as a completed one.
       if (code === null) {
         reject(new RunError(`${command} was killed by ${signal ?? "a signal"}`));
         return;
