@@ -29,6 +29,7 @@ with `initialize`.
 | `ci_status` | `sha?`, `pr?`, `run?` | Lists the Actions runs for one commit, newest first and up to 10, or one run by id with the commit it is for. Shows each job's id, state, queue and run time, skipped steps, and the step it failed at. See [Reading CI](#reading-ci). |
 | `ci_job` | `job_id` | Lists a job's steps with their state, start offset, and duration, plus its runner. |
 | `ci_log` | `job_id`, `step?`, `start?`, `limit?` | Returns part of a job's plain-text log, timestamps included. Defaults to the end of the failed step, or of the whole log. |
+| an allowlisted verb | `inputs?` | Dispatches one workflow on the branch its entry names and returns the run id. See [Dispatching workflows](#dispatching-workflows). |
 
 `create_pr` pushes for you; there is no need to call `push_branch` first.
 
@@ -118,6 +119,83 @@ hard guarantee, use a token whose account cannot bypass.
 The repository's settings decide the rest: which methods are allowed (a disallowed
 one is GitHub's `405`), the merge and squash commit messages, and whether the head
 branch is deleted. A `rebase` merge has GitHub re-create the commits, unsigned.
+
+## Dispatching workflows
+
+Off unless the tong definition sets `GITHUB_TONG_DISPATCH: "true"`. The verbs then
+come from `.github/swarmforge-dispatch.yml` on the repository's default branch, one
+per entry, each running one workflow on one branch:
+
+```yaml
+deploy_production: { workflow: deploy-production.yml, ref: default }
+deploy_staging: { workflow: deploy-staging.yml, ref: current }
+```
+
+- `ref: default` runs on the default branch.
+- `ref: current` runs on the checked-out branch, which GitHub must have at `HEAD`,
+  and which must not be the default branch.
+- An entry takes `workflow`, a file name in `.github/workflows/`, and `ref`, and
+  nothing else.
+- A verb name is up to 64 lowercase letters, digits, and `_`, starting with a
+  letter. The file lists at most 20 verbs.
+- One verb per entry, so a client can approve each on its own: say, ask before a
+  `current` staging deploy, which runs branch code, and allow a `default` one. An
+  approval covers a name, not what the allowlist binds it to, so grant it per
+  project, not globally.
+
+The allowlist lives in the repository because a workspace layer can disable a
+trusted tong but not redefine it, so one org-level tong has to serve every
+repository. The tong reads it only from the default branch, through GitHub, never
+from the workspace, so it is as trustworthy as that branch. Protect the branch,
+require code-owner review with a code owner on `.github/`, and use a token whose
+account cannot bypass either.
+
+Each call asks GitHub for the branch's tip, not the workspace's `origin/` ref, and
+dispatches `refs/heads/<branch>`, so a tag of the same name cannot stand in. It
+reads the workflow file at that tip and checks `inputs` against its
+`workflow_dispatch` inputs first:
+
+- an unknown input is refused, as is an unset required one with no default, or an
+  unset `boolean` with no default, which GitHub would refuse;
+- `boolean` and `number` inputs take JSON booleans and numbers, and `choice` one
+  of its options;
+- an `environment` input is never set. An input that picks the deploy target is
+  the wrong shape; split the workflow instead.
+
+It returns the run id; follow the run with `ci_status run=<id>`. A dispatch that
+gets a 5xx or no answer may have started anyway, and the error says so.
+
+**Startup.** The tong reads the allowlist, and each workflow it names, at the
+default branch's tip. A malformed entry, or a workflow that is missing, unreadable,
+has no `workflow_dispatch`, or requires an `environment` input, drops its verb. An
+allowlist that cannot be read, is not valid YAML 1.2, is over 16 KiB, is not a map,
+or lists over 20 verbs drops every verb. Either way the tong still starts, so the
+verbs that would land a fix stay up, and each drop is logged and named in the server
+instructions.
+
+An added verb appears at the next session. A removed or changed one is refused at
+once: each dispatch reads the allowlist again first.
+
+**The allowlist guards against mistakes, not misuse.** The agent can already run
+code it wrote with the repository's secrets: `push_branch` and `create_pr` start
+its branch's `push` and `pull_request` workflows, and `current` runs its branch's
+copy of the workflow file. Protect production outside the tong, with both:
+
+- the `production` environment deploying only from the default branch;
+- the cloud role's OIDC trust requiring `sub` to be exactly
+  `repo:<owner>/<repo>:environment:production`.
+
+Without both, the agent can deploy to production from a branch it pushed, with or
+without a dispatch verb. A client prompt on a `current` verb is a prompt, not a
+gate.
+
+**Not airtight.** GitHub dispatches a branch, not a commit, so a push between the
+check and the dispatch runs a file the check never read. `push_branch` and
+`create_pr` wait for a dispatch in flight, so only a push from outside the tong can
+do that. `ci_status run=<id>` reports the commit that ran.
+
+**Dispatches run as the token's owner.** That account is each run's actor, and with
+"Prevent self-review" on an environment, it cannot approve the agent's deploys.
 
 ## It only ever touches the workspace's own repository
 
@@ -245,6 +323,7 @@ so a commit whose message opens with `gpgsig ` does not pass.
 | `lifecycle: session` | It holds a credential and mounts the workspace. A `shared` tong outlives the session and cannot mount the workspace at all. |
 | `env: GITHUB_TOKEN` | The token itself. |
 | `env: GITHUB_TONG_REQUIRE_SIGNED_COMMITS` | Optional, not a credential. `"true"` refuses to push unsigned commits; see above. |
+| `env: GITHUB_TONG_DISPATCH` | Optional, not a credential. `"true"` serves the repository's dispatch verbs; see [Dispatching workflows](#dispatching-workflows). |
 
 No `docker-socket`. The only hosts this tong contacts are `github.com`,
 `api.github.com`, and the log storage `api.github.com` redirects a log download to —
@@ -253,13 +332,21 @@ itself; actually restricting egress to those hosts is the launcher's job.
 
 ## The token
 
-Use a **fine-grained personal access token scoped to this one repository**, with:
+Use a **fine-grained personal access token scoped to the repositories the tong
+serves**: the workspace's own for a workspace tong, each one it serves for an
+org-level tong, with:
 
 - **Contents: read and write** — fetching, pushing, and merging
 - **Pull requests: read and write** — opening, reading, and editing pull requests,
   over REST and GraphQL
 - **Actions: read** — the `ci_*` verbs. Startup does not check for it; without it
   those verbs fail with a `403` that names it, and the rest still work.
+- **Actions: read and write**, in place of read, only for dispatch verbs. It also
+  lets the token re-run, cancel, and delete runs, and enable or disable workflows.
+
+A token's permissions apply to every repository it lists, so its Actions permission
+cannot keep one repository from dispatching. `GITHUB_TONG_DISPATCH` is the switch,
+for the whole tong.
 
 A classic `repo` token also works but is account-wide, which throws away the
 containment the rest of this design is built on. An SSH deploy key is not an
@@ -371,13 +458,18 @@ only the keys it was given, and that a failed draft mutation still says the text
 edit landed, and the CI path: that a log redirect is followed without the token and
 only to `https` and that a failed download never reports its URL, that a sha or id is
 checked before it reaches a URL, that log lines and GitHub's names lose control
-characters, and how a log is cut by step and capped, and the merge path: that only
-a status mergeable without a bypass reaches GitHub's merge, pinned to the checked
-head, never with a draft, a merge queue, or a field GitHub left out, and with no
-`update_pr` in between. It drives a fake `git` through the single
-`Run` seam in `src/exec.ts` and a fake `fetch` through `src/github.ts`, so it
-needs no git and no credential; the only real subprocesses spawned are the test
-runner's own `node`, exercising `realRun`'s exit, signal, and truncation paths.
+characters, and how a log is cut by step and capped, and the dispatch path:
+allowlist parsing, what startup drops, and that a dispatch re-reads the allowlist,
+that a workflow file name reaches a URL only checked and encoded and a branch only
+as a GraphQL variable or in a request body, input checks against
+the file at the branch's tip on GitHub, and that `current` runs only a pushed,
+non-default branch, and the merge path: that only a status mergeable without a
+bypass reaches GitHub's merge, pinned to the checked head, never with a draft, a
+merge queue, or a field GitHub left out, and with no `update_pr` in between. It
+drives a fake `git` through the single `Run` seam in `src/exec.ts` and a fake
+`fetch` through `src/github.ts`, so it needs no git and no credential; the only
+real subprocesses spawned are the test runner's own `node`, exercising
+`realRun`'s exit, signal, and truncation paths.
 It also runs the real HTTP app in-process against the SDK client in both protocol
 eras: a fresh server per request under sequential and concurrent load, the largest
 schema-legal call fitting through the body cap, refusal of oversized or invented

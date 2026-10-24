@@ -21,7 +21,7 @@ import { MAX_LOG_LINES } from "../src/ci.js";
 import { GitHub, MAX_BODY, MAX_TITLE } from "../src/github.js";
 import { remoteUrl } from "../src/origin.js";
 import { Repo } from "../src/repo.js";
-import { MAX_TOOL_INPUT_ELEMENTS, type Context } from "../src/server.js";
+import { MAX_TOOL_INPUT_ELEMENTS, RESERVED_VERBS, type Context } from "../src/server.js";
 import {
   ASKPASS,
   FakeGit,
@@ -38,11 +38,32 @@ import {
   mergeRoutes,
   prRoute,
   runsRoute,
+  branchTipRoute,
+  allowlistRoute,
+  dispatchRoute,
+  workflowFileRoute,
   type FetchCall,
 } from "./fakes.js";
 
 const OPEN_PR = { number: 7, title: "Add a thing", body: "why", base: "main", head: "feature" };
-const VERBS = ["ci_job", "ci_log", "ci_status", "create_pr", "fetch_origin", "find_pr", "get_pr", "merge_pr", "push_branch", "update_pr"];
+const VERBS = [
+  "ci_job",
+  "ci_log",
+  "ci_status",
+  "create_pr",
+  "deploy_production",
+  "deploy_staging",
+  "fetch_origin",
+  "find_pr",
+  "get_pr",
+  "merge_pr",
+  "push_branch",
+  "update_pr",
+];
+
+/** As many inputs as GitHub allows, and a workflow taking them all. */
+const FULL_INPUTS = Object.fromEntries(Array.from({ length: 25 }, (_, i) => [`in${i}`, "x"]));
+const DEPLOY_YAML = `on:\n  workflow_dispatch:\n    inputs:\n${Object.keys(FULL_INPUTS).map((name) => `      ${name}: {}\n`).join("")}`;
 
 /**
  * The body cap from src/app.ts, written out rather than imported so that moving
@@ -137,6 +158,14 @@ before(async () => {
     origin: ORIGIN,
     remoteUrl: remoteUrl(ORIGIN),
     token: TOKEN,
+    dispatch: {
+      defaultBranch: "main",
+      entries: [
+        { verb: "deploy_production", file: "deploy.yml", ref: "default" },
+        { verb: "deploy_staging", file: "deploy.yml", ref: "current" },
+      ],
+      dropped: [{ verb: "deploy_old", why: "old.yml: no workflow_dispatch trigger on main" }],
+    },
   };
   httpServer = createApp(context).listen(0, "127.0.0.1");
   await new Promise<void>((resolve) => httpServer.once("listening", resolve));
@@ -150,6 +179,11 @@ beforeEach(() => {
     ...prRoute(7, "main", "feature"),
     ...editablePrRoutes(OPEN_PR),
     ...listPrsRoute([OPEN_PR, { ...OPEN_PR, number: 3, state: "closed", merged: true }]),
+    ...workflowFileRoute("deploy.yml", DEPLOY_YAML),
+    ...dispatchRoute("deploy.yml"),
+    ...allowlistRoute(
+      "deploy_production: { workflow: deploy.yml, ref: default }\ndeploy_staging: { workflow: deploy.yml, ref: current }\n",
+    ),
   });
   requests = [];
 });
@@ -175,18 +209,27 @@ describe("protocol eras", () => {
       assert.equal(client.getNegotiatedProtocolVersion(), "2026-07-28");
       assert.equal(client.getServerVersion()?.name, "github");
       assert.match(client.getInstructions() ?? "", /The GitHub token lives only in this tong/);
+      assert.match(client.getInstructions() ?? "", /^Each of deploy_production, deploy_staging dispatches one allowlisted/m);
+      assert.match(client.getInstructions() ?? "", /^Dispatch verb deploy_old was dropped at startup: old\.yml: no workflow_dispatch trigger on main\.$/m);
       // The tool set never changes, so nothing invites a client to hold a listen stream open.
       assert.equal(client.getServerCapabilities()?.tools?.listChanged, false);
 
       const { tools } = await client.listTools();
       const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool.inputSchema]));
       assert.deepEqual(Object.keys(byName).sort(), VERBS);
+      // Every built-in verb is reserved, so a dispatch verb cannot collide with one.
+      assert.deepEqual(
+        VERBS.filter((verb) => !verb.startsWith("deploy_")),
+        [...RESERVED_VERBS].filter((verb) => verb !== "list_workflows").sort(),
+      );
 
       // What the strict zod 4 schemas list: no extra keys, the right required set,
       // and every parameter still described.
       const expected: Record<string, { properties: string[]; required: string[] | undefined }> = {
         push_branch: { properties: [], required: undefined },
         ci_status: { properties: ["pr", "run", "sha"], required: undefined },
+        deploy_production: { properties: ["inputs"], required: undefined },
+        deploy_staging: { properties: ["inputs"], required: undefined },
         ci_job: { properties: ["job_id"], required: ["job_id"] },
         ci_log: { properties: ["job_id", "limit", "start", "step"], required: ["job_id"] },
         fetch_origin: { properties: [], required: undefined },
@@ -542,7 +585,7 @@ describe("per-request server construction", () => {
 });
 
 describe("untrusted arguments", () => {
-  const FULLEST = { number: 7, title: "t", body: "b", base: "next", state: "open", draft: false };
+  const FULLEST = { inputs: FULL_INPUTS };
 
   it("a __proto__ key in the arguments is dropped, and pollutes nothing", async () => {
     // Hand-written, since JSON.stringify would not emit an own __proto__ key.
@@ -570,16 +613,17 @@ describe("untrusted arguments", () => {
   });
 
   it(`the fullest legal call is exactly ${MAX_TOOL_INPUT_ELEMENTS} elements and passes the cap`, async () => {
-    assert.equal(Object.keys(FULLEST).length, MAX_TOOL_INPUT_ELEMENTS);
+    assert.equal(1 + Object.keys(FULLEST.inputs).length, MAX_TOOL_INPUT_ELEMENTS);
+    Object.assign(api.routes, branchTipRoute({ "refs/heads/main": "4".repeat(40) }));
     const client = await connect();
-    const result = await client.callTool({ name: "update_pr", arguments: FULLEST });
+    const result = await client.callTool({ name: "deploy_production", arguments: FULLEST });
     assert.notEqual(result.isError, true, text(result));
   });
 
   for (const mode of MODES) {
     it(`one element more is refused before git or GitHub is reached (${mode})`, async () => {
       const client = await connect(mode);
-      const result = await client.callTool({ name: "update_pr", arguments: { ...FULLEST, extra: 1 } });
+      const result = await client.callTool({ name: "deploy_production", arguments: { ...FULLEST, extra: 1 } });
       assert.equal(result.isError, true);
       assert.match(text(result), new RegExp(`more than the maximum of ${MAX_TOOL_INPUT_ELEMENTS} elements`));
       assertUntouched();
@@ -588,10 +632,57 @@ describe("untrusted arguments", () => {
 
   it("nested elements count toward the cap too", async () => {
     const client = await connect();
-    const result = await client.callTool({ name: "create_pr", arguments: { title: ["a", "b", "c", "d", "e", "f"] } });
+    const title = Array.from({ length: MAX_TOOL_INPUT_ELEMENTS }, () => "a");
+    const result = await client.callTool({ name: "create_pr", arguments: { title } });
     assert.equal(result.isError, true);
     assert.match(text(result), /more than the maximum/);
     assertUntouched();
+  });
+
+  it("each dispatch verb runs its own entry, on its own branch", async () => {
+    git.refs.set("refs/remotes/origin/feature", git.head);
+    Object.assign(api.routes, branchTipRoute({ "refs/heads/main": "4".repeat(40), "refs/heads/feature": git.head }));
+    const client = await connect();
+    const { tools } = await client.listTools();
+    const described = Object.fromEntries(tools.map((tool) => [tool.name, tool.description ?? ""]));
+    assert.match(described.deploy_production, / on the default branch, main, /);
+    assert.match(described.deploy_staging, / on the checked-out branch, which must be pushed up to HEAD /);
+
+    const refs: string[] = [];
+    for (const name of ["deploy_staging", "deploy_production"]) {
+      const result = await client.callTool({ name, arguments: { inputs: { in0: "x" } } });
+      assert.notEqual(result.isError, true, text(result));
+      refs.push((api.lastBody as { ref: string }).ref);
+    }
+    assert.deepEqual(refs, ["refs/heads/feature", "refs/heads/main"]);
+  });
+
+  it("a push waits for a dispatch in flight, so it cannot move the branch the dispatch checked", async () => {
+    git.refs.set("refs/remotes/origin/feature", git.head);
+    Object.assign(api.routes, branchTipRoute({ "refs/heads/main": "4".repeat(40), "refs/heads/feature": git.head }));
+    const route = `POST /repos/acme/widgets/actions/workflows/deploy.yml/dispatches`;
+    const answer = api.routes[route];
+    let release = () => {};
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let reached = () => {};
+    const dispatching = new Promise<void>((resolve) => (reached = resolve));
+    api.routes[route] = async (call) => {
+      reached();
+      await held;
+      return typeof answer === "function" ? answer(call) : answer;
+    };
+    const client = await connect();
+
+    const dispatched = client.callTool({ name: "deploy_staging", arguments: { inputs: { in0: "x" } } });
+    await dispatching;
+    const pushed = client.callTool({ name: "push_branch", arguments: {} });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(git.pushCall, undefined, "the push must wait for the dispatch");
+
+    release();
+    assert.notEqual((await dispatched).isError, true);
+    await pushed;
+    assert.notEqual(git.pushCall, undefined);
   });
 
   it("an invented argument within the cap is refused by the strict schema", async () => {
@@ -633,6 +724,14 @@ describe("untrusted arguments", () => {
       ["ci_log", {}],
       ["ci_job", { job_id: 7, repo: "evil/elsewhere" }],
       ["ci_status", { ref: "main" }],
+      ["deploy_production", { inputs: { "a b": "x" } }],
+      ["deploy_production", { inputs: { "-a": "x" } }],
+      ["deploy_production", { inputs: { a: "x".repeat(1025) } }],
+      ["deploy_production", { inputs: { a: null } }],
+      ["deploy_production", { inputs: { a: ["x"] } }],
+      ["deploy_production", { inputs: "a=b" }],
+      ["deploy_production", { inputs: JSON.parse('{"__proto__":"x","a":"b"}') }],
+      ["deploy_production", { ref: "main" }],
     ];
     for (const [name, args] of refused) {
       const result = await client.callTool({ name, arguments: args });

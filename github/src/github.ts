@@ -3,6 +3,7 @@
 // Caller values reach a URL only as an `assertId` path segment or a URLSearchParams
 // value; everything else travels as a JSON body. `fetch` is injected for tests.
 
+import { ALLOWLIST, WORKFLOW_FILE } from "./allowlist.js";
 import type { Origin } from "./origin.js";
 
 export class GitHubError extends Error {
@@ -47,6 +48,9 @@ export const MAX_LOG_BYTES = 8 * 1024 * 1024;
 export const MAX_LOG_READ_BYTES = 256 * 1024 * 1024;
 
 const TIMEOUT_MS = 60_000;
+
+/** The Contents API inlines a file only up to 1 MB. */
+export const MAX_FILE_BYTES = 1024 * 1024;
 
 /** GitHub has no SHA-256 repositories, so a commit id is 40 hex digits. */
 export const COMMIT_SHA = /^[0-9a-f]{40}$/;
@@ -340,6 +344,79 @@ export class GitHub {
 
   async workflowRun(id: number): Promise<WorkflowRun> {
     return parseRun(await this.request("GET", `/repos/${this.repoPath}/actions/runs/${assertId(id, "run id")}`));
+  }
+
+  /** The commit `refs/heads/<branch>` points at on GitHub, or null; the branch travels only as a GraphQL variable. */
+  async branchTip(branch: string): Promise<string | null> {
+    const data = (await this.graphql(
+      `query($owner: String!, $name: String!, $ref: String!) {
+        repository(owner: $owner, name: $name) { ref(qualifiedName: $ref) { target { oid } } }
+      }`,
+      { owner: this.origin.owner, name: this.origin.repo, ref: `refs/heads/${branch}` },
+    )) as { repository?: { ref?: { target?: { oid?: unknown } } | null } };
+    const ref = data.repository?.ref;
+    if (ref === null) return null;
+    const oid = ref?.target?.oid;
+    if (typeof oid !== "string" || !COMMIT_SHA.test(oid)) {
+      throw new GitHubError(`GitHub did not report the commit ${branch} points at`, 0);
+    }
+    return oid;
+  }
+
+  /** A workflow file's text at `ref`, a branch or commit; `ref` is a query value only. */
+  async workflowFile(file: string, ref: string): Promise<string> {
+    return this.fileAt(`.github/workflows/${file}`, this.workflowPath(file, "contents"), ref);
+  }
+
+  /** The dispatch allowlist's text at `ref`, or null when the repository has none there. */
+  async allowlistFile(ref: string): Promise<string | null> {
+    try {
+      return await this.fileAt(ALLOWLIST, `/repos/${this.repoPath}/contents/${ALLOWLIST}`, ref);
+    } catch (err) {
+      if (err instanceof GitHubError && err.status === 404) return null;
+      throw err;
+    }
+  }
+
+  private async fileAt(name: string, path: string, ref: string): Promise<string> {
+    const query = new URLSearchParams({ ref });
+    const data = (await this.request("GET", `${path}?${query}`)) as {
+      type?: string;
+      encoding?: string;
+      content?: string;
+      size?: number;
+    };
+    if (data?.type !== "file") throw new GitHubError(`${name} is not a file on ${ref}`, 0);
+    if ((data.size ?? 0) > MAX_FILE_BYTES || data.encoding !== "base64" || typeof data.content !== "string") {
+      throw new GitHubError(`GitHub did not send ${name} inline; it may be over 1 MB.`, 0);
+    }
+    return Buffer.from(data.content, "base64").toString("utf8");
+  }
+
+  /** Runs `file` on `ref`. GitHub creates the run before answering, so a lost answer does not mean no run. */
+  async dispatchWorkflow(
+    file: string,
+    ref: string,
+    inputs: Record<string, string>,
+  ): Promise<{ runId: number | null; url: string }> {
+    const data = (await this.request("POST", `${this.workflowPath(file, "actions")}/dispatches`, {
+      ref,
+      inputs,
+      return_run_details: true,
+    })) as { workflow_run_id?: unknown; html_url?: unknown } | undefined;
+    const id = data?.workflow_run_id;
+    return {
+      runId: typeof id === "number" && Number.isSafeInteger(id) && id > 0 ? id : null,
+      url: typeof data?.html_url === "string" ? data.html_url : "",
+    };
+  }
+
+  private workflowPath(file: string, api: "contents" | "actions"): string {
+    if (!WORKFLOW_FILE.test(file)) throw new GitHubError(`'${file.slice(0, 80)}' is not a workflow file name`, 0);
+    const name = encodeURIComponent(file);
+    return api === "contents"
+      ? `/repos/${this.repoPath}/contents/.github/workflows/${name}`
+      : `/repos/${this.repoPath}/actions/workflows/${name}`;
   }
 
   /** The jobs of a run's latest attempt. */
@@ -644,7 +721,9 @@ function safeJson(text: string): unknown {
 
 /** The fine-grained permission a 403 on `path` most likely lacks, when the path tells. */
 function permissionFor(path: string): string | undefined {
+  if (path.endsWith("/dispatches")) return "Actions: read and write";
   if (path.includes("/actions/")) return "Actions: read";
+  if (path.includes("/contents/")) return "Contents: read";
   if (path.endsWith("/merge")) return "Contents: read and write";
 }
 
@@ -654,6 +733,8 @@ const ADDRESSED: ReadonlyArray<[RegExp, string, string]> = [
   [/\/actions\/runs\/\d+(\/jobs)?$/, "workflow run", "the id names no run"],
   [/\/actions\/jobs\/\d+$/, "job", "the id names no job"],
   [/\/actions\/jobs\/\d+\/logs$/, "job log", "the job has no log yet, as while it is running"],
+  [/\/contents\/\.github\/workflows\/[^/]+$/, "workflow file", "it is not on that ref"],
+  [/\/actions\/workflows\/[^/]+\/dispatches$/, "workflow", "no workflow on the default branch has that file name"],
 ];
 
 /**

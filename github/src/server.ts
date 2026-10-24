@@ -8,6 +8,8 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod";
 import { ciJob, ciLog, ciStatus, clean, DEFAULT_LOG_LINES, MAX_LOG_LINES } from "./ci.js";
+import { ALLOWLIST, type DispatchEntry, type Dropped } from "./allowlist.js";
+import { dispatch, INPUT_NAME, MAX_INPUT_CHARS, MAX_INPUTS, type InputValue } from "./dispatch.js";
 import {
   COMMIT_SHA,
   GitHubError,
@@ -29,7 +31,24 @@ export type Context = {
   origin: Origin;
   remoteUrl: string;
   token: string;
+  /** The allowlisted dispatch verbs that passed the startup check; absent means dispatch is off. */
+  dispatch?: { defaultBranch: string; entries: readonly DispatchEntry[]; dropped: readonly Dropped[]; unusable?: string };
 };
+
+/** Names a dispatch verb may not take: the built-in verbs, plus list_workflows. */
+export const RESERVED_VERBS: ReadonlySet<string> = new Set([
+  "push_branch",
+  "fetch_origin",
+  "create_pr",
+  "get_pr",
+  "find_pr",
+  "update_pr",
+  "merge_pr",
+  "ci_status",
+  "ci_job",
+  "ci_log",
+  "list_workflows",
+]);
 
 const INSTRUCTIONS = `Fetches and pushes branches, manages pull requests, and reads Actions CI for the repository checked out in this workspace.
 
@@ -63,6 +82,29 @@ const SIGNED_COMMITS_INSTRUCTIONS = `This tong is configured to require signed c
 unsigned commit to the repository is refused, and nothing is pushed. Sign the
 commits you have not pushed yet -- the git-signing tong's sign_commits verb signs
 exactly the set this checks -- and then call again.`;
+
+/** Nothing when dispatch is off. */
+export function dispatchInstructions(
+  setup: { entries: readonly DispatchEntry[]; dropped: readonly Dropped[]; unusable?: string } | undefined,
+): string | undefined {
+  if (!setup) return undefined;
+  const verbs = setup.entries.map((entry) => entry.verb);
+  const lines = [
+    `Dispatch verbs come from ${ALLOWLIST} on the default branch. A verb added there appears from the next`,
+    "session; one removed or changed is refused at once.",
+  ];
+  if (verbs.length) {
+    lines.push(
+      `${verbs.length === 1 ? verbs[0] : `Each of ${verbs.join(", ")}`} dispatches one allowlisted GitHub Actions`,
+      "workflow on the branch its entry names, checking 'inputs' against the workflow file there first. A",
+      "dispatch cannot be undone here; follow its run with ci_status run=<id>.",
+    );
+  }
+  // So an agent missing a verb can say why, rather than that it was never there.
+  lines.push(...setup.dropped.map(({ verb, why }) => `Dispatch verb ${verb} was dropped at startup: ${why}.`));
+  if (setup.unusable) lines.push(`No dispatch verbs this session: ${setup.unusable}.`);
+  return lines.join("\n");
+}
 
 const SIGNED_COMMITS_SENTENCE =
   "This tong requires signed commits: it refuses the push, and pushes nothing, if any commit the push would " +
@@ -99,14 +141,12 @@ export const commitSha = z.string().regex(COMMIT_SHA, "must be a full 40-charact
 
 /**
  * The cap on array elements plus object members in a `tools/call` `arguments`
- * payload, checked before schema validation runs. The schemas below take only
- * scalars, so a call's count is its number of keys, and the fullest legal call
- * is `update_pr` with all six of `number`, `title`, `body`, `base`, `state`, and
- * `draft`. Any more is a key the strict schemas would refuse anyway; the cap
- * makes an oversized payload fail on a bounded count instead of a full walk.
- * Adding a parameter means raising this.
+ * payload, checked before schema validation runs. The fullest legal call is a
+ * dispatch verb: `inputs` plus its 25 members. Any more is a key the strict
+ * schemas would refuse anyway; the cap makes an oversized payload fail on a
+ * bounded count instead of a full walk. Adding a parameter means checking this.
  */
-export const MAX_TOOL_INPUT_ELEMENTS = 6;
+export const MAX_TOOL_INPUT_ELEMENTS = 1 + MAX_INPUTS;
 
 export type CreatePrInput = {
   title: string;
@@ -382,21 +422,28 @@ export function buildIdleServer(reason: string): McpServer {
 }
 
 /** Module-wide, since every request builds a fresh server. */
-let pullRequestWrites: Promise<unknown> = Promise.resolve();
+let writes: Promise<unknown> = Promise.resolve();
 
-/** One at a time, so update_pr cannot retarget a base between merge_pr's check and its merge. */
+/**
+ * One at a time, so update_pr cannot retarget a base between merge_pr's check and its merge, and a push
+ * cannot move a branch between a dispatch's check and its dispatch.
+ */
 function serially<I>(run: (context: Context, input: I) => Promise<string>) {
   return (context: Context, input: I): Promise<string> => {
-    const result = pullRequestWrites.then(() => run(context, input));
-    pullRequestWrites = result.catch(() => {});
+    const result = writes.then(() => run(context, input));
+    writes = result.catch(() => {});
     return result;
   };
 }
 
 export function buildServer(context: Context): McpServer {
-  const instructions = context.repo.requiresSignedCommits
-    ? `${INSTRUCTIONS}\n\n${SIGNED_COMMITS_INSTRUCTIONS}`
-    : INSTRUCTIONS;
+  const dispatchVerbs = context.dispatch?.entries ?? [];
+  const dispatchText = dispatchInstructions(context.dispatch);
+  const instructions = [
+    INSTRUCTIONS,
+    ...(dispatchText ? [dispatchText] : []),
+    ...(context.repo.requiresSignedCommits ? [SIGNED_COMMITS_INSTRUCTIONS] : []),
+  ].join("\n\n");
   const server = new McpServer(
     { name: "github", version: "0.1.0" },
     {
@@ -408,12 +455,15 @@ export function buildServer(context: Context): McpServer {
     },
   );
 
+  const registered = new Set<string>();
+
   // Registers a verb whose handler returns text; a throw becomes an `isError` result.
   function verb<Shape extends z.ZodRawShape>(
     name: string,
     config: { description: string; inputSchema: z.ZodObject<Shape> },
     run: (context: Context, input: z.infer<z.ZodObject<Shape>>) => Promise<string>,
   ): void {
+    registered.add(name);
     server.registerTool(name, { title: name, ...config }, async (input) => {
       try {
         return { content: [{ type: "text" as const, text: await run(context, input) }] };
@@ -439,7 +489,7 @@ export function buildServer(context: Context): McpServer {
       ),
       inputSchema: z.strictObject({}),
     },
-    pushBranch,
+    serially(pushBranch),
   );
 
   verb(
@@ -471,7 +521,7 @@ export function buildServer(context: Context): McpServer {
         draft: z.boolean().optional().describe("Open the pull request as a draft."),
       }),
     },
-    createPr,
+    serially(createPr),
   );
 
   verb(
@@ -596,6 +646,47 @@ export function buildServer(context: Context): McpServer {
     },
     ciLog,
   );
+
+  const inputs = z
+    .preprocess(
+      (raw, ctx) => {
+        // zod drops this key without a word, so refuse it before the record sees it.
+        if (typeof raw === "object" && raw !== null && Object.hasOwn(raw, "__proto__")) {
+          ctx.addIssue({ code: "custom", message: "__proto__ is not an input this tong can pass" });
+        }
+        return raw;
+      },
+      z
+        .record(
+          z.string().regex(INPUT_NAME, "must be a workflow input name"),
+          z.union([z.string().max(MAX_INPUT_CHARS), z.number(), z.boolean()]),
+        )
+        .refine((value) => Object.keys(value).length <= MAX_INPUTS, `at most ${MAX_INPUTS} inputs`),
+    )
+    .optional()
+    .describe("Workflow inputs by name, each a string, number, or boolean, as the workflow file types it.");
+  for (const entry of dispatchVerbs) {
+    // A name RESERVED_VERBS missed would make registerTool throw, failing every request.
+    if (registered.has(entry.verb)) {
+      console.error(`github: dispatch verb ${entry.verb} shadows a built-in verb; skipping it`);
+      continue;
+    }
+    const on =
+      entry.ref === "default"
+        ? `the default branch, ${context.dispatch!.defaultBranch}`
+        : "the checked-out branch, which must be pushed up to HEAD and must not be the default branch";
+    verb(
+      entry.verb,
+      {
+        description:
+          `Dispatch the GitHub Actions workflow .github/workflows/${entry.file} on ${on}, and return its run ` +
+          "id. 'inputs' is checked against that file's on.workflow_dispatch.inputs on that branch first. Follow " +
+          "the run with ci_status run=<id>.",
+        inputSchema: z.strictObject({ inputs }),
+      },
+      serially((context, input: { inputs?: Record<string, InputValue> }) => dispatch(context, entry, input)),
+    );
+  }
 
   return server;
 }
