@@ -5,10 +5,8 @@ commits in your session workspace that have not been published to `origin`.
 
 ## What it holds
 
-A GPG **private signing key**, delivered as a `${secret:...}` reference the host
-launcher resolves before the container starts and streams in over a FIFO. The key
-exists only in this container's process space and its tmpfs keyring. The agent
-never sees it, and no verb accepts or returns key material.
+A GPG **private signing key**, from a `${secret:...}` reference. The agent never
+sees it, and no verb accepts or returns key material.
 
 ## MCP verbs
 
@@ -18,62 +16,63 @@ open with `initialize`.
 
 | Verb | Params | What it does |
 | --- | --- | --- |
-| `signing_status` | none | Reports the branch, its upstream, the key fingerprint and UIDs, every unpublished commit and whether it is already signed, and anything blocking signing. Read-only. |
-| `sign_commits` | none | Signs every unpublished commit that needs it, moves the branch, and saves the previous head to a backup ref. No-op when everything is already signed. |
+| `signing_status` | none | Reports the branch, its upstream, the key fingerprint and UIDs, every unpublished commit and whether it is signed, and anything blocking signing. Read-only. |
+| `sign_commits` | none | Signs every unpublished commit that needs it, moves the branch, and saves the previous head to a backup ref. No-op when everything is signed. |
 
-**Neither verb takes a parameter.** No ref, path, or key id crosses the boundary,
-so there is nothing for a caller to inject — the tong derives all three itself. A
-parameter sent anyway is refused, not ignored.
+A parameter sent anyway is refused.
 
 ## What gets signed
 
-Everything reachable from `HEAD` but from **no** `refs/remotes/origin/*` ref —
-`git rev-list --topo-order --reverse HEAD --not --remotes=origin`.
+Every commit reachable from `HEAD` but not from any `refs/remotes/origin/*` ref:
 
-That is "not in the upstream repo", and it is deliberately stricter than
-`origin/<branch>..HEAD`: a commit already published on some *other* origin branch
-is excluded too. Signing rewrites commits, and rewriting something already pushed
-would change history other people already have.
+```sh
+git rev-list --topo-order --reverse HEAD --not --remotes=origin
+```
 
-A commit already carrying a `gpgsig` header is left alone — including one signed
-by somebody else — unless one of its parents had to be rewritten, in which case
-its object changes anyway and the old signature could no longer be valid.
+- A commit on any `origin` branch, not just this branch's upstream, counts as
+  published and is left alone.
+- A commit that already has a `gpgsig` header is left alone, even one signed by
+  someone else. If one of its parents was rewritten, it is re-signed.
 
 ### Signing rewrites commits
 
-Adding a signature changes the commit object, so its SHA changes, and so does
-every descendant's. The tong:
+Each signed commit, and every descendant, gets a new SHA. The tong:
 
-- keeps each commit's tree byte-identical, so **no working-tree file is touched**
-  and a dirty checkout is safe;
-- preserves author and committer name, email, and timestamps exactly, along with
-  headers `git commit-tree` would drop (`encoding`, `mergetag`);
-- saves the pre-signing head to `refs/swarmforge/git-signing/pre-sign/<branch>`
-  and moves the branch with a compare-and-swap against the head it inspected.
+- keeps each tree byte-identical, so no working-tree file changes and a dirty
+  checkout is safe;
+- keeps author and committer names, emails, and timestamps exactly, and every
+  other header (such as `encoding` and `mergetag`) except the old signature;
+- saves the old head to `refs/swarmforge/git-signing/pre-sign/<branch>` and moves
+  the branch only if it still points at the head it inspected.
 
-To undo, `git reset --soft <old-head>` — the response prints the command.
+To undo, run `git reset --soft <old-head>`. The response prints the command.
 
-### It refuses to run when
+### `sign_commits` refuses when
 
-- `HEAD` is detached (signing moves a branch ref).
-- A rebase, merge, cherry-pick, revert, or bisect is in progress — the saved state
-  references commits that are about to be rewritten.
-- No `refs/remotes/origin/*` ref exists. Nothing is known to be published, so the
-  entire history would count as unsigned work. Run `git fetch origin` first.
-- A commit's **committer email is not a UID on the signing key**. A signature is a
-  claim about who made the commit; the tong will not make that claim on behalf of
-  an identity the key does not carry. Fix `user.email`, or use a matching key.
-- The key is revoked, expired, disabled, has no signing-capable subkey, or the
-  secret holds more or fewer than exactly one key.
+`signing_status` lists each of these:
+
+- `HEAD` is detached.
+- A rebase, merge, cherry-pick, revert, or bisect is in progress.
+- No `refs/remotes/origin/*` ref exists. Run `git fetch origin` first.
+- A commit's committer email is not a UID on the signing key. Fix `user.email`, or
+  use a matching key.
+
+### The tong fails to start when
+
+The reason is in the container log.
+
+- `GIT_SIGNING_KEY` is unset, or does not hold exactly one key.
+- The key is revoked, expired, disabled, or cannot sign.
+- The workspace is not mounted, or is not a git repository.
 
 ## Grants it requests, and why
 
 | Grant | Why |
 | --- | --- |
-| `mounts: [workspace:rw]` | Signing writes new commit objects into `.git` and moves the branch ref. Both are writes; `ro` cannot work. Trees are never modified, so no file in the working tree changes. |
-| `lifecycle: session` | It holds a credential and mounts the workspace. A `shared` tong outlives the session and cannot mount the workspace at all. |
-| `env: GIT_SIGNING_KEY` | The signing key itself. |
-| `env: GIT_SIGNING_KEY_PASSPHRASE` | Optional; only if your key is passphrase-protected. |
+| `mounts: [workspace:rw]` | Signing writes commit objects into `.git` and moves the branch ref. Working-tree files never change. |
+| `lifecycle: session` | It holds a credential and mounts the workspace. A `shared` tong outlives the session and cannot mount the workspace. |
+| `env: GIT_SIGNING_KEY` | The signing key. |
+| `env: GIT_SIGNING_KEY_PASSPHRASE` | Optional; only for a passphrase-protected key. |
 
 No `docker-socket`. No network egress.
 
@@ -84,10 +83,9 @@ make image TONG=git-signing                                   # swarmforge-tong-
 cp git-signing/git-signing.tong.yaml ~/.swarmforge/tongs/git-signing.yaml
 ```
 
-Then **edit the copy**. The `${secret:...}` references in the committed
-definition are placeholders — `REPLACE-ME` is not a real vault path and will fail
-to resolve until you change it. Point them at your own vault, using a provider
-name you have declared in `~/.swarmforge/secret-providers.yaml`:
+Then **edit the copy**. Its `${secret:...}` references are placeholders:
+`REPLACE-ME` will not resolve. Point them at your own vault, using a provider from
+`~/.swarmforge/secret-providers.yaml`:
 
 ```yaml
 env:
@@ -95,9 +93,8 @@ env:
   GIT_SIGNING_KEY_PASSPHRASE: ${secret:op:op://Private/git-signing/passphrase}
 ```
 
-Delete the `GIT_SIGNING_KEY_PASSPHRASE` line entirely if your key has no
-passphrase — an unresolvable reference stops the launch, and there is no
-empty-value fallback.
+Delete the `GIT_SIGNING_KEY_PASSPHRASE` line if your key has no passphrase. An
+unresolvable reference stops the launch.
 
 Store the key as an ASCII-armored private export:
 
@@ -105,14 +102,14 @@ Store the key as an ASCII-armored private export:
 gpg --armor --export-secret-keys <fingerprint>
 ```
 
-The user layer (`~/.swarmforge/tongs/`) is trusted and skips the approval gate. A
-workspace-sourced copy prompts on first run. For anything you publish, pin the
-image by digest rather than `:latest`.
+The user layer (`~/.swarmforge/tongs/`) skips the approval gate; a
+workspace-sourced copy prompts on first run. Pin `image:` by digest in any
+definition you share.
 
-Instead of building it, you can pull the published image,
-[`crypticswarm/git-signing-tong`](https://hub.docker.com/r/crypticswarm/git-signing-tong), built for
-`linux/amd64` and `linux/arm64`. Look up the current digest, pull it, and pin the
-copy's `image:` to it:
+To pull instead of build, use
+[`crypticswarm/git-signing-tong`](https://hub.docker.com/r/crypticswarm/git-signing-tong)
+(`linux/amd64`, `linux/arm64`). Look up its digest, pull it, and set the copy's
+`image:` to it:
 
 ```sh
 docker buildx imagetools inspect crypticswarm/git-signing-tong:latest --format '{{.Manifest.Digest}}'
@@ -125,16 +122,12 @@ image: crypticswarm/git-signing-tong@sha256:<digest>
 
 ## Where the key lives at runtime
 
-GPG cannot sign without a keyring on a filesystem. `entrypoint.sh` creates
-`GNUPGHOME` under `/dev/shm` — tmpfs, mode 0700, wiped when the container stops —
-so the key is never written to a disk-backed layer. This is a deliberate
-compromise, documented here rather than papered over; the key material itself
-still only ever reaches `gpg` on stdin, and the passphrase only on fd 3, never on
-argv (`/proc/<pid>/cmdline` is readable inside the container) and never in a file.
-
-The entrypoint also drops to the uid that owns the mounted workspace before doing
-any of this. Writing `.git` objects as root would leave them owned by root and
-break the anvil's next git write.
+- `GNUPGHOME` is a mode-0700 directory under `/dev/shm` (tmpfs), wiped when the
+  container stops. The key is never written to disk.
+- Neither the key nor the passphrase goes on argv. The passphrase is never written
+  to a file.
+- The entrypoint drops to the uid that owns the workspace, so new `.git` objects
+  are not owned by root.
 
 ## Building and testing
 
@@ -146,15 +139,7 @@ make image      # docker build
 make clean
 ```
 
-`make test` covers the security boundary: commit-object byte fidelity, the
-`gpgsig` header layout against git's own `do_sign_commit`, candidate selection,
-every refusal above, and that the passphrase never reaches argv. It drives a fake
-`git`/`gpg` through the single `Run` seam in `src/exec.ts`, so it needs no
-binaries. It also runs the real HTTP app in-process against the SDK client in both
-protocol eras: a fresh server per request under sequential and concurrent load,
-refusal of oversized or invented arguments and of malformed bodies, and the `405`
-and `/healthz` answers.
-
-`make test-e2e` generates a throwaway key in a temp `GNUPGHOME`, builds a real
-repository with a real `origin`, signs it, and checks the result with real
-`git verify-commit`, `git fsck`, and a diff of every author/committer field.
+- `make test` drives a fake `git` and `gpg`, and runs the HTTP app in-process
+  against the SDK client.
+- `make test-e2e` signs a real repository with a throwaway key and checks it with
+  `git verify-commit` and `git fsck`.
