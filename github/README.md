@@ -190,8 +190,9 @@ without a dispatch verb. A client prompt on a `current` verb is a prompt, not a
 gate.
 
 **Not airtight.** GitHub dispatches a branch, not a commit, so a push between the
-check and the dispatch runs a file the check never read. `ci_status run=<id>`
-reports the commit that ran.
+check and the dispatch runs a file the check never read. `push_branch` and
+`create_pr` wait for a dispatch in flight, so only a push from outside the tong can
+do that. `ci_status run=<id>` reports the commit that ran.
 
 **Dispatches run as the token's owner.** That account is each run's actor, and with
 "Prevent self-review" on an environment, it cannot approve the agent's deploys.
