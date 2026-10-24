@@ -1,5 +1,4 @@
-# Allowlist: only what the Dockerfile COPYs reaches the builder, so a local
-# `make image` or `make publish` cannot ship a stray .env or key file.
+# Allowlist, so a stray .env or key file never reaches the build context.
 *
 !package.json
 !package-lock.json
