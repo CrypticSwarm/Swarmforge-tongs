@@ -1,8 +1,8 @@
 # github
 
 A [Swarmforge](https://github.com/CrypticSwarm/Swarmforge) tong that fetches and
-pushes branches, manages pull requests, and reads GitHub Actions CI for the
-repository checked out in your session workspace.
+pushes branches, manages pull requests, reads GitHub Actions CI, and dispatches
+allowlisted workflows for the repository checked out in your session workspace.
 
 ## What it holds
 
@@ -30,6 +30,7 @@ with `initialize`.
 | `ci_job` | `job_id` | Lists a job's steps with their state, start offset, and duration, plus its runner. |
 | `ci_log` | `job_id`, `step?`, `start?`, `limit?` | Returns part of a job's plain-text log, timestamps included. Defaults to the end of the failed step, or of the whole log. |
 | an allowlisted verb | `inputs?` | Dispatches one workflow on the branch its entry names and returns the run id. See [Dispatching workflows](#dispatching-workflows). |
+| `list_workflows` | none | Lists each dispatch verb's workflow, branch, and inputs as the file there has them, why a dispatch would be refused now, and any verb dropped at startup. Only when `GITHUB_TONG_DISPATCH` is `"true"`. |
 
 `create_pr` pushes for you; there is no need to call `push_branch` first.
 
@@ -162,8 +163,13 @@ reads the workflow file at that tip and checks `inputs` against its
 - an `environment` input is never set. An input that picks the deploy target is
   the wrong shape; split the workflow instead.
 
-It returns the run id; follow the run with `ci_status run=<id>`. A dispatch that
+Each verb returns the run id; follow it with `ci_status run=<id>`. A dispatch that
 gets a 5xx or no answer may have started anyway, and the error says so.
+
+`list_workflows` shows each verb's inputs, with options and defaults as the JSON
+the verb takes. It marks `required` the inputs the workflow requires, and `must
+pass` a boolean with no default, which GitHub refuses unset. It still lists a verb
+that would be refused now, such as on an unpushed branch, saying why.
 
 **Startup.** The tong reads the allowlist, and each workflow it names, at the
 default branch's tip. A malformed entry, or a workflow that is missing, unreadable,
@@ -171,7 +177,7 @@ has no `workflow_dispatch`, or requires an `environment` input, drops its verb. 
 allowlist that cannot be read, is not valid YAML 1.2, is over 16 KiB, is not a map,
 or lists over 20 verbs drops every verb. Either way the tong still starts, so the
 verbs that would land a fix stay up, and each drop is logged and named in the server
-instructions.
+instructions and by `list_workflows`.
 
 An added verb appears at the next session. A removed or changed one is refused at
 once: each dispatch reads the allowlist again first.

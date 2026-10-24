@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { DispatchEntry, Dropped } from "../src/allowlist.js";
-import { checkInputs, dispatch, dispatchInputs, loadDispatch, type InputSpec } from "../src/dispatch.js";
-import { RESERVED_VERBS, buildServer, dispatchInstructions } from "../src/server.js";
+import { Client } from "@modelcontextprotocol/client";
+import { InMemoryTransport } from "@modelcontextprotocol/server";
+import { checkInputs, dispatch, dispatchInputs, listWorkflows, loadDispatch, type InputSpec } from "../src/dispatch.js";
+import { RESERVED_VERBS, buildServer, dispatchInstructions, type Context } from "../src/server.js";
 import { GitHub } from "../src/github.js";
 import {
   ACTIONS,
@@ -26,7 +28,12 @@ const PRODUCTION: DispatchEntry = { verb: "deploy_production", file: "deploy.yml
 const STAGING: DispatchEntry = { verb: "deploy_staging", file: "deploy.yml", ref: "current" };
 const CONTENTS = "/repos/acme/widgets/contents/.github/workflows/deploy.yml";
 const ALLOWLIST_PATH = "/repos/acme/widgets/contents/.github/swarmforge-dispatch.yml";
-const LISTING = "deploy_production: { workflow: deploy.yml, ref: default }\ndeploy_staging: { workflow: deploy.yml, ref: current }\n";
+const LISTING = [
+  "deploy_production: { workflow: deploy.yml, ref: default }",
+  "deploy_staging: { workflow: deploy.yml, ref: current }",
+  "deploy_again: { workflow: deploy.yml, ref: default }",
+  "lint: { workflow: lint.yml, ref: default }",
+].join("\n");
 /** What every dispatch re-reads first: the default branch's name and its allowlist. */
 const LISTED = { ...REPO_ROUTE, ...allowlistRoute(LISTING) };
 const DISPATCHES = `POST ${ACTIONS}/workflows/deploy.yml/dispatches`;
@@ -254,8 +261,12 @@ describe("dispatchInputs", () => {
     assert.deepEqual(dispatchInputs("on:\n  workflow_dispatch:\n"), []);
     assert.deepEqual(dispatchInputs("on:\n  workflow_dispatch:\n    inputs:\n"), []);
     assert.deepEqual(dispatchInputs("on:\n  workflow_dispatch:\n    inputs:\n      x:\n"), [
-      { name: "x", type: "string", required: false, hasDefault: false, options: [] },
+      { name: "x", type: "string", required: false, hasDefault: false, default: "", options: [], description: "" },
     ]);
+    assert.deepEqual(
+      dispatchInputs("on:\n  workflow_dispatch:\n    inputs:\n      x: { default: ~ }\n      y: { default: }\n")!.map((spec) => spec.hasDefault),
+      [false, false],
+    );
   });
 
   it("returns null without the trigger", () => {
@@ -285,10 +296,12 @@ describe("dispatchInputs", () => {
       ["on:\n  workflow_dispatch:\n    inputs:\n      x: { type: secret }\n", /type 'secret', which this tong does not know/],
       ["on:\n  workflow_dispatch:\n    inputs:\n      x: { type: choice }\n", /lists no options/],
       ['on:\n  workflow_dispatch:\n    inputs:\n      "a b": {}\n', /name GitHub does not accept/],
+      [`on:\n  workflow_dispatch:\n    inputs:\n      a${"b".repeat(100)}: {}\n`, /name GitHub does not accept/],
       ['on:\n  workflow_dispatch:\n    inputs:\n      __proto__: {}\n', /input __proto__ has a name this tong cannot pass/],
       ["on: push\non: workflow_dispatch\n", /not valid YAML/],
       ["on: push\n---\non: workflow_dispatch\n", /not valid YAML/],
       ["%YAML 1.1\n---\non: workflow_dispatch\n", /YAML version other than 1\.2/],
+      [`on:\n  workflow_dispatch:\n    inputs:\n${Array.from({ length: 26 }, (_, i) => `      i${i}:\n`).join("")}`, /declares 26 inputs; GitHub allows 25/],
     ];
     for (const [text, expected] of cases) assert.throws(() => dispatchInputs(text), expected, text);
   });
@@ -313,7 +326,9 @@ describe("checkInputs", () => {
     type,
     required: false,
     hasDefault: false,
+    default: "",
     options: [],
+    description: "",
     ...more,
   });
 
@@ -489,6 +504,7 @@ describe("dispatchInstructions", () => {
 
   it("names the verbs, each one dropped, and why the allowlist was unusable", () => {
     assert.match(dispatchInstructions(setup(["a"]))!, /^a dispatches one allowlisted/m);
+    assert.match(dispatchInstructions(setup(["a"]))!, /list_workflows shows each verb's inputs\./);
     assert.match(dispatchInstructions(setup(["a", "b"]))!, /^Each of a, b dispatches one allowlisted/m);
     assert.match(
       dispatchInstructions(setup([], dropped))!,
@@ -498,5 +514,219 @@ describe("dispatchInstructions", () => {
       dispatchInstructions(setup([], [], "GitHub has no branch main to read it from"))!,
       /\nNo dispatch verbs this session: GitHub has no branch main to read it from\.$/,
     );
+  });
+});
+
+describe("listWorkflows", () => {
+  const DESCRIBED = `
+on:
+  workflow_dispatch:
+    inputs:
+      tier: { type: choice, options: [small, large], required: true, default: small, description: "Which size\\nof box" }
+      dry_run: { type: boolean, description: "${"x".repeat(250)}" }
+      note: { default: "" }
+      flag: { default: true }
+      count: { type: number, default: 3 }
+      target: { type: environment }
+`;
+  const listed = (api: FakeGitHubApi, git = pushedGit(), entries = [PRODUCTION, STAGING], dropped: Array<{ verb: string; why: string }> = []) =>
+    listWorkflows(contextFor(api, git, { defaultBranch: "main", entries, dropped }));
+
+  it("lists each verb's inputs as the JSON it takes, from the file on its branch, and each verb dropped", async () => {
+    const api = deployApi(DESCRIBED);
+
+    const text = await listed(api, pushedGit(), [PRODUCTION, STAGING], [
+      { verb: "deploy_old", why: "old.yml: no workflow_dispatch trigger on main" },
+    ]);
+
+    assert.deepEqual(readRefs(api), [MAIN, PUSHED]);
+    const [production, staging, dropped] = text.split("\n\n");
+    assert.equal(
+      production,
+      [
+        "deploy_production: .github/workflows/deploy.yml on main (default branch), at 444444444444",
+        '  tier (choice): one of "small", "large"; default "small" · Which size of box',
+        `  dry_run (boolean, must pass) · ${"x".repeat(200)}…`,
+        '  note (string): default ""',
+        '  flag (string): default "true"',
+        "  count (number): default 3",
+        "  target (environment): never set by this tong",
+      ].join("\n"),
+    );
+    assert.match(staging, /^deploy_staging: \.github\/workflows\/deploy\.yml on feature \(checked out\), at 111111111111\n {2}tier /);
+    assert.equal(dropped, "deploy_old: dropped at startup\n  old.yml: no workflow_dispatch trigger on main.");
+  });
+
+  it("still lists a verb that would be refused now, from the branch GitHub has or else the default", async () => {
+    const moved = pushedGit();
+    moved.head = "2".repeat(40);
+    const one = "on:\n  workflow_dispatch:\n    inputs:\n      a: {}\n";
+
+    assert.equal(
+      await listed(deployApi(one), moved, [STAGING]),
+      "deploy_staging: .github/workflows/deploy.yml on feature (checked out), at 111111111111\n" +
+        "  cannot dispatch now: HEAD is at 222222222222, but GitHub's feature is at 111111111111; push or pull first.\n" +
+        "  a (string)",
+    );
+    for (const [git, why] of [
+      [new FakeGit({ branch: null }), "HEAD is detached; check out the branch to dispatch on."],
+      [pushedGit("main"), "main is the default branch; this verb runs only on other branches."],
+      [pushedGit("unpushed"), "GitHub has no branch unpushed; push it first."],
+    ] as const) {
+      const api = deployApi(one);
+      assert.equal(
+        await listed(api, git, [STAGING]),
+        "deploy_staging: .github/workflows/deploy.yml on the checked-out branch (inputs as on main), at 444444444444\n" +
+          `  cannot dispatch now: ${why}\n  a (string)`,
+      );
+      assert.deepEqual(readRefs(api), [MAIN]);
+    }
+  });
+
+  it("cleans an agent-chosen branch name, and clips a long error", async () => {
+    const api = deployApi("on: workflow_dispatch\n", [], { ...TIPS, "refs/heads/a\u202eb": PUSHED });
+    assert.match(await listed(api, pushedGit("a\u202eb"), [STAGING]), /^deploy_staging: \S+ on ab \(checked out\), at /);
+
+    const long = new FakeGitHubApi({ ...REPO_ROUTE, "POST /graphql": { status: 502, text: "e".repeat(2000) } });
+    const lines = (await listed(long, pushedGit(), [PRODUCTION])).split("\n").slice(1);
+    assert.equal(lines.length, 2);
+    for (const line of lines) {
+      assert.equal(line.length, "  cannot dispatch now: ".length + 501);
+      assert.match(line, /e…$/);
+    }
+  });
+
+  it("gives every reason a fallback read cannot dispatch", async () => {
+    assert.equal(
+      await listed(deployApi("on: push\n"), new FakeGit({ branch: null }), [STAGING]),
+      "deploy_staging: .github/workflows/deploy.yml on the checked-out branch (inputs as on main), at 444444444444\n" +
+        "  cannot dispatch now: HEAD is detached; check out the branch to dispatch on.\n" +
+        "  cannot dispatch now: deploy.yml on main has no workflow_dispatch trigger.",
+    );
+  });
+
+  it("says when the file on the branch has no trigger, or requires an environment input", async () => {
+    assert.equal(
+      await listed(deployApi("on: push\n"), pushedGit(), [PRODUCTION]),
+      "deploy_production: .github/workflows/deploy.yml on main (default branch), at 444444444444\n" +
+        "  cannot dispatch now: deploy.yml on main has no workflow_dispatch trigger.",
+    );
+    assert.equal(
+      await listed(deployApi("on:\n  workflow_dispatch:\n    inputs:\n      t: { type: environment, required: true }\n"), pushedGit(), [STAGING]),
+      "deploy_staging: .github/workflows/deploy.yml on feature (checked out), at 111111111111\n" +
+        "  cannot dispatch now: the workflow requires environment input t, which this tong never sets.\n" +
+        "  t (environment, required): never set by this tong",
+    );
+  });
+
+  it("asks GitHub once per branch and per file at one tip, and lists the rest when one fails", async () => {
+    const other: DispatchEntry = { verb: "deploy_again", file: "deploy.yml", ref: "default" };
+    const api = deployApi("on: workflow_dispatch\n");
+
+    await listed(api, pushedGit(), [PRODUCTION, other]);
+    assert.deepEqual([askedTips(api), readRefs(api)], [["refs/heads/main"], [MAIN]]);
+
+    const two = new FakeGitHubApi({
+      ...LISTED,
+      ...branchTipRoute(TIPS),
+      ...workflowFileRoute("deploy.yml", "on:\n  workflow_dispatch:\n    inputs:\n      a: {}\n"),
+      ...workflowFileRoute("lint.yml", "on:\n  workflow_dispatch:\n    inputs:\n      b: {}\n"),
+    });
+    const lint: DispatchEntry = { verb: "lint", file: "lint.yml", ref: "default" };
+    assert.match(await listed(two, pushedGit(), [PRODUCTION, lint]), /^deploy_production: [^\n]*\n {2}a \(string\)\n\nlint: [^\n]*\n {2}b \(string\)$/);
+
+    const failing = new FakeGitHubApi({ ...REPO_ROUTE, "POST /graphql": { status: 502, text: "<html>\n\nBad gateway</html>" } });
+    const text = await listed(failing, pushedGit(), [PRODUCTION, other]);
+    assert.match(
+      text,
+      /^deploy_production: \.github\/workflows\/deploy\.yml\n {2}cannot dispatch now: checking \S+ failed: GitHub returned 502: <html> {2}Bad gateway<\/html>\.\n {2}cannot dispatch now: GitHub returned 502: <html> {2}Bad gateway<\/html>\.$/m,
+    );
+    assert.match(text, /^deploy_again: \.github\/workflows\/deploy\.yml\n {2}cannot dispatch now: /m);
+  });
+
+  it("says when the allowlist no longer lists a verb as at startup, or cannot be checked now", async () => {
+    const one = "on: workflow_dispatch\n";
+    const api = deployApi(one);
+    Object.assign(api.routes, allowlistRoute("deploy_production: { workflow: other.yml, ref: default }\n"));
+    assert.equal(
+      await listed(api, pushedGit(), [PRODUCTION]),
+      "deploy_production: .github/workflows/deploy.yml on main (default branch), at 444444444444\n" +
+        "  cannot dispatch now: .github/swarmforge-dispatch.yml on main no longer lists deploy_production as it did at startup.\n" +
+        "  no inputs",
+    );
+
+    const gone = deployApi(one);
+    Object.assign(gone.routes, {
+      ...allowlistRoute("other: { workflow: other.yml, ref: default }\n"),
+      [`GET ${CONTENTS}`]: { status: 404, json: { message: "Not Found" } },
+    });
+    assert.deepEqual((await listed(gone, pushedGit(), [PRODUCTION])).split("\n").slice(0, 3), [
+      "deploy_production: .github/workflows/deploy.yml",
+      "  cannot dispatch now: .github/swarmforge-dispatch.yml on main no longer lists deploy_production as it did at startup.",
+      "  cannot dispatch now: GitHub cannot see that workflow file in acme/widgets (404). Either it is not on that ref, or the token is no longer scoped to this repository.",
+    ]);
+
+    const down = deployApi(one);
+    Object.assign(down.routes, { [`GET ${ALLOWLIST_PATH}`]: { status: 503, json: { message: "Service Unavailable" } } });
+    assert.match(
+      await listed(down, pushedGit(), [PRODUCTION]),
+      /^ {2}cannot dispatch now: checking \.github\/swarmforge-dispatch\.yml failed: GitHub returned 503: Service Unavailable\.$/m,
+    );
+  });
+
+  it("says why there are no verbs", async () => {
+    const setup = (unusable?: string) =>
+      listWorkflows(contextFor(new FakeGitHubApi(), pushedGit(), { defaultBranch: "main", entries: [], dropped: [], unusable }));
+
+    assert.equal(await setup(), "No dispatch verbs this session: .github/swarmforge-dispatch.yml on main had none at startup.");
+    assert.equal(await setup("GitHub has no branch main to read it from"), "No dispatch verbs this session: GitHub has no branch main to read it from.");
+  });
+
+  it("caps what it shows of an agent-written file", async () => {
+    const options = Array.from({ length: 25 }, (_, i) => `o${i}`);
+    const long = "v".repeat(100);
+    const one = `on:\n  workflow_dispatch:\n    inputs:\n      c: { type: choice, options: [${options.join(", ")}], default: ${long} }\n`;
+
+    const line = (await listed(deployApi(one), pushedGit(), [PRODUCTION])).split("\n")[1];
+    assert.equal(line, `  c (choice): one of ${options.slice(0, 20).map((o) => `"${o}"`).join(", ")}, and 5 more; default "${"v".repeat(79)}…`);
+
+    const unsafe = 'on:\n  workflow_dispatch:\n    inputs:\n      c: { type: choice, options: ["a\\u2028b\\u001b[2J"], default: "x\\u202ey" }\n';
+    assert.equal((await listed(deployApi(unsafe), pushedGit(), [PRODUCTION])).split("\n")[1], '  c (choice): one of "ab\\u001b[2J"; default "xy"');
+
+    const wide = (i: number) => `      i${i}: { type: choice, options: [${Array.from({ length: 20 }, () => "w".repeat(90)).join(", ")}], description: ${"d".repeat(250)} }`;
+    const big = `on:\n  workflow_dispatch:\n    inputs:\n${Array.from({ length: 25 }, (_, i) => wide(i)).join("\n")}\n`;
+    const lint: DispatchEntry = { verb: "lint", file: "lint.yml", ref: "default" };
+    const api = deployApi(big);
+    Object.assign(api.routes, workflowFileRoute("lint.yml", "on: workflow_dispatch\n"));
+    const text = await listed(api, pushedGit(), [PRODUCTION, STAGING, lint], [{ verb: "old", why: "old.yml: gone" }]);
+    assert.ok(text.length < 50_500, String(text.length));
+    assert.equal(text.match(/^ {2}\.\.\.and \d+ more inputs$/gm)?.length, 2);
+    assert.match(text, /\n\nlint: [^\n]*\n {2}no inputs\n\nold: dropped at startup\n {2}old\.yml: gone\.$/);
+
+    const typed = 'on:\n  workflow_dispatch:\n    inputs:\n      n: { type: number, default: "1; default 2" }\n      h: { type: number, default: " 0x10" }\n      f: { type: boolean, default: false }\n      b: { type: boolean, default: "yes" }\n';
+    assert.deepEqual((await listed(deployApi(typed), pushedGit(), [PRODUCTION])).split("\n").slice(1), [
+      '  n (number): default "1; default 2"',
+      '  h (number): default " 0x10"',
+      "  f (boolean): default false",
+      '  b (boolean): default "yes"',
+    ]);
+  });
+});
+
+describe("list_workflows", () => {
+  async function toolNames(context: Context): Promise<string[]> {
+    const [server, client] = InMemoryTransport.createLinkedPair();
+    await buildServer(context).connect(server);
+    const mcp = new Client({ name: "test", version: "0" });
+    await mcp.connect(client);
+    const names = (await mcp.listTools()).tools.map((tool) => tool.name);
+    await mcp.close();
+    return names;
+  }
+
+  it("is listed only when dispatch is on", async () => {
+    assert.ok(!(await toolNames(contextFor())).includes("list_workflows"));
+    assert.ok((await toolNames(contextFor(undefined, undefined, { defaultBranch: "main", entries: [], dropped: [] }))).includes("list_workflows"));
+    assert.ok((await toolNames(contextWith(deployApi()))).includes("list_workflows"));
   });
 });
