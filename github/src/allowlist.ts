@@ -1,31 +1,25 @@
-// The dispatch allowlist: a file read from the default branch, so the review that gates workflows gates it too.
 
 import { isMap, isScalar } from "yaml";
 import { strictYaml } from "./yaml.js";
 
-/** Where the allowlist lives in the repository. */
 export const ALLOWLIST = ".github/swarmforge-dispatch.yml";
 
 export const DISPATCH_REFS = ["default", "current"] as const;
 
-/** One verb that dispatches one workflow on one ref. */
 export type DispatchEntry = { verb: string; file: string; ref: (typeof DISPATCH_REFS)[number] };
 
-/** A listed verb left out at startup, and why. */
 export type Dropped = { verb: string; why: string };
 
 /** Checked again in the GitHub client, since a file name reaches a URL path. */
 export const WORKFLOW_FILE = /^[A-Za-z0-9_.-]+\.ya?ml$/;
 
-/** Each verb is a tool every session lists. */
 export const MAX_VERBS = 20;
 
-/** Room for far more than 20 entries, and small enough to parse whole. */
 export const MAX_ALLOWLIST_BYTES = 16 * 1024;
 
 const VERB_NAME = /^[a-z][a-z0-9_]{0,63}$/;
 
-/** The verbs the file lists, and why each malformed one is dropped. Throws on a file unusable as a whole. */
+/** Drops a malformed entry; throws only on a malformed file. */
 export function parseAllowlist(
   text: string,
   reserved: ReadonlySet<string>,

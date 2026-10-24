@@ -1,7 +1,4 @@
-// The GitHub REST client.
-//
-// Caller values reach a URL only as an `assertId` path segment or a URLSearchParams
-// value; everything else travels as a JSON body. `fetch` is injected for tests.
+// Caller values reach a URL only as an `assertId` path segment or a URLSearchParams value; the rest go in JSON bodies.
 
 import { ALLOWLIST, WORKFLOW_FILE } from "./allowlist.js";
 import type { Origin } from "./origin.js";
@@ -24,27 +21,20 @@ export class NoAnswer extends GitHubError {
 
 export type Fetch = typeof globalThis.fetch;
 
-/**
- * Long enough for any reasonable PR, short enough that nothing enormous is sent.
- * Counted in Unicode code points, as zod 4's `.max()` and JSON Schema's
- * `maxLength` both count them -- so an emoji is one, not two.
- */
+/** In Unicode code points, as zod 4's `.max()` and JSON Schema's `maxLength` count them. */
 export const MAX_TITLE = 256;
 export const MAX_BODY = 65536;
 
-/** The most pull requests one lookup by head branch returns, newest first. */
 export const MAX_FIND_RESULTS = 10;
 
-/** The most workflow runs reported for one commit, newest first. */
 export const MAX_RUNS = 10;
 
-/** GitHub's page size cap; a run with more jobs than this is reported as cut short. */
+/** GitHub's per_page maximum. */
 export const MAX_JOBS = 100;
 
 /** Kept from the end of a job's log, where a failure usually is. */
 export const MAX_LOG_BYTES = 8 * 1024 * 1024;
 
-/** A log bigger than this is refused rather than read to its end. */
 export const MAX_LOG_READ_BYTES = 256 * 1024 * 1024;
 
 const TIMEOUT_MS = 60_000;
@@ -59,20 +49,17 @@ const USER_AGENT = "swarmforge-tong-github";
 
 export type PullRequest = {
   number: number;
-  /** GraphQL's identifier for the same pull request; empty if GitHub omitted it. */
   nodeId: string;
   url: string;
   title: string;
   body: string;
   base: string;
   head: string;
-  /** The head branch's commit; empty if GitHub omitted it. */
   headSha: string;
   draft: boolean;
   state: "open" | "closed";
-  /** A merged pull request is also `closed`, but almost nothing about it can change. */
+  /** A merged pull request also has state `closed`. */
   merged: boolean;
-  /** ISO 8601 timestamps as GitHub sends them; null when unset or omitted. */
   createdAt: string | null;
   closedAt: string | null;
   mergedAt: string | null;
@@ -86,7 +73,6 @@ export type CreatePullRequest = {
   draft?: boolean;
 };
 
-/** Actions' `status` until it completes, then its `conclusion`. */
 export type Progress = { state: string; completed: boolean };
 
 export type WorkflowRun = Progress & {
@@ -95,7 +81,6 @@ export type WorkflowRun = Progress & {
   event: string;
   attempt: number;
   url: string;
-  /** The commit the run is for; empty if GitHub omitted it. */
   headSha: string;
   headBranch: string;
   startedAt: string | null;
@@ -128,7 +113,6 @@ export type MergeMethod = (typeof MERGE_METHODS)[number];
 
 const PR_STATES = ["OPEN", "CLOSED", "MERGED"] as const;
 
-/** What decides whether a pull request may merge, as GitHub reports it. */
 export type MergeState = Pick<PullRequest, "url" | "base" | "headSha" | "draft"> & {
   state: (typeof PR_STATES)[number];
   /** GraphQL's MergeStateStatus. */
@@ -136,7 +120,7 @@ export type MergeState = Pick<PullRequest, "url" | "base" | "headSha" | "draft">
   mergeQueue: boolean;
 };
 
-/** Every field omitted here is one GitHub leaves as it is. `head` is not editable. */
+/** Omitted fields stay unchanged. `head` is not editable. */
 export type UpdatePullRequest = {
   title?: string;
   body?: string;
@@ -196,7 +180,6 @@ export class GitHub {
     return text.length > 0 ? safeJson(text) : undefined;
   }
 
-  /** Also the startup reachability check: it fails loudly on a token that cannot see the repo. */
   async repository(): Promise<{ defaultBranch: string; permissions?: Record<string, boolean> }> {
     const data = (await this.request("GET", `/repos/${this.repoPath}`)) as {
       default_branch?: string;
@@ -227,8 +210,7 @@ export class GitHub {
       }),
       "accepted the pull request",
     );
-    // Only for the fields the caller already knows: GitHub has always reported them,
-    // and a create that answered without them is still a pull request that exists.
+    // GitHub may omit these; the pull request exists either way.
     return { ...pr, base: pr.base || input.base, head: pr.head || input.head };
   }
 
@@ -236,14 +218,7 @@ export class GitHub {
     return parsePullRequest(await this.request("GET", this.pullPath(number)), `returned pull request ${number}`);
   }
 
-  /**
-   * The pull requests of the pinned repository whose head is `branch`, open or not,
-   * newest first.
-   *
-   * The branch goes through URLSearchParams, so `&`, `#`, or `=` cannot add a
-   * parameter or cut the URL short. The owner half of `head` is the pinned owner,
-   * never the caller's, so this only ever matches branches of the repository itself.
-   */
+  /** `head` carries the pinned owner, so fork branches never match. */
   async findPullRequests(branch: string): Promise<{ pullRequests: PullRequest[]; more: boolean }> {
     if (typeof branch !== "string" || branch.length === 0 || branch.length > 255) {
       throw new GitHubError(`'${String(branch).slice(0, 40)}' is not a branch name`, 0);
@@ -265,10 +240,7 @@ export class GitHub {
     };
   }
 
-  /**
-   * The body is built key by key rather than passed through, so a field the caller
-   * did not ask to change cannot appear in the request at all.
-   */
+  /** Built key by key, so only these four fields can reach GitHub. */
   async updatePullRequest(number: number, changes: UpdatePullRequest): Promise<PullRequest> {
     const body: Record<string, unknown> = {};
     if (changes.title !== undefined) body.title = changes.title;
@@ -282,7 +254,6 @@ export class GitHub {
     );
   }
 
-  /** Owner and name are the pinned ones, and every value travels as a GraphQL variable. */
   async mergeState(number: number): Promise<MergeState> {
     const data = (await this.graphql(
       `query($owner: String!, $name: String!, $number: Int!) {
@@ -320,7 +291,7 @@ export class GitHub {
     };
   }
 
-  /** Pinned to `sha`: GitHub refuses with a 409 if the head has moved since. Returns the merge commit. */
+  /** GitHub refuses with a 409 if the head has moved off `sha`. */
   async merge(number: number, method: MergeMethod, sha: string): Promise<string> {
     const data = (await this.request("PUT", `${this.pullPath(number)}/merge`, {
       merge_method: method,
@@ -329,7 +300,7 @@ export class GitHub {
     return data?.sha ?? "";
   }
 
-  /** The Actions runs for `sha`, newest first, each at its latest attempt. */
+  /** Newest first, each at its latest attempt. */
   async workflowRuns(sha: string): Promise<{ runs: WorkflowRun[]; more: boolean }> {
     const query = new URLSearchParams({ head_sha: assertSha(sha), per_page: String(MAX_RUNS) });
     const data = (await this.request("GET", `/repos/${this.repoPath}/actions/runs?${query}`)) as {
@@ -346,7 +317,6 @@ export class GitHub {
     return parseRun(await this.request("GET", `/repos/${this.repoPath}/actions/runs/${assertId(id, "run id")}`));
   }
 
-  /** The commit `refs/heads/<branch>` points at on GitHub, or null; the branch travels only as a GraphQL variable. */
   async branchTip(branch: string): Promise<string | null> {
     const data = (await this.graphql(
       `query($owner: String!, $name: String!, $ref: String!) {
@@ -363,12 +333,10 @@ export class GitHub {
     return oid;
   }
 
-  /** A workflow file's text at `ref`, a branch or commit; `ref` is a query value only. */
   async workflowFile(file: string, ref: string): Promise<string> {
     return this.fileAt(`.github/workflows/${file}`, this.workflowPath(file, "contents"), ref);
   }
 
-  /** The dispatch allowlist's text at `ref`, or null when the repository has none there. */
   async allowlistFile(ref: string): Promise<string | null> {
     try {
       return await this.fileAt(ALLOWLIST, `/repos/${this.repoPath}/contents/${ALLOWLIST}`, ref);
@@ -393,7 +361,6 @@ export class GitHub {
     return Buffer.from(data.content, "base64").toString("utf8");
   }
 
-  /** Runs `file` on `ref`. GitHub creates the run before answering, so a lost answer does not mean no run. */
   async dispatchWorkflow(
     file: string,
     ref: string,
@@ -419,7 +386,7 @@ export class GitHub {
       : `/repos/${this.repoPath}/actions/workflows/${name}`;
   }
 
-  /** The jobs of a run's latest attempt. */
+  /** Latest attempt only. */
   async runJobs(runId: number): Promise<{ jobs: Job[]; more: boolean }> {
     const path = `/repos/${this.repoPath}/actions/runs/${assertId(runId, "run id")}/jobs`;
     const data = (await this.request("GET", `${path}?per_page=${MAX_JOBS}`)) as {
@@ -464,14 +431,7 @@ export class GitHub {
     return readTail(id, download);
   }
 
-  /**
-   * Draft is the one pull request field REST will not edit -- there is no `draft`
-   * key on the PATCH endpoint, only a pair of GraphQL mutations, which address the
-   * pull request by node id rather than by number.
-   *
-   * Returns the status GitHub reports afterwards rather than the one that was asked
-   * for, so a mutation that quietly did nothing cannot be reported as a change.
-   */
+  /** GraphQL, since REST's PATCH has no `draft` key. Returns the draft state GitHub reports afterwards. */
   async setDraft(nodeId: string, draft: boolean): Promise<boolean> {
     if (!nodeId) {
       throw new GitHubError(
@@ -493,10 +453,7 @@ export class GitHub {
     return isDraft;
   }
 
-  /**
-   * A failed GraphQL request is a 200 carrying an `errors` array, so unlike REST it
-   * has to be inspected rather than trusted: `request` sees only a successful call.
-   */
+  /** A failed GraphQL request is a 200 carrying `errors`, so it is inspected here. */
   private async graphql(query: string, variables: Record<string, unknown>): Promise<unknown> {
     const data = (await this.request("POST", "/graphql", { query, variables })) as {
       data?: Record<string, unknown>;
@@ -538,16 +495,13 @@ function parsePullRequest(data: unknown, context: string): PullRequest {
     nodeId: typeof pr.node_id === "string" ? pr.node_id : "",
     url: pr.html_url,
     title: pr.title ?? "",
-    // An empty description comes back as null, not as "".
     body: pr.body ?? "",
     base: pr.base?.ref ?? "",
     head: pr.head?.ref ?? "",
     headSha: pr.head?.sha ?? "",
     draft: pr.draft === true,
     state: pr.state === "closed" ? "closed" : "open",
-    // The list endpoint omits `merged` and reports `merged_at` instead; the single
-    // pull request endpoint sends both. Reading either keeps a merged pull request
-    // from showing up as merely closed in a lookup by branch.
+    // The list endpoint sends only `merged_at`, not `merged`.
     merged: pr.merged === true || (typeof pr.merged_at === "string" && pr.merged_at.length > 0),
     createdAt: timestamp(pr.created_at),
     closedAt: timestamp(pr.closed_at),
@@ -639,7 +593,6 @@ function parseJob(data: unknown): Job {
   };
 }
 
-/** Caller-supplied, and the only kind of caller value that reaches a URL path. */
 function assertId(value: number, what: string): number {
   if (!Number.isSafeInteger(value) || value < 1) {
     throw new GitHubError(`'${String(value).slice(0, 40)}' is not a ${what}`, 0);
@@ -660,7 +613,7 @@ function downloadError(id: number, err: unknown): GitHubError {
   return new GitHubError(`cannot download the log of job ${id}: ${kind}`, 0);
 }
 
-/** The last MAX_LOG_BYTES of the body, reading at most MAX_LOG_READ_BYTES; a partial first line is dropped. */
+/** The last MAX_LOG_BYTES, minus a partial first line. */
 async function readTail(id: number, response: Response): Promise<{ text: string; truncated: boolean }> {
   const chunks: Uint8Array[] = [];
   let kept = 0;
@@ -696,11 +649,7 @@ async function readTail(id: number, response: Response): Promise<{ text: string;
   return { text: midLine ? text.slice(text.indexOf("\n") + 1) : text, truncated: lastDropped !== undefined };
 }
 
-/**
- * Reachability says nothing about write access: a public repository answers
- * `repository()` for any valid token, including one that has never been granted
- * anything on it. Returns null when the token can push, else why not.
- */
+/** Null when the token can push, else why not; a public repository answers `repository()` for any token. */
 export function pushBlocker(origin: Origin, permissions?: Record<string, boolean>): string | null {
   if (permissions?.push === true) return null;
   return (
@@ -719,7 +668,6 @@ function safeJson(text: string): unknown {
   }
 }
 
-/** The fine-grained permission a 403 on `path` most likely lacks, when the path tells. */
 function permissionFor(path: string): string | undefined {
   if (path.endsWith("/dispatches")) return "Actions: read and write";
   if (path.includes("/actions/")) return "Actions: read";
@@ -727,8 +675,7 @@ function permissionFor(path: string): string | undefined {
   if (path.endsWith("/merge")) return "Contents: read and write";
 }
 
-/** What a 404 on each numbered path most likely means. */
-const ADDRESSED: ReadonlyArray<[RegExp, string, string]> = [
+const NOT_FOUND_CAUSES: ReadonlyArray<[RegExp, string, string]> = [
   [/\/pulls\/\d+(\/merge)?$/, "pull request", "the number names no pull request"],
   [/\/actions\/runs\/\d+(\/jobs)?$/, "workflow run", "the id names no run"],
   [/\/actions\/jobs\/\d+$/, "job", "the id names no job"],
@@ -737,10 +684,7 @@ const ADDRESSED: ReadonlyArray<[RegExp, string, string]> = [
   [/\/actions\/workflows\/[^/]+\/dispatches$/, "workflow", "no workflow on the default branch has that file name"],
 ];
 
-/**
- * A token not scoped to this repository and a repository that does not exist both
- * come back 404, so say what the operator most likely needs to change.
- */
+/** An unscoped token and a missing repository both 404, so say what the operator most likely needs to change. */
 function describeFailure(status: number, parsed: unknown, repoPath: string, path: string): string {
   const payload = parsed as { message?: string; errors?: Array<{ message?: string; field?: string }> } | undefined;
   const detail = [payload?.message, ...(payload?.errors ?? []).map((e) => e.message ?? e.field)]
@@ -758,8 +702,8 @@ function describeFailure(status: number, parsed: unknown, repoPath: string, path
       );
     }
     case 404: {
-      // Startup proved the repository is visible, so blame the number.
-      const addressed = ADDRESSED.find(([pattern]) => pattern.test(path.split("?")[0]));
+      // Startup proved the repository is visible, so blame what the path names.
+      const addressed = NOT_FOUND_CAUSES.find(([pattern]) => pattern.test(path.split("?")[0]));
       if (addressed) {
         const [, noun, cause] = addressed;
         return (

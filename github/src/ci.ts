@@ -1,23 +1,17 @@
-// The CI verbs: the GitHub Actions runs for a commit or one run, a job's steps, and its log.
 
 import type { Job, JobStep, Progress, WorkflowRun } from "./github.js";
 import type { Context } from "./server.js";
 
-/** The most log lines one ci_log call returns. */
 export const MAX_LOG_LINES = 1000;
 export const DEFAULT_LOG_LINES = 200;
 
-/** What one ci_log call returns at most, whatever `limit` says. */
 export const MAX_LOG_OUTPUT_CHARS = 50_000;
 const MAX_LINE_CHARS = 1000;
 
-/** Conclusions that did not fail. */
 const PASSED = new Set(["success", "skipped", "neutral"]);
 
-/** Skipped steps named on a job's line before the rest are only counted. */
 const MAX_SKIPPED_SHOWN = 3;
 
-/** Unfinished run states whose name alone does not say what holds them. */
 const HELD = new Map([
   ["waiting", "waiting on environment protection rules, such as a required review"],
   ["pending", "pending, as when a concurrency group holds it"],
@@ -45,7 +39,6 @@ function failed(item: Progress): boolean {
   return item.completed && !PASSED.has(item.state);
 }
 
-/** `2m50s`, or null when either end is unknown. */
 function duration(from: string | null, to: string | null): string | null {
   const ms = Date.parse(to ?? "") - Date.parse(from ?? "");
   if (!Number.isFinite(ms) || ms < 0) return null;
@@ -74,7 +67,6 @@ export type CiStatusInput = { sha?: string; pr?: number; run?: number };
 
 type Target = { sha: string; label: string; note?: string };
 
-/** By default, the checked-out branch as origin has it. */
 async function resolveTarget(context: Context, input: CiStatusInput): Promise<Target> {
   if (input.sha !== undefined) return { sha: input.sha, label: input.sha.slice(0, 12) };
   if (input.pr !== undefined) {
@@ -115,7 +107,6 @@ function renderJob(job: Job): string {
   );
 }
 
-/** A run's state, plus what it hides: what holds it, skipped jobs, or a cancellation before any step ran. */
 function runState(run: WorkflowRun, { jobs, more }: { jobs: Job[]; more: boolean }): string {
   if (!run.completed) return HELD.get(run.state) ?? run.state;
   // Jobs past the first page are unseen, so claim nothing about all of them.
@@ -202,7 +193,6 @@ type LogLine = { text: string; time: number };
 
 const STAMP = /^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z) /;
 
-/** A line with no timestamp of its own takes the one before it. */
 export function parseLog(text: string): LogLine[] {
   const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/);
   if (lines[lines.length - 1] === "") lines.pop();
@@ -236,7 +226,6 @@ export async function ciLog(context: Context, input: CiLogInput): Promise<string
   const job = await context.github.job(input.job_id);
   const limit = input.limit ?? DEFAULT_LOG_LINES;
 
-  // A failed job's log opens at the step that failed, unless the caller is paging.
   const step =
     input.step !== undefined
       ? job.steps.find((s) => s.number === input.step)
@@ -260,7 +249,6 @@ export async function ciLog(context: Context, input: CiLogInput): Promise<string
     throw new Error(`start=${input.start} is outside ${scope}.`);
   }
 
-  // From `start` forwards, else the last `limit` lines; either way within the budget.
   const forward = input.start !== undefined;
   let first = forward ? input.start! - 1 : Math.max(rangeStart, rangeEnd - limit);
   let end = forward ? Math.min(rangeEnd, first + limit) : rangeEnd;

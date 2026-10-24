@@ -1,11 +1,3 @@
-// Process entrypoint.
-//
-// Startup is fail-closed: a missing token, an origin that is not a GitHub
-// repository, or a token that cannot see that repository all stop the process here
-// rather than leaving a tong that accepts calls and fails every one of them.
-// No origin, or no repository, serves no verbs instead. A bad dispatch allowlist
-// drops only dispatch verbs.
-
 import { ALLOWLIST } from "./allowlist.js";
 import { booleanFromEnv } from "./config.js";
 import { loadDispatch } from "./dispatch.js";
@@ -22,8 +14,7 @@ const askpass = process.env.GITHUB_TONG_ASKPASS ?? "/app/askpass.sh";
 
 const token = process.env.GITHUB_TOKEN;
 
-// Child processes inherit this process's environment, so drop the token from it as
-// soon as it is read. Only the push gets it back, through repo.ts.
+// Children inherit the environment; only push and fetch get the token back.
 delete process.env.GITHUB_TOKEN;
 
 function die(message: string): never {
@@ -38,8 +29,6 @@ if (!token) {
   );
 }
 
-// Parsed before anything else happens, so a misspelled value is a startup failure
-// rather than a gate that turns out to have been off after a push has gone out.
 const requireSignedCommits = (() => {
   try {
     return booleanFromEnv(
@@ -61,7 +50,6 @@ const dispatchOn = (() => {
 
 const repo = new Repo(realRun, workspace, askpass, requireSignedCommits);
 
-/** The verified repository, or why there is none. */
 async function serving(token: string): Promise<Context | Idle> {
   let url: string | null;
   try {
@@ -81,10 +69,6 @@ async function serving(token: string): Promise<Context | Idle> {
 
   const github = new GitHub(fetch, origin, token);
 
-  // Catches the configuration mistakes that are otherwise invisible until the first
-  // verb call. Reachability is not enough on its own: a public repository answers
-  // this for any valid token, including one with no write access to it, so the
-  // reported permissions are what actually gets checked.
   let defaultBranch: string;
   try {
     let permissions: Record<string, boolean> | undefined;
@@ -93,9 +77,7 @@ async function serving(token: string): Promise<Context | Idle> {
     if (blocker) die(blocker);
     console.log(`github: ${origin.owner}/${origin.repo} writable, default branch ${defaultBranch}`);
   } catch (err) {
-    // Including the network case. Warning and starting anyway produces a tong that
-    // looks healthy and fails every verb with an error from deep inside git, which
-    // is a worse outcome than not starting.
+    // Network errors too: a tong that looks healthy and fails every verb is worse than none.
     die((err as Error).message);
   }
 
@@ -105,7 +87,6 @@ async function serving(token: string): Promise<Context | Idle> {
 
   let dispatch: Context["dispatch"];
   if (dispatchOn) {
-    // The verbs that would land a fix stay up whatever the allowlist holds.
     const { entries, dropped, unusable } = await loadDispatch(github, defaultBranch, RESERVED_VERBS);
     for (const entry of entries) {
       const on = entry.ref === "default" ? defaultBranch : "the checked-out branch";
