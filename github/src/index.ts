@@ -3,10 +3,12 @@
 // Startup is fail-closed: a missing token, an origin that is not a GitHub
 // repository, or a token that cannot see that repository all stop the process here
 // rather than leaving a tong that accepts calls and fails every one of them.
-// No origin, or no repository, serves no verbs instead.
+// No origin, or no repository, serves no verbs instead. A bad dispatch allowlist
+// drops only dispatch verbs.
 
-import { booleanFromEnv, dispatchFromEnv } from "./config.js";
-import { usableEntries } from "./dispatch.js";
+import { ALLOWLIST } from "./allowlist.js";
+import { booleanFromEnv } from "./config.js";
+import { loadDispatch } from "./dispatch.js";
 import { realRun } from "./exec.js";
 import { GitHub, pushBlocker } from "./github.js";
 import { type Origin, parseOrigin, remoteUrl } from "./origin.js";
@@ -49,9 +51,9 @@ const requireSignedCommits = (() => {
   }
 })();
 
-const dispatchEntries = (() => {
+const dispatchOn = (() => {
   try {
-    return dispatchFromEnv("GITHUB_TONG_DISPATCH", process.env.GITHUB_TONG_DISPATCH, RESERVED_VERBS);
+    return booleanFromEnv("GITHUB_TONG_DISPATCH", process.env.GITHUB_TONG_DISPATCH);
   } catch (err) {
     die((err as Error).message);
   }
@@ -101,15 +103,21 @@ async function serving(token: string): Promise<Context | Idle> {
     console.log("github: every commit a push would add to the repository must carry a signature");
   }
 
-  // A bad workflow drops only its verb, so the verbs that would land a fix stay up.
-  const { entries, dropped } = await usableEntries(github, defaultBranch, dispatchEntries);
-  for (const entry of entries) {
-    const on = entry.ref === "default" ? defaultBranch : "the checked-out branch";
-    console.log(`github: ${entry.verb} dispatches ${entry.file} on ${on}`);
+  let dispatch: Context["dispatch"];
+  if (dispatchOn) {
+    // The verbs that would land a fix stay up whatever the allowlist holds.
+    const { entries, dropped, unusable } = await loadDispatch(github, defaultBranch, RESERVED_VERBS);
+    for (const entry of entries) {
+      const on = entry.ref === "default" ? defaultBranch : "the checked-out branch";
+      console.log(`github: ${entry.verb} dispatches ${entry.file} on ${on}`);
+    }
+    for (const { verb, why } of dropped) console.error(`github: dropping verb ${verb}: ${why}`);
+    if (unusable) console.error(`github: no dispatch verbs: ${unusable}`);
+    else if (!entries.length && !dropped.length) console.log(`github: no dispatch verbs from ${ALLOWLIST} on ${defaultBranch}`);
+    dispatch = { defaultBranch, entries, dropped, unusable };
   }
-  for (const { verb, why } of dropped) console.error(`github: dropping verb ${verb}: ${why}`);
 
-  return { repo, github, origin, remoteUrl: remoteUrl(origin), token, dispatch: { defaultBranch, entries, dropped } };
+  return { repo, github, origin, remoteUrl: remoteUrl(origin), token, dispatch };
 }
 
 const context = await serving(token);

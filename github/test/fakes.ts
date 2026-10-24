@@ -501,15 +501,19 @@ export function contextFor(api = new FakeGitHubApi(), git = new FakeGit(), dispa
 }
 
 /** A workflow file as the Contents API sends it, at any ref. */
-export function workflowFileRoute(file: string, yaml: string) {
-  const content = Buffer.from(yaml, "utf8").toString("base64");
+function contentsRoute(path: string, text: string) {
+  const content = Buffer.from(text, "utf8").toString("base64");
   return {
-    [`GET /repos/acme/widgets/contents/.github/workflows/${file}`]: {
+    [`GET /repos/acme/widgets/contents/${path}`]: {
       status: 200,
-      json: { type: "file", encoding: "base64", size: yaml.length, content },
+      json: { type: "file", encoding: "base64", size: text.length, content },
     },
   };
 }
+
+export const workflowFileRoute = (file: string, yaml: string) => contentsRoute(`.github/workflows/${file}`, yaml);
+
+export const allowlistRoute = (yaml: string) => contentsRoute(".github/swarmforge-dispatch.yml", yaml);
 
 export function dispatchRoute(file: string, runId = 555) {
   return {

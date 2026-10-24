@@ -12,22 +12,22 @@
 # The secret reference below is a PLACEHOLDER. `REPLACE-ME` is not a real vault
 # path and will fail to resolve until you edit it. `op` is whatever provider name
 # you declared in ~/.swarmforge/secret-providers.yaml; use yours.
-description: Fetches and pushes branches, manages pull requests, reads Actions CI, and dispatches configured workflows for the workspace's repository, with a token the agent never holds.
+description: Fetches and pushes branches, manages pull requests, reads Actions CI, and dispatches allowlisted workflows for the workspace's repository, with a token the agent never holds.
 lifecycle: session
 image: swarmforge-tong-github:latest
 env:
-  # A fine-grained personal access token scoped to just this repository, with
-  # Contents: read and write, Pull requests: read and write, and Actions: read
-  # (read and write with GITHUB_TONG_DISPATCH).
+  # A fine-grained personal access token scoped to the repositories this tong
+  # serves, with Contents: read and write, Pull requests: read and write, and
+  # Actions: read (read and write with GITHUB_TONG_DISPATCH).
   GITHUB_TOKEN: ${secret:op:op://REPLACE-ME/github-tong/token}
   # "true" refuses any push that would add a commit carrying no signature, which
   # pairs with the git-signing tong: it signs exactly the commits this checks.
   # Only "true" and "false" are accepted; anything else stops the tong at startup.
   GITHUB_TONG_REQUIRE_SIGNED_COMMITS: "false"
-  # Optional: one verb per comma-separated <verb>=<workflow file>@<default|current>,
-  # e.g. "deploy_staging=deploy-staging.yml@current". A malformed entry stops the
-  # tong at startup.
-  # GITHUB_TONG_DISPATCH: ""
+  # "true" serves the dispatch verbs listed in each repository's
+  # .github/swarmforge-dispatch.yml on its default branch. Takes "true" or
+  # "false", as above.
+  GITHUB_TONG_DISPATCH: "false"
 command: ["/app/entrypoint.sh"]
 interface:
   kind: mcp

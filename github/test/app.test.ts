@@ -39,6 +39,7 @@ import {
   prRoute,
   runsRoute,
   branchTipRoute,
+  allowlistRoute,
   dispatchRoute,
   workflowFileRoute,
   type FetchCall,
@@ -181,6 +182,9 @@ beforeEach(() => {
     ...listPrsRoute([OPEN_PR, { ...OPEN_PR, number: 3, state: "closed", merged: true }]),
     ...workflowFileRoute("deploy.yml", DEPLOY_YAML),
     ...dispatchRoute("deploy.yml"),
+    ...allowlistRoute(
+      "deploy_production: { workflow: deploy.yml, ref: default }\ndeploy_staging: { workflow: deploy.yml, ref: current }\n",
+    ),
   });
   requests = [];
 });
@@ -206,7 +210,7 @@ describe("protocol eras", () => {
       assert.equal(client.getNegotiatedProtocolVersion(), "2026-07-28");
       assert.equal(client.getServerVersion()?.name, "github");
       assert.match(client.getInstructions() ?? "", /The GitHub token lives only in this tong/);
-      assert.match(client.getInstructions() ?? "", /^Each of deploy_production, deploy_staging dispatches one configured/m);
+      assert.match(client.getInstructions() ?? "", /^Each of deploy_production, deploy_staging dispatches one allowlisted/m);
       assert.match(client.getInstructions() ?? "", /^Dispatch verb deploy_old was dropped at startup: old\.yml: no workflow_dispatch trigger on main\.$/m);
       // The tool set never changes, so nothing invites a client to hold a listen stream open.
       assert.equal(client.getServerCapabilities()?.tools?.listChanged, false);
