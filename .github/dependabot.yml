@@ -1,4 +1,4 @@
-# One `docker` entry per tong, scoped to its directory, so a lifted-out tong takes its entry along.
+# One `docker` and one `npm` entry per tong, scoped to its directory, so a lifted-out tong takes its entry along.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -20,3 +20,22 @@ updates:
     directory: /git-signing
     schedule:
       interval: weekly
+
+  # Majors stay out of the group: they can change an API the tong uses.
+  - package-ecosystem: npm
+    directory: /github
+    schedule:
+      interval: weekly
+    groups:
+      github-npm:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: npm
+    directory: /git-signing
+    schedule:
+      interval: weekly
+    groups:
+      git-signing-npm:
+        patterns: ["*"]
+        update-types: [minor, patch]
