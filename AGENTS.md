@@ -199,7 +199,8 @@ running anywhere else but guards nothing — a branch can edit it away.
 
 Every `uses:` is pinned to a full commit SHA with its release in a trailing
 comment, and every `FROM` to a digest. `.github/dependabot.yml` proposes the
-bumps; give a new tong its own `docker` entry there, scoped to its directory.
+bumps; give a new tong its own `docker` entry there, plus one for its package
+manager (`npm` for the default stack), each scoped to its directory.
 
 ---
 
