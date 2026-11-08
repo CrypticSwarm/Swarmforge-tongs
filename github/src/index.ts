@@ -104,7 +104,8 @@ async function serving(token: string): Promise<Context | Idle> {
 const context = await serving(token);
 const serves = "idle" in context ? `no verbs: ${context.idle}` : `${context.origin.owner}/${context.origin.repo}`;
 
-const httpServer = createApp(context).listen(port, () => {
+const httpServer = createApp(context).listen(port, (err?: Error) => {
+  if (err) die(`cannot listen on :${port}: ${err.message}`);
   console.log(`github listening on :${port} (${serves}, workspace ${workspace})`);
 });
 
