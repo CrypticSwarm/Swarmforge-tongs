@@ -41,7 +41,11 @@ const key = await (async () => {
   }
 })();
 
-const httpServer = createApp({ repo, run: realRun, key, passphrase }).listen(port, () => {
+const httpServer = createApp({ repo, run: realRun, key, passphrase }).listen(port, (err?: Error) => {
+  if (err) {
+    console.error(`git-signing: cannot listen on :${port}: ${err.message}`);
+    process.exit(1);
+  }
   console.log(
     `git-signing listening on :${port} (key ${key.fingerprint}, workspace ${workspace}, ` +
       `${passphrase === undefined ? "no passphrase" : "passphrase supplied"})`,
