@@ -1,6 +1,6 @@
 // The only module that touches the asana SDK.
 
-import { ApiClient, ProjectsApi, SectionsApi, TasksApi, UsersApi, WorkspacesApi } from "asana";
+import { ApiClient, ProjectsApi, SectionsApi, TasksApi, TypeaheadApi, UsersApi, WorkspacesApi } from "asana";
 
 export const ASANA_API = "https://app.asana.com/api/1.0";
 
@@ -66,6 +66,8 @@ export type Project = ProjectSummary & {
   customFields: CustomField[];
 };
 
+export type WorkspaceUser = User & { workspaceGids: string[] };
+
 export type Page<Item> = { items: Item[]; cursor?: string };
 
 type Resource = Record<string, unknown> & { gid: string };
@@ -101,6 +103,8 @@ const PROJECT_FIELDS = [
   "custom_field_settings.custom_field.name,custom_field_settings.custom_field.resource_subtype",
   "custom_field_settings.custom_field.enum_options.name,custom_field_settings.custom_field.enum_options.enabled",
 ].join(",");
+
+const USER_FIELDS = "name,email,workspaces";
 
 const MAX_NOTES = 20_000;
 
@@ -232,10 +236,20 @@ function project(data: Resource): Project {
   };
 }
 
+function workspaceUser(data: Resource): WorkspaceUser {
+  return {
+    gid: data.gid,
+    name: text(data.name) ?? "",
+    email: text(data.email),
+    workspaceGids: compacts(data.workspaces).map((workspace) => workspace.gid),
+  };
+}
+
 export class Asana {
   private readonly projects: ProjectsApi;
   private readonly sections: SectionsApi;
   private readonly tasks: TasksApi;
+  private readonly typeahead: TypeaheadApi;
   private readonly users: UsersApi;
   private readonly workspaces: WorkspacesApi;
 
@@ -251,6 +265,7 @@ export class Asana {
     this.projects = new ProjectsApi(client);
     this.sections = new SectionsApi(client);
     this.tasks = new TasksApi(client);
+    this.typeahead = new TypeaheadApi(client);
     this.users = new UsersApi(client);
     this.workspaces = new WorkspacesApi(client);
   }
@@ -384,6 +399,36 @@ export class Asana {
       this.sections.getSectionsForProject(projectGid, { opt_fields: "name", limit: 100 }),
     );
     return { items: compacts(page.items), cursor: page.cursor };
+  }
+
+  async findProjects(workspaceGid: string, query: string, count: number): Promise<ProjectSummary[]> {
+    const page = await this.callList("finding projects", () =>
+      this.typeahead.typeaheadForWorkspace(workspaceGid, "project", {
+        query,
+        count,
+        opt_fields: PROJECT_SUMMARY_FIELDS,
+      }),
+    );
+    return page.items.map(projectSummary);
+  }
+
+  async findUsers(workspaceGid: string, query: string, count: number): Promise<WorkspaceUser[]> {
+    const page = await this.callList("finding users", () =>
+      this.typeahead.typeaheadForWorkspace(workspaceGid, "user", { query, count, opt_fields: USER_FIELDS }),
+    );
+    return page.items.map(workspaceUser);
+  }
+
+  async userList(workspaceGid: string, options: { limit: number; cursor?: string }): Promise<Page<WorkspaceUser>> {
+    const page = await this.callList("listing users", () =>
+      this.users.getUsers({
+        workspace: workspaceGid,
+        limit: options.limit,
+        offset: options.cursor,
+        opt_fields: USER_FIELDS,
+      }),
+    );
+    return { items: page.items.map(workspaceUser), cursor: page.cursor };
   }
 }
 

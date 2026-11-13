@@ -7,9 +7,11 @@ import {
   type Compact,
   type CustomField,
   type Project,
+  type ProjectSummary,
   type Task,
   type TaskSummary,
   type Workspace,
+  type WorkspaceUser,
 } from "./asana.js";
 
 export type Context = {
@@ -27,19 +29,29 @@ workspace is fixed at startup; no verb accepts a workspace.
 - get_task reads one task in full; list_tasks lists a project's or a section's tasks,
   or a task's subtasks; search_tasks searches the workspace and needs Asana Premium.
 - get_project reads a project with its sections and custom fields.
+- find_projects finds projects by name; list_users lists the workspace's users, or finds
+  them by name or email.
 - A list ending in a cursor has more; pass it back as 'cursor' for the next page.
-  A full search page says so; narrow the search to see more.`;
+  A full search or lookup page says so; narrow it to see more.`;
 
 const DEFAULT_LIMIT = 50;
 
 const gid = z.string().regex(GID, "must be an Asana gid, a string of digits");
-const limit = z
-  .number()
-  .int()
-  .min(1)
-  .max(100)
+const cursor = z
+  .string()
+  .regex(CURSOR, "must be a cursor from a previous page")
   .optional()
-  .describe(`Max tasks to return, 1-100 (default ${DEFAULT_LIMIT}).`);
+  .describe("The cursor the previous page ended with.");
+
+function limitSchema(items: string) {
+  return z
+    .number()
+    .int()
+    .min(1)
+    .max(100)
+    .optional()
+    .describe(`Max ${items} to return, 1-100 (default ${DEFAULT_LIMIT}).`);
+}
 
 const getTaskInput = z.strictObject({ task_gid: gid.describe("The task's gid.") });
 
@@ -48,12 +60,8 @@ const listTasksInput = z.strictObject({
   section_gid: gid.optional().describe("List this section's tasks."),
   parent_gid: gid.optional().describe("List this task's subtasks."),
   incomplete_only: z.boolean().optional().describe("Leave out completed tasks."),
-  limit,
-  cursor: z
-    .string()
-    .regex(CURSOR, "must be a cursor from a previous page")
-    .optional()
-    .describe("The cursor the previous page ended with."),
+  limit: limitSchema("tasks"),
+  cursor,
 });
 
 const searchTasksInput = z.strictObject({
@@ -65,14 +73,33 @@ const searchTasksInput = z.strictObject({
   completed: z.boolean().optional().describe("Only completed (true) or incomplete (false) tasks."),
   due_on_after: z.iso.date().optional().describe("Only tasks due after this date, YYYY-MM-DD."),
   due_on_before: z.iso.date().optional().describe("Only tasks due before this date, YYYY-MM-DD."),
-  limit,
+  limit: limitSchema("tasks"),
 });
 
 const getProjectInput = z.strictObject({ project_gid: gid.describe("The project's gid.") });
 
+const findProjectsInput = z.strictObject({
+  query: z.string().trim().min(1).max(200).describe("The project's name, or the start of a word in it."),
+  limit: limitSchema("projects"),
+});
+
+const listUsersInput = z.strictObject({
+  query: z
+    .string()
+    .trim()
+    .min(1)
+    .max(200)
+    .optional()
+    .describe("A user's name or email, or the start of a word in it. Leave out to list every user."),
+  limit: limitSchema("users"),
+  cursor,
+});
+
 /** Elements plus members in `arguments`, checked before the schema. Top-level keys only; count nested ones by hand. */
 const MAX_TOOL_INPUT_ELEMENTS = Math.max(
-  ...[getTaskInput, listTasksInput, searchTasksInput, getProjectInput].map((input) => Object.keys(input.shape).length),
+  ...[getTaskInput, listTasksInput, searchTasksInput, getProjectInput, findProjectsInput, listUsersInput].map(
+    (input) => Object.keys(input.shape).length,
+  ),
 );
 
 export async function currentUser(context: Context): Promise<string> {
@@ -96,10 +123,19 @@ function due(task: TaskSummary): string | undefined {
   return task.dueAt ?? task.dueOn;
 }
 
+function notInPinnedWorkspace(context: Context, what: string): Error {
+  return new Error(`${what} is not in workspace ${context.workspace.name} (gid ${context.workspace.gid}).`);
+}
+
 function requirePinnedWorkspace(context: Context, workspaceGid: string | undefined, what: string): void {
-  if (workspaceGid !== context.workspace.gid) {
-    throw new Error(`${what} is not in workspace ${context.workspace.name} (gid ${context.workspace.gid}).`);
-  }
+  if (workspaceGid !== context.workspace.gid) throw notInPinnedWorkspace(context, what);
+}
+
+function renderList(what: string, rows: string[], more: string | undefined, emptyText = "none"): string {
+  const heading = rows.length ? `${what}:` : `${what}: ${more ? "none on this page" : emptyText}`;
+  const lines = [heading, ...rows.map((row) => `- ${row}`)];
+  if (more) lines.push(more);
+  return lines.join("\n");
 }
 
 function renderTaskList(what: string, tasks: TaskSummary[], more: string | undefined): string {
@@ -108,11 +144,9 @@ function renderTaskList(what: string, tasks: TaskSummary[], more: string | undef
     if (task.assignee) details.push(`assignee ${label(task.assignee)}`);
     const dueDate = due(task);
     if (dueDate) details.push(`due ${dueDate}`);
-    return `- ${label(task)}: ${details.join(", ")}`;
+    return `${label(task)}: ${details.join(", ")}`;
   });
-  const lines = [rows.length ? `${what}:` : `${what}: ${more ? "none on this page" : "no tasks"}`, ...rows];
-  if (more) lines.push(more);
-  return lines.join("\n");
+  return renderList(what, rows, more, "no tasks");
 }
 
 function requireTasksInPinnedWorkspace(context: Context, tasks: TaskSummary[], what: string): void {
@@ -223,6 +257,46 @@ export async function getProject(context: Context, input: z.infer<typeof getProj
   return renderProject(project, sections.items, sections.cursor !== undefined);
 }
 
+function renderProjectSummary(project: ProjectSummary): string {
+  const details = [label(project), ...(project.team ? [`team ${label(project.team)}`] : [])];
+  if (project.archived) details.push("archived");
+  return details.join(", ");
+}
+
+export async function findProjects(context: Context, input: z.infer<typeof findProjectsInput>): Promise<string> {
+  const limit = input.limit ?? DEFAULT_LIMIT;
+  const projects = await context.asana.findProjects(context.workspace.gid, input.query, limit);
+  for (const project of projects) requirePinnedWorkspace(context, project.workspaceGid, "a matching project");
+  const more = projects.length >= limit ? "more may match: narrow the query" : undefined;
+  return renderList("matching projects, most recently used first", projects.map(renderProjectSummary), more);
+}
+
+function renderUser(user: WorkspaceUser): string {
+  return user.email ? `${label(user)}, ${user.email}` : label(user);
+}
+
+function requireUsersInPinnedWorkspace(context: Context, users: WorkspaceUser[]): void {
+  if (users.some((user) => !user.workspaceGids.includes(context.workspace.gid))) {
+    throw notInPinnedWorkspace(context, "a returned user");
+  }
+}
+
+export async function listUsers(context: Context, input: z.infer<typeof listUsersInput>): Promise<string> {
+  const limit = input.limit ?? DEFAULT_LIMIT;
+  const workspace = context.workspace;
+  if (input.query === undefined) {
+    const page = await context.asana.userList(workspace.gid, { limit, cursor: input.cursor });
+    requireUsersInPinnedWorkspace(context, page.items);
+    const more = page.cursor && `cursor: ${page.cursor}`;
+    return renderList(`users in workspace ${workspace.name}`, page.items.map(renderUser), more);
+  }
+  if (input.cursor !== undefined) throw new Error("pass 'query' or 'cursor', not both: matches come in one page.");
+  const users = await context.asana.findUsers(workspace.gid, input.query, limit);
+  requireUsersInPinnedWorkspace(context, users);
+  const more = users.length >= limit ? "more may match: narrow the query" : undefined;
+  return renderList("matching users, most worked with first", users.map(renderUser), more);
+}
+
 export function buildServer(context: Context): McpServer {
   const server = new McpServer(
     { name: "asana", version: "0.1.0" },
@@ -307,6 +381,26 @@ export function buildServer(context: Context): McpServer {
       inputSchema: getProjectInput,
     },
     getProject,
+  );
+
+  verb(
+    "find_projects",
+    {
+      description: "Find the workspace's projects by name, most recently used first.",
+      inputSchema: findProjectsInput,
+    },
+    findProjects,
+  );
+
+  verb(
+    "list_users",
+    {
+      description:
+        "List the workspace's users, or find them by name or email. " +
+        "A 'query' returns one page, most worked with first.",
+      inputSchema: listUsersInput,
+    },
+    listUsers,
   );
 
   return server;
