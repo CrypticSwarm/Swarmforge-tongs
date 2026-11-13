@@ -28,15 +28,8 @@ const INSTRUCTIONS = `Works in one Asana workspace on your behalf.
 The Asana token lives only in this tong and is never exposed to the caller. The
 workspace is fixed at startup; no verb accepts a workspace.
 
-- current_user names the token's user and the pinned workspace.
-- get_task reads one task in full; list_tasks lists a project's or a section's tasks,
-  or a task's subtasks; search_tasks searches the workspace and needs Asana Premium.
-- get_project reads a project with its sections and custom fields.
-- create_task, update_task, and delete_task create, change, and trash tasks.
-- find_projects finds projects by name; list_users lists the workspace's users, or finds
-  them by name or email.
-- A list ending in a cursor has more; pass it back as 'cursor' for the next page.
-  A full search or lookup page says so; narrow it to see more.`;
+A list ending in a cursor has more; pass it back as 'cursor' for the next page.
+A full search or lookup page says so; narrow it to see more.`;
 
 const DEFAULT_LIMIT = 50;
 
@@ -117,7 +110,9 @@ const updateTaskInput = z.strictObject({
   start_on: isoDate.nullable().optional().describe("The start date, YYYY-MM-DD; null clears it."),
   resource_subtype: subtype.optional().describe("The task's type."),
   completed: z.boolean().optional().describe("Mark the task complete (true) or incomplete (false)."),
-  approval_status: approvalStatus.optional().describe("An approval task's status. Asana sets 'completed' from it."),
+  approval_status: approvalStatus
+    .optional()
+    .describe("An approval task's status. Send it without 'completed', which Asana sets from it."),
 });
 
 const deleteTaskInput = z.strictObject({ task_gid: gid.describe("The task's gid.") });
@@ -136,7 +131,7 @@ const listUsersInput = z.strictObject({
     .min(1)
     .max(200)
     .optional()
-    .describe("A user's name or email, or the start of a word in it. Leave out to list every user."),
+    .describe("A user's name or email, or the start of a word in it."),
   limit: limitSchema("users"),
   cursor,
 });
@@ -527,8 +522,7 @@ export function buildServer(context: Context): McpServer {
     "list_tasks",
     {
       description:
-        "List the tasks in a project or a section, or a task's subtasks, in their Asana order. " +
-        "Pass exactly one of 'project_gid', 'section_gid', or 'parent_gid'.",
+        "List tasks in their Asana order. Pass exactly one of 'project_gid', 'section_gid', or 'parent_gid'.",
       inputSchema: listTasksInput,
     },
     listTasks,
@@ -550,7 +544,7 @@ export function buildServer(context: Context): McpServer {
     "create_task",
     {
       description:
-        "Create a task in a project (optionally one of its sections), under 'parent_gid', or both. " +
+        "Create a task in 'project_gid', under 'parent_gid', or both. " +
         "At most one of 'notes'/'html_notes' and of 'due_on'/'due_at'.",
       inputSchema: createTaskInput,
     },
@@ -561,9 +555,8 @@ export function buildServer(context: Context): McpServer {
     "update_task",
     {
       description:
-        "Change only the given fields of a task; null clears where allowed. At most one of " +
-        "'notes'/'html_notes' and of 'due_on'/'due_at'; send 'approval_status' without 'completed'. " +
-        "Returns each changed field's new value.",
+        "Change only the given fields of a task and return their new values. " +
+        "At most one of 'notes'/'html_notes' and of 'due_on'/'due_at'.",
       inputSchema: updateTaskInput,
     },
     serially(updateTask),
@@ -602,8 +595,7 @@ export function buildServer(context: Context): McpServer {
     "list_users",
     {
       description:
-        "List the workspace's users, or find them by name or email. " +
-        "A 'query' returns one page, most worked with first.",
+        "List the workspace's users. With 'query', return one page of matches, most worked with first.",
       inputSchema: listUsersInput,
     },
     listUsers,

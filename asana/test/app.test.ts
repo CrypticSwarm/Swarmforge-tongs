@@ -74,11 +74,13 @@ describe("tools/list", () => {
   it("lists every verb with a strict, described schema", async () => {
     const client = await connect();
     assert.equal(client.getServerVersion()?.name, "asana");
-    assert.match(client.getInstructions() ?? "", /no verb accepts a workspace/);
+    const instructions = client.getInstructions() ?? "";
+    assert.match(instructions, /no verb accepts a workspace/);
     assert.equal(client.getServerCapabilities()?.tools?.listChanged, false);
 
     const { tools } = await client.listTools();
     assert.deepEqual(tools.map((tool) => tool.name).sort(), VERBS);
+    for (const name of VERBS) assert.doesNotMatch(instructions, new RegExp(name), `${name} is not in the instructions`);
     for (const tool of tools) {
       assert.ok(tool.description, tool.name);
       assert.equal(tool.inputSchema.additionalProperties, false, `${tool.name} refuses invented parameters`);
