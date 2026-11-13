@@ -39,3 +39,12 @@ updates:
       git-signing-npm:
         patterns: ["*"]
         update-types: [minor, patch]
+
+  - package-ecosystem: npm
+    directory: /asana
+    schedule:
+      interval: weekly
+    groups:
+      asana-npm:
+        patterns: ["*"]
+        update-types: [minor, patch]

@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Never commit token material.
+.env
+.env.*
+*.token
