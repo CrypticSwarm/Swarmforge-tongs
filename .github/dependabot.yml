@@ -21,6 +21,11 @@ updates:
     schedule:
       interval: weekly
 
+  - package-ecosystem: docker
+    directory: /asana
+    schedule:
+      interval: weekly
+
   # Majors stay out of the group: they can change an API the tong uses.
   - package-ecosystem: npm
     directory: /github

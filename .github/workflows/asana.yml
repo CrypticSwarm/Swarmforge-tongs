@@ -27,8 +27,40 @@ jobs:
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
+          # Keep in step with the Dockerfile's node major; Dependabot bumps only the Dockerfile.
           node-version: '26'
           cache: npm
           cache-dependency-path: asana/package-lock.json
 
       - run: make -C asana test
+
+  publish:
+    name: publish to Docker Hub
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    needs: test
+    runs-on: ubuntu-latest
+    # Holds the Docker Hub credentials; its deployment branches are restricted to master.
+    environment: docker-hub
+    env:
+      REPO: crypticswarm/asana-tong
+    steps:
+      # No git push here, so keep the job token out of .git/config.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The arm64 runtime stage is built under emulation on the amd64 runner.
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - run: make -C asana publish REPO="$REPO" TAGS="latest sha-${GITHUB_SHA::12}"
+
+      - name: Record the digest
+        run: |
+          digest=$(docker buildx imagetools inspect "$REPO:sha-${GITHUB_SHA::12}" --format '{{.Manifest.Digest}}')
+          echo "Published \`$REPO@$digest\`" >> "$GITHUB_STEP_SUMMARY"

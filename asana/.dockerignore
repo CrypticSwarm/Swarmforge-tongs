@@ -1,0 +1,6 @@
+# Allowlist, so a local build cannot ship a stray .env or key file.
+*
+!package.json
+!package-lock.json
+!tsconfig.json
+!src

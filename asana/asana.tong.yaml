@@ -1,0 +1,21 @@
+# Example definition; not auto-discovered. To enable it:
+#   1. make image TONG=asana   # or pull crypticswarm/asana-tong by digest (see README)
+#   2. cp asana/asana.tong.yaml ~/.swarmforge/tongs/asana.yaml
+#   3. replace both REPLACE-MEs; op is a provider from ~/.swarmforge/secret-providers.yaml
+description: Works in one Asana workspace with a token the agent never holds.
+lifecycle: session
+image: swarmforge-tong-asana:latest
+env:
+  # Asana personal access token.
+  ASANA_TOKEN: ${secret:op:op://REPLACE-ME/asana-tong/token}
+  # Workspace gid, digits only; not a secret.
+  ASANA_WORKSPACE_ID: "REPLACE-ME"
+# Required with secret env: the image's CMD is not used.
+command: ["node", "/app/dist/src/index.js"]
+interface:
+  kind: mcp
+  transport: http
+  port: 8080
+  name: asana
+readiness:
+  mode: tcp
