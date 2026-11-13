@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after, before, beforeEach, describe, it } from "node:test";
-import { getGoal, type Context } from "../src/server.js";
-import { FakeAsana, USER, WORKSPACE, dataReply, errorReply, pageReply } from "./fakes.js";
+import { getGoal, linkGoal, listGoals, unlinkGoal, type Context } from "../src/server.js";
+import { FakeAsana, USER, WORKSPACE, dataReply, errorReply, pageReply, type Routes } from "./fakes.js";
 
 const GOAL_GID = "2400000000000001";
 const PROJECT_GID = "1400000000000001";
@@ -171,5 +171,129 @@ describe("get_goal", () => {
     }
     assert.deepEqual(fake.requestsTo("GET", PARENTS_PATH), []);
     assert.deepEqual(fake.requestsTo("GET", RELATIONSHIPS_PATH), []);
+  });
+});
+
+describe("list_goals", () => {
+  const SUMMARY_FIELDS = "name,workspace,owner.name,status,time_period.display_name";
+
+  it("lists the pinned workspace's goals with their status, time period, and owner", async () => {
+    const goals = [FULL_GOAL, { gid: "2400000000000002", name: "Bare", workspace: IN_WORKSPACE }];
+    fake.routes = { "GET /goals": pageReply(goals, "next") };
+    assert.equal(
+      await listGoals(context, { workspace_level: true, time_period_gid: "2500000000000001", limit: 5, cursor: "c" }),
+      [
+        "goals in workspace Acme:",
+        "- Grow status: forged (gid 2400000000000001), status green, " +
+          "time period Q4 FY26 status: forged (gid 2500000000000001), owner Ada Lovelace (gid 1200000000000001)",
+        "- Bare (gid 2400000000000002)",
+        "cursor: next",
+      ].join("\n"),
+    );
+    assert.deepEqual(fake.requestsTo("GET", "/goals")[0].query, {
+      workspace: WORKSPACE.gid,
+      is_workspace_level: "true",
+      time_periods: "2500000000000001",
+      limit: "5",
+      offset: "c",
+      opt_fields: SUMMARY_FIELDS,
+    });
+  });
+
+  it("sends team goals' filter as false, and none when left out", async () => {
+    fake.routes = { "GET /goals": pageReply([]) };
+    assert.equal(await listGoals(context, { workspace_level: false }), "goals in workspace Acme: none");
+    await listGoals(context, {});
+    const [teamLevel, unfiltered] = fake.requestsTo("GET", "/goals").map((request) => request.query);
+    assert.equal(teamLevel.is_workspace_level, "false");
+    assert.deepEqual(unfiltered, { workspace: WORKSPACE.gid, limit: "50", opt_fields: SUMMARY_FIELDS });
+  });
+
+  it("pins the team, then lists its goals without naming the workspace, refusing any from elsewhere", async () => {
+    const team = "1800000000000001";
+    const teamRoute = (organization: unknown) => ({ [`GET /teams/${team}`]: dataReply({ gid: team, organization }) });
+    fake.routes = { ...teamRoute(IN_WORKSPACE), "GET /goals": pageReply([]) };
+    assert.equal(await listGoals(context, { team_gid: team }), `goals of team ${team}: none`);
+    assert.deepEqual(fake.requestsTo("GET", `/teams/${team}`)[0].query, { opt_fields: "organization" });
+    assert.deepEqual(fake.requestsTo("GET", "/goals")[0].query, { team, limit: "50", opt_fields: SUMMARY_FIELDS });
+    for (const workspace of [ELSEWHERE, undefined]) {
+      fake.routes = { ...teamRoute(IN_WORKSPACE), "GET /goals": pageReply([{ ...FULL_GOAL, workspace }]) };
+      await assert.rejects(listGoals(context, { team_gid: team }), { message: `a listed goal ${NOT_PINNED}` });
+    }
+    fake.requests.length = 0;
+    for (const organization of [ELSEWHERE, null]) {
+      fake.routes = teamRoute(organization);
+      await assert.rejects(listGoals(context, { team_gid: team }), { message: `team ${team} ${NOT_PINNED}` });
+    }
+    assert.deepEqual(fake.requestsTo("GET", "/goals"), []);
+  });
+
+  it("refuses 'team_gid' with 'workspace_level' before calling Asana", async () => {
+    await assert.rejects(listGoals(context, { team_gid: "1800000000000001", workspace_level: false }), {
+      message: "pass 'team_gid' or 'workspace_level', not both.",
+    });
+    assert.deepEqual(fake.requests, []);
+  });
+});
+
+function goalRoute(workspace: unknown = IN_WORKSPACE): Routes {
+  return { [`GET ${GOAL_PATH}`]: dataReply({ gid: GOAL_GID, workspace }) };
+}
+
+function projectRoute(workspace: unknown = IN_WORKSPACE): Routes {
+  return { [`GET /projects/${PROJECT_GID}`]: dataReply({ gid: PROJECT_GID, workspace }) };
+}
+
+const LINK_PATH = `${GOAL_PATH}/addSupportingRelationship`;
+const UNLINK_PATH = `${GOAL_PATH}/removeSupportingRelationship`;
+const input = { goal_gid: GOAL_GID, project_gid: PROJECT_GID };
+
+for (const [verb, run, path, done] of [
+  ["link_goal", linkGoal, LINK_PATH, `linked project ${PROJECT_GID} to goal ${GOAL_GID}`],
+  ["unlink_goal", unlinkGoal, UNLINK_PATH, `unlinked project ${PROJECT_GID} from goal ${GOAL_GID}`],
+] as const) {
+  describe(verb, () => {
+    it("checks the goal and project are pinned, then writes the project as the supporting resource", async () => {
+      fake.routes = { ...goalRoute(), ...projectRoute(), [`POST ${path}`]: dataReply({ gid: "2600000000000001" }) };
+      assert.equal(await run(context, input), done);
+      assert.deepEqual(
+        fake.requests.map((request) => `${request.method} ${request.path}`),
+        [`GET ${GOAL_PATH}`, `GET /projects/${PROJECT_GID}`, `POST ${path}`],
+      );
+      assert.deepEqual(fake.requests[0].query, { opt_fields: "workspace" });
+      assert.deepEqual(fake.requests[2].body, { data: { supporting_resource: PROJECT_GID } });
+    });
+
+    it("refuses a goal or project outside the workspace without writing", async () => {
+      for (const workspace of [ELSEWHERE, null]) {
+        fake.routes = { ...goalRoute(workspace), ...projectRoute() };
+        await assert.rejects(run(context, input), { message: `goal ${GOAL_GID} ${NOT_PINNED}` });
+      }
+      for (const workspace of [ELSEWHERE, null]) {
+        fake.routes = { ...goalRoute(), ...projectRoute(workspace) };
+        await assert.rejects(run(context, input), { message: `project ${PROJECT_GID} ${NOT_PINNED}` });
+      }
+      assert.ok(fake.requests.every((request) => request.method === "GET"));
+    });
+
+    it("says a 5xx may have landed, and a 4xx did not", async () => {
+      fake.routes = { ...goalRoute(), ...projectRoute(), [`POST ${path}`]: errorReply(503, "busy") };
+      await assert.rejects(run(context, input), /busy\n\nThe write may have gone through; get_goal shows/);
+      fake.routes[`POST ${path}`] = errorReply(400, "supporting_resource: Not linked");
+      await assert.rejects(run(context, input), (err: Error) => /Not linked$/.test(err.message));
+    });
+  });
+}
+
+describe("link_goal weight", () => {
+  it("is sent when given, and Asana's is reported", async () => {
+    const created = relationship("2600000000000001", { gid: PROJECT_GID, name: "Launch" }, { contribution_weight: 0 });
+    fake.routes = { ...goalRoute(), ...projectRoute(), [`POST ${LINK_PATH}`]: dataReply(created) };
+    const result = await linkGoal(context, { ...input, contribution_weight: 0 });
+    assert.equal(result, `linked project ${PROJECT_GID} to goal ${GOAL_GID}, weight 0`);
+    assert.deepEqual(fake.requestsTo("POST", LINK_PATH)[0].query, { opt_fields: RELATIONSHIP_FIELDS });
+    assert.deepEqual(fake.requestsTo("POST", LINK_PATH)[0].body, {
+      data: { supporting_resource: PROJECT_GID, contribution_weight: 0 },
+    });
   });
 });
