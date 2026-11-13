@@ -23,7 +23,10 @@ Reached at `http://asana:8080/mcp` on the session network.
 | `delete_task` | `task_gid` | Moves a task to the token user's Asana trash, restorable for 30 days. |
 | `list_comments` | `task_gid`; `include_system?`, `include_html?`, `limit?`, `cursor?` | Lists a task's comments, oldest first; `include_system` adds activity like assignments. |
 | `add_comment` | `task_gid`; `text` or `html_text` | Comments on a task as the token's user. |
-| `get_project` | `project_gid` | Reads one project with its first 100 sections and its custom fields, enum options included. |
+| `get_project` | `project_gid` | Reads one project with its first 100 sections and portfolios, custom fields with enum options, and the project's own field values. |
+| `update_project` | `project_gid`, `custom_fields` | Sets the project's own custom field values, such as its portfolios' fields. |
+| `add_to_portfolio` | `portfolio_gid`, `project_gid` | Adds a project to a portfolio. |
+| `remove_from_portfolio` | `portfolio_gid`, `project_gid` | Takes a project out of a portfolio. |
 | `find_projects` | `query`; `limit?` | Finds projects by name, most recently used first. |
 | `list_users` | `query?` or `cursor?`; `limit?` | Lists the workspace's users, or finds them by name or email, most worked with first. |
 
@@ -39,8 +42,8 @@ Reached at `http://asana:8080/mcp` on the session network.
   date-time (date). null clears one. At most 20 fields, 20 values each, and 20
   people in all.
 - `create_task` resolves `custom_fields` against `project_gid`'s fields, so it
-  needs `project_gid`; `update_task` against the task's own. Any bad field,
-  option, or person refuses the whole write.
+  needs `project_gid`; `update_task` and `update_project` against the task's or
+  project's own. Any bad field, option, or person refuses the whole write.
 - In `update_task`, null clears `notes`, `assignee`, `due_on`, `due_at`, and
   `start_on`. Send `approval_status` without `completed`; Asana derives it.
 - `move_to` is `{project_gid, section_gid?}`; moving within a project the task
@@ -56,9 +59,9 @@ Reached at `http://asana:8080/mcp` on the session network.
   `cursor` has more; pass it back for the next page. A full search or lookup page
   says so; narrow it to see more.
 - With a `query`, `find_projects` and `list_users` return one page, with no cursor.
-- A task, project, or user outside the pinned workspace is refused, as is any
-  project, section, parent, blocker, or assignee a verb names outside it. Writes
-  check this before sending.
+- A task, project, portfolio, or user outside the pinned workspace is refused,
+  as is any project, section, parent, blocker, or assignee a verb names outside
+  it. Writes check this before sending.
 - An Asana error comes back as an error result with its status and message.
 - `ASANA_WORKSPACE_ID` pins one workspace; no verb accepts one. Startup stops if
   the token or workspace id is missing or malformed, or the token cannot read the

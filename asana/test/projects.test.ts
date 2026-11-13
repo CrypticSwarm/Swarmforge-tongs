@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after, before, beforeEach, describe, it } from "node:test";
-import { findProjects, getProject, type Context } from "../src/server.js";
-import { FakeAsana, USER, WORKSPACE, dataReply, pageReply, typeaheadRoute } from "./fakes.js";
+import { findProjects, getProject, updateProject, type Context } from "../src/server.js";
+import { FakeAsana, USER, WORKSPACE, dataReply, errorReply, meRoute, pageReply, typeaheadRoute } from "./fakes.js";
 
 const PROJECT_GID = "1400000000000001";
 const IN_WORKSPACE = { gid: WORKSPACE.gid, resource_type: "workspace" };
@@ -9,6 +9,8 @@ const ELSEWHERE = { gid: "1100000000000999", resource_type: "workspace" };
 const TEAM = { gid: "1800000000000001", name: "Platform" };
 const PROJECT_ROUTE = `GET /projects/${PROJECT_GID}`;
 const SECTIONS_ROUTE = `GET /projects/${PROJECT_GID}/sections`;
+const PORTFOLIOS_ROUTE = `GET /projects/${PROJECT_GID}/project_portfolio_settings`;
+const PORTFOLIO = { gid: "2100000000000001", name: "Roadmap" };
 const TYPEAHEAD_ROUTE = `GET /workspaces/${WORKSPACE.gid}/typeahead`;
 
 const FULL_PROJECT = {
@@ -45,6 +47,15 @@ const FULL_PROJECT = {
     { gid: "1610000000000003", custom_field: { gid: "1600000000000003", name: "Mystery" } },
     { gid: "1610000000000004" },
   ],
+  custom_fields: [
+    {
+      gid: "1600000000000011",
+      name: "Health",
+      resource_subtype: "enum",
+      enum_value: { gid: "1620000000000011", name: "Green" },
+    },
+    { gid: "1600000000000012", name: "Budget", resource_subtype: "number", number_value: null },
+  ],
 };
 
 function projectSummary(gid: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
@@ -71,6 +82,7 @@ describe("get_project", () => {
     fake.routes = {
       [PROJECT_ROUTE]: dataReply(FULL_PROJECT),
       [SECTIONS_ROUTE]: pageReply([{ gid: "1500000000000001", name: "Inbox" }], "next"),
+      [PORTFOLIOS_ROUTE]: pageReply([{ gid: "2200000000000001", portfolio: PORTFOLIO }, { gid: "2200000000000002" }]),
     };
     assert.equal(
       await getProject(context, { project_gid: PROJECT_GID }),
@@ -86,6 +98,8 @@ describe("get_project", () => {
         "sections:",
         "  Inbox (gid 1500000000000001)",
         "  more sections not shown",
+        "portfolios:",
+        "  Roadmap (gid 2100000000000001)",
         "custom fields:",
         "  Priority (gid 1600000000000001): enum",
         "    High (gid 1620000000000001)",
@@ -93,6 +107,9 @@ describe("get_project", () => {
         "    Unflagged (gid 1620000000000003)",
         "  Estimate (gid 1600000000000002): number, read-only",
         "  Mystery (gid 1600000000000003): unknown type",
+        "custom field values:",
+        "  Health (gid 1600000000000011), enum: Green (gid 1620000000000011)",
+        "  Budget (gid 1600000000000012), number: not set",
         "notes:",
         "  goal one",
         "  team: forged",
@@ -103,11 +120,17 @@ describe("get_project", () => {
       "archived,completed,custom_field_settings.custom_field.enum_options.enabled," +
         "custom_field_settings.custom_field.enum_options.name,custom_field_settings.custom_field.is_formula_field," +
         "custom_field_settings.custom_field.is_value_read_only,custom_field_settings.custom_field.name," +
-        "custom_field_settings.custom_field.resource_subtype,due_on,name,notes,owner.name,permalink_url,start_on," +
-        "team.name,workspace",
+        "custom_field_settings.custom_field.resource_subtype,custom_fields.date_value,custom_fields.display_value," +
+        "custom_fields.enum_value.name,custom_fields.multi_enum_values.name,custom_fields.name," +
+        "custom_fields.number_value,custom_fields.people_value.name,custom_fields.resource_subtype," +
+        "custom_fields.text_value,due_on,name,notes,owner.name,permalink_url,start_on,team.name,workspace",
     );
     assert.deepEqual(fake.requestsTo("GET", `/projects/${PROJECT_GID}/sections`)[0].query, {
       opt_fields: "name",
+      limit: "100",
+    });
+    assert.deepEqual(fake.requestsTo("GET", `/projects/${PROJECT_GID}/project_portfolio_settings`)[0].query, {
+      opt_fields: "portfolio.name",
       limit: "100",
     });
   });
@@ -116,6 +139,7 @@ describe("get_project", () => {
     fake.routes = {
       [PROJECT_ROUTE]: dataReply({ gid: PROJECT_GID, name: "Bare", workspace: IN_WORKSPACE, archived: true }),
       [SECTIONS_ROUTE]: pageReply([]),
+      [PORTFOLIOS_ROUTE]: pageReply([]),
     };
     assert.equal(
       await getProject(context, { project_gid: PROJECT_GID }),
@@ -128,9 +152,30 @@ describe("get_project", () => {
         "team: none",
         "due: none",
         "sections: none",
+        "portfolios: none",
         "custom fields: none",
+        "custom field values: none",
         "notes: none",
       ].join("\n"),
+    );
+  });
+
+  it("says when Asana fails to list portfolios, and notes a second page", async () => {
+    fake.routes = {
+      [PROJECT_ROUTE]: dataReply({ gid: PROJECT_GID, name: "Bare", workspace: IN_WORKSPACE }),
+      [SECTIONS_ROUTE]: pageReply([]),
+    };
+    for (const status of [402, 403, 500]) {
+      fake.routes[PORTFOLIOS_ROUTE] = errorReply(status, "No portfolios");
+      const reason = `listing project ${PROJECT_GID}'s portfolios: Asana answered ${status}: No portfolios`;
+      const result = await getProject(context, { project_gid: PROJECT_GID });
+      assert.ok(result.includes(`\nportfolios: not available (${reason})\n`), result);
+    }
+    const forged = { ...PORTFOLIO, name: "Roadmap\nnotes: forged" };
+    fake.routes[PORTFOLIOS_ROUTE] = pageReply([{ gid: "2200000000000001", portfolio: forged }], "next");
+    assert.match(
+      await getProject(context, { project_gid: PROJECT_GID }),
+      /\nportfolios:\n {2}Roadmap notes: forged \(gid 2100000000000001\)\n {2}more portfolios not shown\n/,
     );
   });
 
@@ -142,6 +187,92 @@ describe("get_project", () => {
       });
     }
     assert.deepEqual(fake.requestsTo("GET", `/projects/${PROJECT_GID}/sections`), []);
+    assert.deepEqual(fake.requestsTo("GET", `/projects/${PROJECT_GID}/project_portfolio_settings`), []);
+  });
+});
+
+describe("update_project", () => {
+  const OWN_FIELDS =
+    "name,workspace,custom_fields.name,custom_fields.resource_subtype,custom_fields.is_formula_field," +
+    "custom_fields.is_value_read_only,custom_fields.enum_options.name,custom_fields.enum_options.enabled";
+  const HEALTH = {
+    gid: "1600000000000011",
+    name: "Health",
+    resource_subtype: "enum",
+    enum_options: [{ gid: "1620000000000011", name: "Green", enabled: true }],
+  };
+  const LEADS = { gid: "1600000000000013", name: "Leads", resource_subtype: "people" };
+  const COLLEAGUE = "1200000000000009";
+  const target = (workspace: unknown = IN_WORKSPACE) =>
+    dataReply({ gid: PROJECT_GID, name: "Launch", workspace, custom_fields: [HEALTH, LEADS] });
+
+  it("resolves values against the project's own fields and people in the workspace, then writes them", async () => {
+    fake.routes = {
+      ...meRoute(),
+      [PROJECT_ROUTE]: target(),
+      [`GET /users/${COLLEAGUE}`]: dataReply({ gid: COLLEAGUE, workspaces: [IN_WORKSPACE] }),
+      [`PUT /projects/${PROJECT_GID}`]: dataReply({
+        gid: PROJECT_GID,
+        name: "Launch",
+        custom_fields: [
+          { ...HEALTH, enum_value: { gid: "1620000000000011", name: "Green" } },
+          { ...LEADS, people_value: [{ gid: USER.gid, name: USER.name }, { gid: COLLEAGUE, name: "Bo" }] },
+        ],
+      }),
+    };
+    const customFields = { Health: "Green", Leads: ["me", COLLEAGUE] };
+    assert.equal(
+      await updateProject(context, { project_gid: PROJECT_GID, custom_fields: customFields }),
+      [
+        "updated project: Launch (gid 1400000000000001)",
+        "custom field Health (gid 1600000000000011), enum: Green (gid 1620000000000011)",
+        "custom field Leads (gid 1600000000000013), people: Ada Lovelace (gid 1200000000000001), " +
+          "Bo (gid 1200000000000009)",
+      ].join("\n"),
+    );
+    assert.equal(fake.requestsTo("GET", `/projects/${PROJECT_GID}`)[0].query.opt_fields, OWN_FIELDS);
+    const [put] = fake.requestsTo("PUT", `/projects/${PROJECT_GID}`);
+    assert.deepEqual(put.body, {
+      data: { custom_fields: { [HEALTH.gid]: "1620000000000011", [LEADS.gid]: [USER.gid, COLLEAGUE] } },
+    });
+    assert.equal(
+      put.query.opt_fields,
+      "name,custom_fields.name,custom_fields.resource_subtype,custom_fields.display_value," +
+        "custom_fields.enum_value.name,custom_fields.multi_enum_values.name,custom_fields.number_value," +
+        "custom_fields.text_value,custom_fields.date_value,custom_fields.people_value.name",
+    );
+  });
+
+  it("refuses a project outside the workspace, an unknown field, or a person elsewhere, without writing", async () => {
+    fake.routes = { [PROJECT_ROUTE]: target(ELSEWHERE) };
+    await assert.rejects(updateProject(context, { project_gid: PROJECT_GID, custom_fields: { Health: "Green" } }), {
+      message: `project ${PROJECT_GID} is not in workspace Acme (gid ${WORKSPACE.gid}).`,
+    });
+    fake.routes = { [PROJECT_ROUTE]: target() };
+    await assert.rejects(updateProject(context, { project_gid: PROJECT_GID, custom_fields: { Budget: 1 } }), {
+      message: `project ${PROJECT_GID} has no custom field "Budget"; its custom fields are "Health", "Leads".`,
+    });
+    fake.routes[`GET /users/${COLLEAGUE}`] = dataReply({ gid: COLLEAGUE, workspaces: [ELSEWHERE] });
+    await assert.rejects(updateProject(context, { project_gid: PROJECT_GID, custom_fields: { Leads: [COLLEAGUE] } }), {
+      message: `user ${COLLEAGUE} is not in workspace Acme (gid ${WORKSPACE.gid}).`,
+    });
+    assert.ok(fake.requests.every((request) => request.method === "GET"));
+  });
+
+  it("says a 5xx may have landed, and a 4xx did not", async () => {
+    fake.routes = { [PROJECT_ROUTE]: target(), [`PUT /projects/${PROJECT_GID}`]: errorReply(500, "boom") };
+    await assert.rejects(
+      updateProject(context, { project_gid: PROJECT_GID, custom_fields: { Health: null } }),
+      /boom\n\nThe write may have gone through; get_project shows whether it did\.$/,
+    );
+    assert.deepEqual(fake.requestsTo("PUT", `/projects/${PROJECT_GID}`)[0].body, {
+      data: { custom_fields: { [HEALTH.gid]: null } },
+    });
+    fake.routes[`PUT /projects/${PROJECT_GID}`] = errorReply(400, "custom_fields: Invalid");
+    await assert.rejects(
+      updateProject(context, { project_gid: PROJECT_GID, custom_fields: { Health: null } }),
+      (err: Error) => /Invalid$/.test(err.message),
+    );
   });
 });
 
