@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { after, before, beforeEach, describe, it } from "node:test";
-import { createTask, type Context } from "../src/server.js";
+import { createTask, deleteTask, updateTask, type Context } from "../src/server.js";
 import { FakeAsana, WORKSPACE, dataReply, errorReply, unreachableClient, type Routes } from "./fakes.js";
 
 const TASK_GID = "1300000000000001";
@@ -11,6 +11,7 @@ const IN_WORKSPACE = { gid: WORKSPACE.gid };
 const ELSEWHERE = { gid: "1100000000000999" };
 const USER_GID = "1200000000000009";
 const NOT_PINNED = `is not in workspace Acme (gid ${WORKSPACE.gid}).`;
+const GET_TASK_HINT = "\n\nThe write may have gone through; get_task shows whether it did.";
 
 const CREATED = {
   gid: TASK_GID,
@@ -192,6 +193,170 @@ describe("create_task", () => {
     const unreachable = { ...context, asana: await unreachableClient() };
     await assert.rejects(createTask(unreachable, { name: "A", project_gid: PROJECT_GID }), (err: Error) => {
       assert.match(err.message, /^reading project .*: cannot reach Asana/);
+      assert.doesNotMatch(err.message, /gone through/);
+      return true;
+    });
+  });
+});
+
+describe("update_task", () => {
+  it("sends only the given fields, null clearing, and reports each new value", async () => {
+    fake.routes = {
+      ...taskRoute(TASK_GID),
+      [`PUT /tasks/${TASK_GID}`]: dataReply({
+        gid: TASK_GID,
+        name: "Renamed",
+        completed: true,
+        resource_subtype: "milestone",
+      }),
+    };
+    const result = await updateTask(context, {
+      task_gid: TASK_GID,
+      name: "Renamed",
+      resource_subtype: "milestone",
+      notes: null,
+      assignee: null,
+      due_on: null,
+      start_on: null,
+      completed: true,
+    });
+    assert.equal(
+      result,
+      [
+        "updated task: Renamed (gid 1300000000000001)",
+        "name: Renamed",
+        "description: cleared",
+        "assignee: none",
+        "due: none",
+        "start: none",
+        "type: milestone",
+        "completed: yes",
+      ].join("\n"),
+    );
+    assert.deepEqual(fake.requestsTo("PUT", `/tasks/${TASK_GID}`)[0].body, {
+      data: {
+        name: "Renamed",
+        notes: "",
+        resource_subtype: "milestone",
+        assignee: null,
+        due_on: null,
+        start_on: null,
+        completed: true,
+      },
+    });
+    assert.deepEqual(fake.requestsTo("GET", `/tasks/${TASK_GID}`)[0].query, { opt_fields: "workspace" });
+  });
+
+  it("reports an approval status with the completion Asana derived", async () => {
+    fake.routes = {
+      ...taskRoute(TASK_GID),
+      ...userRoute(),
+      [`PUT /tasks/${TASK_GID}`]: dataReply({
+        gid: TASK_GID,
+        name: "Review",
+        completed: true,
+        resource_subtype: "approval",
+        approval_status: "rejected",
+        html_notes: "<body>x</body>",
+        notes: "x",
+        assignee: { gid: USER_GID, name: "Grace" },
+      }),
+    };
+    assert.equal(
+      await updateTask(context, {
+        task_gid: TASK_GID,
+        approval_status: "rejected",
+        html_notes: "<body>x</body>",
+        assignee: USER_GID,
+      }),
+      [
+        "updated task: Review (gid 1300000000000001)",
+        "description: replaced",
+        `assignee: Grace (gid ${USER_GID})`,
+        "approval status: rejected, completed: yes",
+      ].join("\n"),
+    );
+  });
+
+  it("refuses an empty update or a conflicting pair before calling Asana", async () => {
+    await assert.rejects(updateTask(context, { task_gid: TASK_GID }), {
+      message: "pass at least one field to change.",
+    });
+    await assert.rejects(updateTask(context, { task_gid: TASK_GID, approval_status: "approved", completed: true }), {
+      message: "pass 'approval_status' or 'completed', not both: Asana sets 'completed' from 'approval_status'.",
+    });
+    await assert.rejects(updateTask(context, { task_gid: TASK_GID, due_on: null, due_at: "2026-11-20T17:00:00Z" }), {
+      message: "pass 'due_on' or 'due_at', not both.",
+    });
+    assert.deepEqual(fake.requests, []);
+  });
+
+  it("refuses a task or an assignee outside the pinned workspace before writing", async () => {
+    for (const workspace of [ELSEWHERE, null]) {
+      fake.routes = { ...taskRoute(TASK_GID, workspace), [`PUT /tasks/${TASK_GID}`]: dataReply({ gid: TASK_GID }) };
+      await assert.rejects(updateTask(context, { task_gid: TASK_GID, completed: true }), {
+        message: `task ${TASK_GID} ${NOT_PINNED}`,
+      });
+    }
+    fake.routes = {
+      ...taskRoute(TASK_GID),
+      ...userRoute([]),
+      [`PUT /tasks/${TASK_GID}`]: dataReply({ gid: TASK_GID }),
+    };
+    await assert.rejects(updateTask(context, { task_gid: TASK_GID, assignee: USER_GID }), {
+      message: `user ${USER_GID} ${NOT_PINNED}`,
+    });
+    assert.deepEqual(writes(), []);
+  });
+
+  it("says an update may have gone through when the answer is a 5xx or unreadable", async () => {
+    for (const [reply, message] of [
+      [errorReply(503, "Service Unavailable"), /^Asana answered 503: Service Unavailable$/],
+      [dataReply({}), /^Asana's answer had no gid$/],
+      [{ text: "<html>ok</html>" }, /^Asana answered 200: /],
+    ] as const) {
+      fake.routes = { ...taskRoute(TASK_GID), [`PUT /tasks/${TASK_GID}`]: reply };
+      await assert.rejects(updateTask(context, { task_gid: TASK_GID, name: "x" }), (err: Error) => {
+        const [first, ...rest] = err.message.split("\n\n");
+        assert.match(first.replace(`updating task ${TASK_GID}: `, ""), message);
+        assert.equal(`\n\n${rest.join("\n\n")}`, GET_TASK_HINT);
+        return true;
+      });
+    }
+  });
+});
+
+describe("delete_task", () => {
+  it("deletes a task in the pinned workspace and says it went to the trash", async () => {
+    fake.routes = { ...taskRoute(TASK_GID), [`DELETE /tasks/${TASK_GID}`]: dataReply({}) };
+    assert.equal(
+      await deleteTask(context, { task_gid: TASK_GID }),
+      `deleted task ${TASK_GID}: it is in the token user's Asana trash, restorable for 30 days.`,
+    );
+    assert.equal(fake.requestsTo("DELETE", `/tasks/${TASK_GID}`).length, 1);
+  });
+
+  it("refuses a task outside the pinned workspace before deleting", async () => {
+    fake.routes = { ...taskRoute(TASK_GID, ELSEWHERE), [`DELETE /tasks/${TASK_GID}`]: dataReply({}) };
+    await assert.rejects(deleteTask(context, { task_gid: TASK_GID }), { message: `task ${TASK_GID} ${NOT_PINNED}` });
+    assert.deepEqual(writes(), []);
+  });
+
+  it("passes a 404 through, and hints only on a 5xx", async () => {
+    fake.routes = { ...taskRoute(TASK_GID), [`DELETE /tasks/${TASK_GID}`]: errorReply(404, "Not Found") };
+    await assert.rejects(deleteTask(context, { task_gid: TASK_GID }), {
+      message: `deleting task ${TASK_GID}: Asana answered 404: Not Found`,
+    });
+    fake.routes[`DELETE /tasks/${TASK_GID}`] = errorReply(500, "Server Error");
+    await assert.rejects(deleteTask(context, { task_gid: TASK_GID }), {
+      message: `deleting task ${TASK_GID}: Asana answered 500: Server Error${GET_TASK_HINT}`,
+    });
+  });
+
+  it("does not hint when the workspace check cannot reach Asana", async () => {
+    const unreachable = { ...context, asana: await unreachableClient() };
+    await assert.rejects(deleteTask(unreachable, { task_gid: TASK_GID }), (err: Error) => {
+      assert.match(err.message, /^reading task .*: cannot reach Asana/);
       assert.doesNotMatch(err.message, /gone through/);
       return true;
     });

@@ -76,15 +76,20 @@ export type TaskScope = { project: string } | { section: string } | { parent: st
 
 export type TaskSubtype = "default_task" | "milestone" | "approval";
 
+export type ApprovalStatus = "pending" | "approved" | "rejected" | "changes_requested";
+
+/** null clears a field. */
 export type TaskFields = {
   name?: string;
   notes?: string;
   html_notes?: string;
-  assignee?: string;
-  due_on?: string;
-  due_at?: string;
-  start_on?: string;
+  assignee?: string | null;
+  due_on?: string | null;
+  due_at?: string | null;
+  start_on?: string | null;
   resource_subtype?: TaskSubtype;
+  completed?: boolean;
+  approval_status?: ApprovalStatus;
 };
 
 export type TaskPlacement = { project?: string; section?: string; parent?: string };
@@ -352,6 +357,18 @@ export class Asana {
       ...(parent === undefined ? {} : { parent }),
     };
     return task(await this.call("creating a task", () => this.tasks.createTask({ data }, { opt_fields: TASK_FIELDS })));
+  }
+
+  async updateTask(gid: string, fields: TaskFields): Promise<Task> {
+    return task(
+      await this.call(`updating task ${gid}`, () =>
+        this.tasks.updateTask({ data: fields }, gid, { opt_fields: TASK_FIELDS }),
+      ),
+    );
+  }
+
+  async deleteTask(gid: string): Promise<void> {
+    await this.send(`deleting task ${gid}`, () => this.tasks.deleteTask(gid));
   }
 
   async workspaceOf(scope: TaskScope): Promise<string | undefined> {
