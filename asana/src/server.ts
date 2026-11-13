@@ -1,14 +1,17 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod";
 import {
+  AsanaError,
   CURSOR,
   GID,
+  MAX_NOTES,
   type Asana,
   type Compact,
   type CustomField,
   type Project,
   type ProjectSummary,
   type Task,
+  type TaskFields,
   type TaskSummary,
   type Workspace,
   type WorkspaceUser,
@@ -29,6 +32,7 @@ workspace is fixed at startup; no verb accepts a workspace.
 - get_task reads one task in full; list_tasks lists a project's or a section's tasks,
   or a task's subtasks; search_tasks searches the workspace and needs Asana Premium.
 - get_project reads a project with its sections and custom fields.
+- create_task creates a task in a project or one of its sections, or as a subtask.
 - find_projects finds projects by name; list_users lists the workspace's users, or finds
   them by name or email.
 - A list ending in a cursor has more; pass it back as 'cursor' for the next page.
@@ -53,6 +57,17 @@ function limitSchema(items: string) {
     .describe(`Max ${items} to return, 1-100 (default ${DEFAULT_LIMIT}).`);
 }
 
+const assignee = z.union([z.literal("me"), gid]);
+const taskName = z.string().trim().min(1).max(1024);
+const notes = z.string().max(MAX_NOTES);
+const htmlNotes = z
+  .string()
+  .max(MAX_NOTES)
+  .regex(/^<body>(?:(?!<\/?body\b)[\s\S])*<\/body>$/i, "must be one <body>...</body> element");
+const isoDate = z.iso.date();
+const isoDateTime = z.iso.datetime({ offset: true });
+const subtype = z.enum(["default_task", "milestone", "approval"]);
+
 const getTaskInput = z.strictObject({ task_gid: gid.describe("The task's gid.") });
 
 const listTasksInput = z.strictObject({
@@ -66,7 +81,7 @@ const listTasksInput = z.strictObject({
 
 const searchTasksInput = z.strictObject({
   text: z.string().min(1).max(200).optional().describe("Words to find in the task's name or description."),
-  assignee: z.union([z.literal("me"), gid]).optional().describe("The assignee's gid, or 'me' for the token's user."),
+  assignee: assignee.optional().describe("The assignee's gid, or 'me' for the token's user."),
   project_gid: gid.optional().describe("Only tasks in this project, or under one of its tasks."),
   section_gid: gid.optional().describe("Only tasks in this section."),
   tag_gid: gid.optional().describe("Only tasks with this tag."),
@@ -74,6 +89,20 @@ const searchTasksInput = z.strictObject({
   due_on_after: z.iso.date().optional().describe("Only tasks due after this date, YYYY-MM-DD."),
   due_on_before: z.iso.date().optional().describe("Only tasks due before this date, YYYY-MM-DD."),
   limit: limitSchema("tasks"),
+});
+
+const createTaskInput = z.strictObject({
+  name: taskName.describe("The task's name."),
+  notes: notes.optional().describe("The description as plain text."),
+  html_notes: htmlNotes.optional().describe("The description as Asana rich-text HTML, one <body>...</body> element."),
+  assignee: assignee.optional().describe("The assignee's gid, or 'me' for the token's user."),
+  due_on: isoDate.optional().describe("The due date, YYYY-MM-DD."),
+  due_at: isoDateTime.optional().describe("The due date and time, ISO 8601."),
+  start_on: isoDate.optional().describe("The start date, YYYY-MM-DD."),
+  resource_subtype: subtype.optional().describe("The task's type; default_task if left out."),
+  project_gid: gid.optional().describe("Add the task to this project."),
+  section_gid: gid.optional().describe("Put it in this section of 'project_gid'."),
+  parent_gid: gid.optional().describe("Make it a subtask of this task."),
 });
 
 const getProjectInput = z.strictObject({ project_gid: gid.describe("The project's gid.") });
@@ -97,9 +126,15 @@ const listUsersInput = z.strictObject({
 
 /** Elements plus members in `arguments`, checked before the schema. Top-level keys only; count nested ones by hand. */
 const MAX_TOOL_INPUT_ELEMENTS = Math.max(
-  ...[getTaskInput, listTasksInput, searchTasksInput, getProjectInput, findProjectsInput, listUsersInput].map(
-    (input) => Object.keys(input.shape).length,
-  ),
+  ...[
+    getTaskInput,
+    listTasksInput,
+    searchTasksInput,
+    createTaskInput,
+    getProjectInput,
+    findProjectsInput,
+    listUsersInput,
+  ].map((input) => Object.keys(input.shape).length),
 );
 
 export async function currentUser(context: Context): Promise<string> {
@@ -153,6 +188,13 @@ function requireTasksInPinnedWorkspace(context: Context, tasks: TaskSummary[], w
   for (const task of tasks) requirePinnedWorkspace(context, task.workspaceGid, `a task in ${what}`);
 }
 
+function renderMemberships(task: Task): string {
+  return indented(
+    "projects",
+    task.memberships.map(({ project, section }) => label(project) + (section ? `, section ${label(section)}` : "")),
+  );
+}
+
 function renderTask(task: Task): string {
   const subtype = task.subtype === "approval" ? `approval, ${task.approvalStatus ?? "no status"}` : task.subtype;
   const start = task.startAt ?? task.startOn;
@@ -166,10 +208,7 @@ function renderTask(task: Task): string {
     `due: ${due(task) ?? "none"}`,
     `parent: ${task.parent ? label(task.parent) : "none"}`,
     `subtasks: ${task.subtaskCount ?? "unknown"}`,
-    indented(
-      "projects",
-      task.memberships.map(({ project, section }) => label(project) + (section ? `, section ${label(section)}` : "")),
-    ),
+    renderMemberships(task),
     indented(
       "custom fields",
       task.customFields.map(({ field, value }) => `${label(field)}: ${value ?? "not set"}`),
@@ -227,6 +266,70 @@ export async function searchTasks(context: Context, input: z.infer<typeof search
   requireTasksInPinnedWorkspace(context, tasks, "the search");
   const more = tasks.length === limit ? "more may match: narrow the search" : undefined;
   return renderTaskList("matching tasks, newest first", tasks, more);
+}
+
+type TaskFieldInput = Omit<z.infer<typeof createTaskInput>, "project_gid" | "section_gid" | "parent_gid">;
+
+function refuseBoth(input: TaskFieldInput, first: keyof TaskFieldInput, second: keyof TaskFieldInput) {
+  if (input[first] !== undefined && input[second] !== undefined) {
+    throw new Error(`pass '${first}' or '${second}', not both.`);
+  }
+}
+
+function taskFields(input: TaskFieldInput): TaskFields {
+  refuseBoth(input, "notes", "html_notes");
+  refuseBoth(input, "due_on", "due_at");
+  const fields: TaskFields = {
+    name: input.name,
+    notes: input.notes,
+    html_notes: input.html_notes,
+    assignee: input.assignee,
+    due_on: input.due_on,
+    due_at: input.due_at,
+    start_on: input.start_on,
+    resource_subtype: input.resource_subtype,
+  };
+  return Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined));
+}
+
+async function requireAssigneeInPinnedWorkspace(context: Context, assignee: string | undefined) {
+  if (assignee === undefined || assignee === "me") return;
+  const workspaceGids = await context.asana.userWorkspaces(assignee);
+  if (!workspaceGids.includes(context.workspace.gid)) throw notInPinnedWorkspace(context, `user ${assignee}`);
+}
+
+/** A 5xx, a lost answer, or an unreadable 2xx does not show the write failed. */
+function rethrowWithLandedHint(err: unknown, howToCheck: string): never {
+  if (err instanceof AsanaError && (err.status === undefined || err.status < 300 || err.status >= 500)) {
+    throw new Error(`${err.message}\n\nThe write may have gone through; ${howToCheck} shows whether it did.`);
+  }
+  throw err;
+}
+
+export async function createTask(context: Context, input: z.infer<typeof createTaskInput>): Promise<string> {
+  const { project_gid: project, section_gid: section, parent_gid: parent } = input;
+  const fields = taskFields(input);
+  if (project === undefined && parent === undefined) throw new Error("pass 'project_gid', 'parent_gid', or both.");
+  if (section !== undefined && project === undefined) throw new Error("pass 'project_gid' with 'section_gid'.");
+  if (project !== undefined) {
+    requirePinnedWorkspace(context, await context.asana.workspaceOf({ project }), `project ${project}`);
+  }
+  if (section !== undefined && (await context.asana.projectOfSection(section)) !== project) {
+    throw new Error(`section ${section} is not in project ${project}.`);
+  }
+  if (parent !== undefined) {
+    requirePinnedWorkspace(context, await context.asana.taskWorkspace(parent), `task ${parent}`);
+  }
+  await requireAssigneeInPinnedWorkspace(context, fields.assignee);
+  const task = await context.asana
+    .createTask(context.workspace.gid, { project, section, parent }, fields)
+    .catch((err) => rethrowWithLandedHint(err, "list_tasks"));
+  return [
+    `created task: ${label(task)}`,
+    `url: ${task.permalink ?? "none"}`,
+    `parent: ${task.parent ? label(task.parent) : "none"}`,
+    renderMemberships(task),
+  ].join("\n");
 }
 
 function renderCustomField(field: CustomField): string[] {
@@ -295,6 +398,17 @@ export async function listUsers(context: Context, input: z.infer<typeof listUser
   requireUsersInPinnedWorkspace(context, users);
   const more = users.length >= limit ? "more may match: narrow the query" : undefined;
   return renderList("matching users, most worked with first", users.map(renderUser), more);
+}
+
+/** Module-wide, so writes from every request share one queue. */
+let writeQueue: Promise<unknown> = Promise.resolve();
+
+function serially<Input>(run: (context: Context, input: Input) => Promise<string>) {
+  return (context: Context, input: Input): Promise<string> => {
+    const result = writeQueue.then(() => run(context, input));
+    writeQueue = result.catch(() => {});
+    return result;
+  };
 }
 
 export function buildServer(context: Context): McpServer {
@@ -370,6 +484,17 @@ export function buildServer(context: Context): McpServer {
       inputSchema: searchTasksInput,
     },
     searchTasks,
+  );
+
+  verb(
+    "create_task",
+    {
+      description:
+        "Create a task in a project (optionally one of its sections), under 'parent_gid', or both. " +
+        "At most one of 'notes'/'html_notes' and of 'due_on'/'due_at'.",
+      inputSchema: createTaskInput,
+    },
+    serially(createTask),
   );
 
   verb(

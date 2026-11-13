@@ -7,7 +7,16 @@ import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/cli
 import { createApp } from "../src/app.js";
 import { FakeAsana, TOKEN, WORKSPACE, dataReply, errorReply, meRoute, workspaceRoute } from "./fakes.js";
 
-const VERBS = ["current_user", "find_projects", "get_project", "get_task", "list_tasks", "list_users", "search_tasks"];
+const VERBS = [
+  "create_task",
+  "current_user",
+  "find_projects",
+  "get_project",
+  "get_task",
+  "list_tasks",
+  "list_users",
+  "search_tasks",
+];
 
 let fake: FakeAsana;
 let httpServer: Server;
@@ -143,6 +152,21 @@ describe("verbs", () => {
       ["list_users", { query: "x".repeat(201) }, "query"],
       ["list_users", { cursor: "a b" }, "cursor"],
       ["list_users", { limit: 101 }, "limit"],
+      ["create_task", { project_gid: "1" }, "name"],
+      ["create_task", { name: " ", project_gid: "1" }, "name"],
+      ["create_task", { name: "x".repeat(1025), project_gid: "1" }, "name"],
+      ["create_task", { name: "x", notes: "x".repeat(20_001), project_gid: "1" }, "notes"],
+      ["create_task", { name: "x", html_notes: "plain", project_gid: "1" }, "html_notes"],
+      ["create_task", { name: "x", html_notes: "<body>a</body><body>b</body>", project_gid: "1" }, "html_notes"],
+      ["create_task", { name: "x", html_notes: "<body>a</BODY><BODY>b</body>", project_gid: "1" }, "html_notes"],
+      ["create_task", { name: "x", html_notes: `<body>${"x".repeat(19_988)}</body>`, project_gid: "1" }, "html_notes"],
+      ["create_task", { name: "x", project_gid: "1/../2" }, "project_gid"],
+      ["create_task", { name: "x", parent_gid: "me" }, "parent_gid"],
+      ["create_task", { name: "x", due_at: "tomorrow", project_gid: "1" }, "due_at"],
+      ["create_task", { name: "x", resource_subtype: "section", project_gid: "1" }, "resource_subtype"],
+      ["create_task", { name: "x", section_gid: "1;2", project_gid: "1" }, "section_gid"],
+      ["create_task", { name: "x", assignee: "ada@example.com", project_gid: "1" }, "assignee"],
+      ["create_task", { name: "x", notes: null, project_gid: "1" }, "notes"],
     ] as const) {
       const result = await client.callTool({ name, arguments: args });
       assert.equal(result.isError, true, `${name} ${JSON.stringify(args)}`);
@@ -157,6 +181,7 @@ describe("verbs", () => {
       ["get_project", { project_gid: "1", workspace: "1" }],
       ["find_projects", { query: "x", workspace: "1" }],
       ["list_users", { workspace: "1" }],
+      ["create_task", { name: "x", project_gid: "1", workspace: "1" }],
     ] as const) {
       const result = await client.callTool({ name, arguments: args });
       assert.match(text(result), /Unrecognized key: "workspace"/, name);
@@ -164,7 +189,7 @@ describe("verbs", () => {
     assert.deepEqual(fake.requests, []);
   });
 
-  it("count all nine search parameters within the limit, and refuse one more", async (t) => {
+  it("count the largest verb's parameters within the limit, and refuse one more", async (t) => {
     t.mock.method(console, "error", () => {});
     const client = await connect();
     fake.routes = { [`GET /workspaces/${WORKSPACE.gid}/tasks/search`]: { json: { data: [] } } };
@@ -182,7 +207,46 @@ describe("verbs", () => {
     assert.match(text(every), /not both/);
     const accepted = await client.callTool({ name: "search_tasks", arguments: filters });
     assert.equal(text(accepted), "matching tasks, newest first: no tasks");
-    const tooMany = await client.callTool({ name: "search_tasks", arguments: { ...filters, section_gid: "2", extra: 1 } });
-    assert.match(text(tooMany), /maximum of 9 elements/);
+    const fields = {
+      name: "x",
+      notes: "a",
+      html_notes: "<body>a</body>",
+      assignee: "me",
+      due_on: "2026-11-20",
+      due_at: "2026-11-20T17:00:00Z",
+      start_on: "2026-11-18",
+      resource_subtype: "milestone",
+      project_gid: "1",
+      section_gid: "2",
+      parent_gid: "3",
+    };
+    const create = await client.callTool({ name: "create_task", arguments: fields });
+    assert.match(text(create), /not both/);
+    const tooMany = await client.callTool({ name: "create_task", arguments: { ...fields, extra: 1 } });
+    assert.match(text(tooMany), /maximum of 11 elements/);
+    assert.deepEqual(fake.requestsTo("POST", "/tasks"), []);
+  });
+
+  it("run writes one at a time, each workspace check right before its write", async () => {
+    const client = await connect();
+    const parents = ["1300000000000001", "1300000000000002", "1300000000000003"];
+    for (const gid of parents) {
+      fake.routes[`GET /tasks/${gid}`] = dataReply({ gid, workspace: { gid: WORKSPACE.gid } });
+    }
+    fake.routes["POST /tasks"] = dataReply({ gid: "1300000000000009" });
+    const results = await Promise.all(
+      parents.map((gid) => client.callTool({ name: "create_task", arguments: { name: "x", parent_gid: gid } })),
+    );
+    assert.ok(results.every((result) => !result.isError));
+    const parentOf = (body: unknown) => (body as { data: { parent: string } }).data.parent;
+    const order = fake.requests.map((request) =>
+      request.method === "GET" ? request.path : `POST under ${parentOf(request.body)}`,
+    );
+    const pairs = [0, 2, 4].map((index) => order.slice(index, index + 2).join(" then "));
+    assert.equal(order.length, 6);
+    assert.deepEqual(
+      pairs.sort(),
+      parents.map((gid) => `/tasks/${gid} then POST under ${gid}`),
+    );
   });
 });
