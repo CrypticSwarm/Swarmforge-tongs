@@ -21,6 +21,8 @@ Reached at `http://asana:8080/mcp` on the session network.
 | `create_task` | `name`; `project_gid?` with `section_gid?`, `parent_gid?`; `notes?` or `html_notes?`, `assignee?`, `due_on?` or `due_at?`, `start_on?`, `resource_subtype?`, `custom_fields?`, `blocked_by?` | Creates a task in a project or section, or a subtask. |
 | `update_task` | `task_gid`; any of `name`, `notes` or `html_notes`, `assignee`, `due_on` or `due_at`, `start_on`, `resource_subtype`, `completed`, `approval_status`, `custom_fields`, `move_to`, `remove_from_project`, `parent_gid`, `remove_blocked_by`, `add_blocked_by` | Changes the given fields, placement, parent, and blockers, and reports each. |
 | `delete_task` | `task_gid` | Moves a task to the token user's Asana trash, restorable for 30 days. |
+| `list_comments` | `task_gid`; `include_system?`, `include_html?`, `limit?`, `cursor?` | Lists a task's comments, oldest first; `include_system` adds activity like assignments. |
+| `add_comment` | `task_gid`; `text` or `html_text` | Comments on a task as the token's user. |
 | `get_project` | `project_gid` | Reads one project with its first 100 sections and its custom fields, enum options included. |
 | `find_projects` | `query`; `limit?` | Finds projects by name, most recently used first. |
 | `list_users` | `query?` or `cursor?`; `limit?` | Lists the workspace's users, or finds them by name or email, most worked with first. |
@@ -29,8 +31,8 @@ Reached at `http://asana:8080/mcp` on the session network.
 - `assignee` is a user gid or `me`.
 - `create_task` needs `project_gid`, `parent_gid`, or both; `section_gid` must
   be in `project_gid`.
-- `html_notes` is one `<body>...</body>` element. A description is at most 20000
-  characters.
+- `html_notes` and `html_text` are one `<body>...</body>` element. A description
+  or comment is at most 20000 characters.
 - `custom_fields` maps a field's gid or exact name to a value: an option's
   name or gid as `get_task` shows it (enum), a list of them (multi_enum), user
   gids or `me` (people), a number, text, or a `YYYY-MM-DD` or ISO 8601

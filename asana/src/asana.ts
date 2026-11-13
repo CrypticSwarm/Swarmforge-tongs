@@ -1,6 +1,15 @@
 // The only module that touches the asana SDK.
 
-import { ApiClient, ProjectsApi, SectionsApi, TasksApi, TypeaheadApi, UsersApi, WorkspacesApi } from "asana";
+import {
+  ApiClient,
+  ProjectsApi,
+  SectionsApi,
+  StoriesApi,
+  TasksApi,
+  TypeaheadApi,
+  UsersApi,
+  WorkspacesApi,
+} from "asana";
 
 export const ASANA_API = "https://app.asana.com/api/1.0";
 
@@ -76,6 +85,17 @@ export type Project = ProjectSummary & {
 
 export type WorkspaceUser = User & { workspaceGids: string[] };
 
+export type Story = {
+  gid: string;
+  subtype?: string;
+  author?: Compact;
+  createdAt?: string;
+  text: string;
+  htmlText: string;
+};
+
+export type CommentBody = { text: string } | { html_text: string };
+
 export type Page<Item> = { items: Item[]; cursor?: string };
 
 type Resource = Record<string, unknown> & { gid: string };
@@ -142,6 +162,8 @@ const PROJECT_FIELDS = [
 ].join(",");
 
 const USER_FIELDS = "name,email,workspaces";
+
+const STORY_FIELDS = "resource_subtype,created_by.name,created_at,text";
 
 export const MAX_NOTES = 20_000;
 
@@ -315,9 +337,21 @@ function workspaceUser(data: Resource): WorkspaceUser {
   };
 }
 
+function story(data: Resource): Story {
+  return {
+    gid: data.gid,
+    subtype: text(data.resource_subtype),
+    author: compact(data.created_by),
+    createdAt: text(data.created_at),
+    text: multiline(data.text),
+    htmlText: multiline(data.html_text),
+  };
+}
+
 export class Asana {
   private readonly projects: ProjectsApi;
   private readonly sections: SectionsApi;
+  private readonly stories: StoriesApi;
   private readonly tasks: TasksApi;
   private readonly typeahead: TypeaheadApi;
   private readonly users: UsersApi;
@@ -334,6 +368,7 @@ export class Asana {
     client.RETURN_COLLECTION = false;
     this.projects = new ProjectsApi(client);
     this.sections = new SectionsApi(client);
+    this.stories = new StoriesApi(client);
     this.tasks = new TasksApi(client);
     this.typeahead = new TypeaheadApi(client);
     this.users = new UsersApi(client);
@@ -465,6 +500,29 @@ export class Asana {
   async removeBlockers(gid: string, blockers: string[]): Promise<void> {
     await this.send(`removing blockers from task ${gid}`, () =>
       this.tasks.removeDependenciesForTask({ data: { dependencies: blockers } }, gid),
+    );
+  }
+
+  async storyList(
+    taskGid: string,
+    options: { commentsOnly: boolean; withHtml: boolean; limit: number; cursor?: string },
+  ): Promise<Page<Story>> {
+    const page = await this.callList(`listing stories on task ${taskGid}`, () =>
+      this.stories.getStoriesForTask(taskGid, {
+        opt_fields: options.withHtml ? `${STORY_FIELDS},html_text` : STORY_FIELDS,
+        limit: options.limit,
+        offset: options.cursor,
+        ...(options.commentsOnly ? { resource_subtype: "comment_added" } : {}),
+      }),
+    );
+    return { items: page.items.map(story), cursor: page.cursor };
+  }
+
+  async addComment(taskGid: string, body: CommentBody): Promise<Story> {
+    return story(
+      await this.call(`commenting on task ${taskGid}`, () =>
+        this.stories.createStoryForTask({ data: body }, taskGid, { opt_fields: "created_at" }),
+      ),
     );
   }
 
