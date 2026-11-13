@@ -58,6 +58,8 @@ export type TaskCustomField = { field: Compact; type?: string; value?: string | 
 
 export type CustomFieldTarget = { workspaceGid?: string; customFields: CustomField[] };
 
+export type TaskTarget = CustomFieldTarget & { name: string; projectGids: string[] };
+
 export type CustomFieldWrite = string | number | string[] | { date: string } | { date_time: string } | null;
 
 export type ProjectSummary = Compact & { archived: boolean; team?: Compact; workspaceGid?: string };
@@ -231,11 +233,14 @@ function taskSummary(data: Resource): TaskSummary {
   };
 }
 
-function task(data: Resource): Task {
-  const memberships = (Array.isArray(data.memberships) ? data.memberships : []).flatMap((membership) => {
+function memberships(data: Resource): Task["memberships"] {
+  return (Array.isArray(data.memberships) ? data.memberships : []).flatMap((membership) => {
     const project = compact(membership?.project);
     return project ? [{ project, section: compact(membership.section) }] : [];
   });
+}
+
+function task(data: Resource): Task {
   const customFields = (Array.isArray(data.custom_fields) ? data.custom_fields : []).flatMap((field) => {
     const fieldCompact = compact(field);
     if (!fieldCompact) return [];
@@ -252,7 +257,7 @@ function task(data: Resource): Task {
     subtype: text(data.resource_subtype),
     approvalStatus: text(data.approval_status),
     customFields,
-    memberships,
+    memberships: memberships(data),
     parent: compact(data.parent),
     dependencies: compacts(data.dependencies),
     dependents: compacts(data.dependents),
@@ -388,11 +393,16 @@ export class Asana {
     return compact(data.workspace)?.gid;
   }
 
-  async taskCustomFields(gid: string): Promise<CustomFieldTarget> {
-    const data = await this.call(`reading task ${gid}`, () =>
-      this.tasks.getTask(gid, { opt_fields: `workspace,${TASK_CUSTOM_FIELDS}` }),
-    );
-    return { workspaceGid: compact(data.workspace)?.gid, customFields: customFields(data.custom_fields) };
+  async taskTarget(gid: string, withCustomFields: boolean): Promise<TaskTarget> {
+    const targetFields = "name,workspace,memberships.project";
+    const opt_fields = withCustomFields ? `${targetFields},${TASK_CUSTOM_FIELDS}` : targetFields;
+    const data = await this.call(`reading task ${gid}`, () => this.tasks.getTask(gid, { opt_fields }));
+    return {
+      name: text(data.name) ?? "",
+      workspaceGid: compact(data.workspace)?.gid,
+      customFields: customFields(data.custom_fields),
+      projectGids: memberships(data).map((membership) => membership.project.gid),
+    };
   }
 
   async projectCustomFields(gid: string): Promise<CustomFieldTarget> {
@@ -425,6 +435,24 @@ export class Asana {
         this.tasks.updateTask({ data: fields }, gid, { opt_fields: TASK_FIELDS }),
       ),
     );
+  }
+
+  async placeTask(gid: string, project: string, section?: string): Promise<void> {
+    const data = section === undefined ? { project } : { project, section };
+    await this.send(`placing task ${gid} in project ${project}`, () => this.tasks.addProjectForTask({ data }, gid));
+  }
+
+  async removeTaskFromProject(gid: string, project: string): Promise<void> {
+    await this.send(`removing task ${gid} from project ${project}`, () =>
+      this.tasks.removeProjectForTask({ data: { project } }, gid),
+    );
+  }
+
+  async setTaskParent(gid: string, parent: string | null): Promise<Compact | undefined> {
+    const data = await this.call(`setting task ${gid}'s parent`, () =>
+      this.tasks.setParentForTask({ data: { parent } }, gid, { opt_fields: "parent.name" }),
+    );
+    return compact(data.parent);
   }
 
   async deleteTask(gid: string): Promise<void> {

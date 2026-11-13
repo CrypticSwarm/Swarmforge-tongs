@@ -190,6 +190,12 @@ describe("verbs", () => {
       ["update_task", { task_gid: "1", custom_fields: { a: ["x\u2028"] } }, "custom_fields.a.0"],
       ["update_task", { task_gid: "1", custom_fields: { a: { date: "2026-11-20" } } }, "custom_fields.a"],
       ["create_task", { name: "x", project_gid: "1", custom_fields: { a: true } }, "custom_fields.a"],
+      ["update_task", JSON.parse('{"task_gid": "1", "custom_fields": {"__proto__": "x", "a": "y"}}'), "custom_fields"],
+      ["update_task", { task_gid: "1", move_to: {} }, "move_to.project_gid"],
+      ["update_task", { task_gid: "1", move_to: { project_gid: "1", section_gid: "x" } }, "move_to.section_gid"],
+      ["update_task", { task_gid: "1", move_to: "1" }, "move_to"],
+      ["update_task", { task_gid: "1", remove_from_project: null }, "remove_from_project"],
+      ["update_task", { task_gid: "1", parent_gid: "../2" }, "parent_gid"],
     ] as const) {
       const result = await client.callTool({ name, arguments: args });
       assert.equal(result.isError, true, `${name} ${JSON.stringify(args)}`);
@@ -206,6 +212,7 @@ describe("verbs", () => {
       ["list_users", { workspace: "1" }],
       ["create_task", { name: "x", project_gid: "1", workspace: "1" }],
       ["update_task", { task_gid: "1", completed: true, workspace: "1" }],
+      ["update_task", { task_gid: "1", move_to: { project_gid: "1", workspace: "1" } }],
       ["delete_task", { task_gid: "1", workspace: "1" }],
     ] as const) {
       const result = await client.callTool({ name, arguments: args });
@@ -233,6 +240,7 @@ describe("verbs", () => {
     const accepted = await client.callTool({ name: "search_tasks", arguments: filters });
     assert.equal(text(accepted), "matching tasks, newest first: no tasks");
     const fields = {
+      task_gid: "1",
       name: "x",
       notes: "a",
       html_notes: "<body>a</body>",
@@ -241,26 +249,33 @@ describe("verbs", () => {
       due_at: "2026-11-20T17:00:00Z",
       start_on: "2026-11-18",
       resource_subtype: "milestone",
-      project_gid: "1",
-      section_gid: "2",
-      parent_gid: "3",
+      completed: true,
+      approval_status: "approved",
       custom_fields: manyFields(20, Array(20).fill("x")),
+      move_to: { project_gid: "2", section_gid: "3" },
+      remove_from_project: "4",
+      parent_gid: "5",
     };
-    const create = await client.callTool({ name: "create_task", arguments: fields });
-    assert.match(text(create), /not both/);
-    const tooMany = await client.callTool({ name: "create_task", arguments: { ...fields, extra: 1 } });
-    assert.match(text(tooMany), /maximum of 432 elements/);
-    assert.deepEqual(fake.requestsTo("POST", "/tasks"), []);
+    const update = await client.callTool({ name: "update_task", arguments: fields });
+    assert.match(text(update), /not both/);
+    const tooMany = await client.callTool({ name: "update_task", arguments: { ...fields, extra: 1 } });
+    assert.match(text(tooMany), /maximum of 437 elements/);
+    assert.ok(fake.requests.every((request) => request.method === "GET"));
   });
 
   it("accept nulls that clear fields over MCP", async () => {
     const gid = "1300000000000001";
     fake.routes[`GET /tasks/${gid}`] = dataReply({ gid, workspace: { gid: WORKSPACE.gid } });
     fake.routes[`PUT /tasks/${gid}`] = dataReply({ gid, name: "x" });
+    fake.routes[`POST /tasks/${gid}/setParent`] = dataReply({ gid, parent: null });
     const cleared = { notes: null, assignee: null, due_on: null, start_on: null };
-    const result = await (await connect()).callTool({ name: "update_task", arguments: { task_gid: gid, ...cleared } });
+    const result = await (await connect()).callTool({
+      name: "update_task",
+      arguments: { task_gid: gid, ...cleared, parent_gid: null },
+    });
     assert.equal(result.isError, undefined, text(result));
     assert.deepEqual(fake.requestsTo("PUT", `/tasks/${gid}`)[0].body, { data: { ...cleared, notes: "" } });
+    assert.deepEqual(fake.requestsTo("POST", `/tasks/${gid}/setParent`)[0].body, { data: { parent: null } });
   });
 
   it("run writes one at a time across sessions, each workspace check right before its write", async () => {
