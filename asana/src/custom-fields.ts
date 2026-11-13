@@ -15,11 +15,20 @@ const oneLineText = z
   .regex(/^[^\x00-\x1f\x7f-\x9f\u2028\u2029]*$/, "must be one line");
 
 export const customFieldsInput = z
-  .record(oneLineText.min(1), z.union([oneLineText, z.number(), z.array(oneLineText).max(MAX_VALUES), z.null()]))
-  .refine((fields) => {
-    const count = Object.keys(fields).length;
-    return count >= 1 && count <= MAX_FIELDS;
-  }, `must name 1-${MAX_FIELDS} custom fields`)
+  .preprocess(
+    (raw, ctx) => {
+      if (typeof raw === "object" && raw !== null && Object.hasOwn(raw, "__proto__")) {
+        ctx.addIssue({ code: "custom", message: "__proto__ is not a custom field this tong can set" });
+      }
+      return raw;
+    },
+    z
+      .record(oneLineText.min(1), z.union([oneLineText, z.number(), z.array(oneLineText).max(MAX_VALUES), z.null()]))
+      .refine((fields) => {
+        const count = Object.keys(fields).length;
+        return count >= 1 && count <= MAX_FIELDS;
+      }, `must name 1-${MAX_FIELDS} custom fields`),
+  )
   .describe(
     "Values by field gid or exact name: an option's name or gid as get_task shows it (enum), a list of them " +
       "(multi_enum), user gids or 'me' (people), a number, text, or YYYY-MM-DD or ISO 8601 date-time (date). " +

@@ -190,6 +190,7 @@ describe("verbs", () => {
       ["update_task", { task_gid: "1", custom_fields: { a: ["x\u2028"] } }, "custom_fields.a.0"],
       ["update_task", { task_gid: "1", custom_fields: { a: { date: "2026-11-20" } } }, "custom_fields.a"],
       ["create_task", { name: "x", project_gid: "1", custom_fields: { a: true } }, "custom_fields.a"],
+      ["update_task", JSON.parse('{"task_gid": "1", "custom_fields": {"__proto__": "x", "a": "y"}}'), "custom_fields"],
     ] as const) {
       const result = await client.callTool({ name, arguments: args });
       assert.equal(result.isError, true, `${name} ${JSON.stringify(args)}`);
