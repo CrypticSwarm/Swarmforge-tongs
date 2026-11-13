@@ -9,6 +9,10 @@ import {
   type CommentBody,
   type Compact,
   type CustomField,
+  type Goal,
+  type GoalMetric,
+  type GoalSupporter,
+  type Page,
   type Portfolio,
   type PortfolioItem,
   type PortfolioSummary,
@@ -197,6 +201,8 @@ const portfolioItemInput = z.strictObject({
   project_gid: gid.describe("The project's gid."),
 });
 
+const getGoalInput = z.strictObject({ goal_gid: gid.describe("The goal's gid.") });
+
 const listUsersInput = z.strictObject({
   query: z
     .string()
@@ -215,7 +221,7 @@ const keyCount = (input: z.ZodObject) => Object.keys(input.shape).length;
 const MAX_TOOL_INPUT_ELEMENTS = Math.max(
   ...[getTaskInput, listTasksInput, searchTasksInput, deleteTaskInput].map(keyCount),
   ...[listCommentsInput, addCommentInput, getProjectInput, findProjectsInput, listUsersInput].map(keyCount),
-  ...[listPortfoliosInput, getPortfolioInput, portfolioItemInput].map(keyCount),
+  ...[listPortfoliosInput, getPortfolioInput, portfolioItemInput, getGoalInput].map(keyCount),
   keyCount(updateProjectInput) + MAX_CUSTOM_FIELD_ELEMENTS,
   keyCount(createTaskInput) + MAX_BLOCKERS + MAX_CUSTOM_FIELD_ELEMENTS,
   keyCount(updateTaskInput) + keyCount(moveToInput) + 2 * MAX_BLOCKERS + MAX_CUSTOM_FIELD_ELEMENTS,
@@ -675,20 +681,23 @@ function renderFirstPage(title: string, page: { items: Compact[]; cursor?: strin
   return indented(title, [...page.items.map(label), ...(page.cursor ? [`more ${title} not shown`] : [])]);
 }
 
-async function renderProjectPortfolios(context: Context, projectGid: string): Promise<string> {
+async function renderFirstPageIfAvailable(title: string, lookup: () => Promise<Page<Compact>>): Promise<string> {
   try {
-    return renderFirstPage("portfolios", await context.asana.projectPortfolios(projectGid));
+    return renderFirstPage(title, await lookup());
   } catch (err) {
     if (!(err instanceof AsanaError)) throw err;
-    return `portfolios: not available (${err.message})`;
+    return `${title}: not available (${err.message})`;
   }
 }
 
 export async function getProject(context: Context, input: z.infer<typeof getProjectInput>): Promise<string> {
-  const project = await context.asana.project(input.project_gid);
-  requirePinnedWorkspace(context, project.workspaceGid, `project ${input.project_gid}`);
-  const sections = renderFirstPage("sections", await context.asana.sectionList(input.project_gid));
-  return renderProject(project, [sections, await renderProjectPortfolios(context, input.project_gid)]);
+  const projectGid = input.project_gid;
+  const project = await context.asana.project(projectGid);
+  requirePinnedWorkspace(context, project.workspaceGid, `project ${projectGid}`);
+  const sections = renderFirstPage("sections", await context.asana.sectionList(projectGid));
+  const portfolios = await renderFirstPageIfAvailable("portfolios", () => context.asana.projectPortfolios(projectGid));
+  const goals = await renderFirstPageIfAvailable("goals", () => context.asana.projectGoals(projectGid));
+  return renderProject(project, [sections, portfolios, goals]);
 }
 
 export async function updateProject(context: Context, input: z.infer<typeof updateProjectInput>): Promise<string> {
@@ -780,6 +789,57 @@ export async function removeFromPortfolio(
     .removePortfolioItem(input.portfolio_gid, input.project_gid)
     .catch((err) => rethrowWithLandedHint(err, "get_project"));
   return `removed project ${input.project_gid} from portfolio ${input.portfolio_gid}`;
+}
+
+function renderMetric(metric: GoalMetric | undefined): string {
+  if (!metric) return "metric: none";
+  const unit =
+    metric.unit === "currency" && metric.currencyCode
+      ? `currency ${metric.currencyCode}`
+      : metric.unit === "percentage"
+        ? "percentage, as a fraction of 1"
+        : metric.unit;
+  const current = `${metric.current ?? "not set"}${metric.currentDisplay ? ` (${metric.currentDisplay})` : ""}`;
+  const details = [
+    `current ${current}`,
+    `target ${metric.target ?? "not set"}`,
+    `initial ${metric.initial ?? "not set"}`,
+    `unit ${unit ?? "unknown"}`,
+    `progress source ${metric.progressSource ?? "unknown"}`,
+  ];
+  return `metric: ${details.join(", ")}`;
+}
+
+function renderGoalSupporter(supporter: GoalSupporter): string {
+  const type = supporter.type ?? (supporter.subtype === "subgoal" ? "goal" : "item");
+  const weight = supporter.contributionWeight === undefined ? "" : `, weight ${supporter.contributionWeight}`;
+  const resource = supporter.resource ? `${type} ${label(supporter.resource)}` : "a supporter this token cannot read";
+  return `${resource}${weight}`;
+}
+
+function renderGoal(goal: Goal, blocks: string[]): string {
+  return [
+    `goal: ${label(goal)}`,
+    `owner: ${goal.owner ? label(goal.owner) : "none"}`,
+    `team: ${goal.team ? label(goal.team) : "none"}`,
+    `time period: ${goal.timePeriod ? label(goal.timePeriod) : "none"}`,
+    `status: ${goal.status ?? "none"}`,
+    ...(goal.startOn ? [`start: ${goal.startOn}`] : []),
+    `due: ${goal.dueOn ?? "none"}`,
+    renderMetric(goal.metric),
+    ...blocks,
+    indented("notes", goal.notes ? goal.notes.split("\n") : []),
+  ].join("\n");
+}
+
+export async function getGoal(context: Context, input: z.infer<typeof getGoalInput>): Promise<string> {
+  const goalGid = input.goal_gid;
+  const goal = await context.asana.goal(goalGid);
+  requirePinnedWorkspace(context, goal.workspaceGid, `goal ${goalGid}`);
+  const parents = renderFirstPage("parent goals", await context.asana.parentGoals(goalGid));
+  const supporters = await context.asana.goalSupporters(goalGid);
+  const more = supporters.cursor ? ["more supporters not shown"] : [];
+  return renderGoal(goal, [parents, indented("supporters", [...supporters.items.map(renderGoalSupporter), ...more])]);
 }
 
 function renderProjectSummary(project: ProjectSummary): string {
@@ -961,8 +1021,8 @@ export function buildServer(context: Context): McpServer {
     "get_project",
     {
       description:
-        "Read one project: owner, team, dates, archived and completed state, sections, portfolios, custom fields " +
-        "with their type and enum options, its own custom field values, and its description.",
+        "Read one project: owner, team, dates, archived and completed state, sections, portfolios, goals, " +
+        "custom fields with their type and enum options, its own custom field values, and its description.",
       inputSchema: getProjectInput,
     },
     getProject,
@@ -1007,6 +1067,17 @@ export function buildServer(context: Context): McpServer {
     "remove_from_portfolio",
     { description: "Take a project out of a portfolio.", inputSchema: portfolioItemInput },
     serially(removeFromPortfolio),
+  );
+
+  verb(
+    "get_goal",
+    {
+      description:
+        "Read one goal: owner, team, time period, status, dates, metric, parent goals, " +
+        "its supporters with their contribution weights, and its description.",
+      inputSchema: getGoalInput,
+    },
+    getGoal,
   );
 
   verb(

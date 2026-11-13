@@ -2,6 +2,8 @@
 
 import {
   ApiClient,
+  GoalRelationshipsApi,
+  GoalsApi,
   PortfoliosApi,
   ProjectPortfolioSettingsApi,
   ProjectsApi,
@@ -102,6 +104,30 @@ export type Portfolio = PortfolioSummary & {
 
 export type PortfolioItem = Compact & { type?: string; archived: boolean; customFieldValues: CustomFieldValue[] };
 
+export type GoalMetric = {
+  unit?: string;
+  currencyCode?: string;
+  initial?: number;
+  current?: number;
+  target?: number;
+  currentDisplay?: string;
+  progressSource?: string;
+};
+
+export type Goal = Compact & {
+  workspaceGid?: string;
+  owner?: Compact;
+  team?: Compact;
+  timePeriod?: Compact;
+  status?: string;
+  startOn?: string;
+  dueOn?: string;
+  metric?: GoalMetric;
+  notes: string;
+};
+
+export type GoalSupporter = { resource?: Compact; type?: string; subtype?: string; contributionWeight?: number };
+
 export type WorkspaceUser = User & { workspaceGids: string[] };
 
 export type Story = {
@@ -194,6 +220,14 @@ const PORTFOLIO_FIELDS = [
 ].join(",");
 
 const PORTFOLIO_ITEM_FIELDS = `name,archived,resource_type,${CUSTOM_FIELD_VALUES}`;
+
+const GOAL_FIELDS = [
+  "name,workspace,owner.name,team.name,time_period.display_name,status,start_on,due_on,notes",
+  "metric.unit,metric.currency_code,metric.initial_number_value,metric.current_number_value",
+  "metric.target_number_value,metric.current_display_value,metric.progress_source",
+].join(",");
+
+const GOAL_RELATIONSHIP_FIELDS = "resource_subtype,contribution_weight,supporting_resource.name";
 
 const USER_FIELDS = "name,email,workspaces";
 
@@ -399,6 +433,51 @@ function portfolioItem(data: Resource): PortfolioItem {
   };
 }
 
+function number(value: unknown): number | undefined {
+  return typeof value === "number" ? value : undefined;
+}
+
+function goalMetric(data: unknown): GoalMetric | undefined {
+  if (typeof data !== "object" || data === null) return undefined;
+  const metric = data as Record<string, unknown>;
+  return {
+    unit: text(metric.unit),
+    currencyCode: text(metric.currency_code),
+    initial: number(metric.initial_number_value),
+    current: number(metric.current_number_value),
+    target: number(metric.target_number_value),
+    currentDisplay: text(metric.current_display_value),
+    progressSource: text(metric.progress_source),
+  };
+}
+
+function goal(data: Resource): Goal {
+  const period = data.time_period;
+  return {
+    gid: data.gid,
+    name: text(data.name) ?? "",
+    workspaceGid: compact(data.workspace)?.gid,
+    owner: compact(data.owner),
+    team: compact(data.team),
+    timePeriod: isResource(period) ? { gid: period.gid, name: text(period.display_name) ?? "" } : undefined,
+    status: text(data.status),
+    startOn: text(data.start_on),
+    dueOn: text(data.due_on),
+    metric: goalMetric(data.metric),
+    notes: multiline(data.notes),
+  };
+}
+
+function goalSupporter(data: Resource): GoalSupporter {
+  const resource = data.supporting_resource as { resource_type?: unknown } | null | undefined;
+  return {
+    resource: compact(resource),
+    type: text(resource?.resource_type),
+    subtype: text(data.resource_subtype),
+    contributionWeight: number(data.contribution_weight),
+  };
+}
+
 function workspaceUser(data: Resource): WorkspaceUser {
   return {
     gid: data.gid,
@@ -420,6 +499,8 @@ function story(data: Resource): Story {
 }
 
 export class Asana {
+  private readonly goals: GoalsApi;
+  private readonly goalRelationships: GoalRelationshipsApi;
   private readonly portfolios: PortfoliosApi;
   private readonly projectPortfolioSettings: ProjectPortfolioSettingsApi;
   private readonly projects: ProjectsApi;
@@ -439,6 +520,8 @@ export class Asana {
     client.applyAuthToRequest = (request, authNames) => applyAuth(request.redirects(0), authNames);
     // Otherwise list calls drop `next_page`.
     client.RETURN_COLLECTION = false;
+    this.goals = new GoalsApi(client);
+    this.goalRelationships = new GoalRelationshipsApi(client);
     this.portfolios = new PortfoliosApi(client);
     this.projectPortfolioSettings = new ProjectPortfolioSettingsApi(client);
     this.projects = new ProjectsApi(client);
@@ -552,6 +635,31 @@ export class Asana {
       }),
     );
     return { items: compacts(page.items.map((setting) => setting.portfolio)), cursor: page.cursor };
+  }
+
+  async projectGoals(gid: string): Promise<Page<Compact>> {
+    const page = await this.callList(`listing project ${gid}'s goals`, () =>
+      this.goals.getGoals({ project: gid, opt_fields: "name", limit: 100 }),
+    );
+    return { items: compacts(page.items), cursor: page.cursor };
+  }
+
+  async goal(gid: string): Promise<Goal> {
+    return goal(await this.call(`reading goal ${gid}`, () => this.goals.getGoal(gid, { opt_fields: GOAL_FIELDS })));
+  }
+
+  async parentGoals(gid: string): Promise<Page<Compact>> {
+    const page = await this.callList(`listing goal ${gid}'s parent goals`, () =>
+      this.goals.getParentGoalsForGoal(gid, { opt_fields: "name" }),
+    );
+    return { items: compacts(page.items), cursor: page.cursor };
+  }
+
+  async goalSupporters(gid: string): Promise<Page<GoalSupporter>> {
+    const page = await this.callList(`listing goal ${gid}'s supporters`, () =>
+      this.goalRelationships.getGoalRelationships(gid, { opt_fields: GOAL_RELATIONSHIP_FIELDS, limit: 100 }),
+    );
+    return { items: page.items.map(goalSupporter), cursor: page.cursor };
   }
 
   async portfolioList(

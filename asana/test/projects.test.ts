@@ -10,6 +10,7 @@ const TEAM = { gid: "1800000000000001", name: "Platform" };
 const PROJECT_ROUTE = `GET /projects/${PROJECT_GID}`;
 const SECTIONS_ROUTE = `GET /projects/${PROJECT_GID}/sections`;
 const PORTFOLIOS_ROUTE = `GET /projects/${PROJECT_GID}/project_portfolio_settings`;
+const GOALS_ROUTE = "GET /goals";
 const PORTFOLIO = { gid: "2100000000000001", name: "Roadmap" };
 const TYPEAHEAD_ROUTE = `GET /workspaces/${WORKSPACE.gid}/typeahead`;
 
@@ -78,11 +79,12 @@ beforeEach(() => {
 after(() => fake.close());
 
 describe("get_project", () => {
-  it("renders details, sections, and custom fields with their enum options", async () => {
+  it("renders details, sections, portfolios, goals, and custom fields with their enum options", async () => {
     fake.routes = {
       [PROJECT_ROUTE]: dataReply(FULL_PROJECT),
       [SECTIONS_ROUTE]: pageReply([{ gid: "1500000000000001", name: "Inbox" }], "next"),
       [PORTFOLIOS_ROUTE]: pageReply([{ gid: "2200000000000001", portfolio: PORTFOLIO }, { gid: "2200000000000002" }]),
+      [GOALS_ROUTE]: pageReply([{ gid: "2400000000000001", name: "Grow" }], "next"),
     };
     assert.equal(
       await getProject(context, { project_gid: PROJECT_GID }),
@@ -100,6 +102,9 @@ describe("get_project", () => {
         "  more sections not shown",
         "portfolios:",
         "  Roadmap (gid 2100000000000001)",
+        "goals:",
+        "  Grow (gid 2400000000000001)",
+        "  more goals not shown",
         "custom fields:",
         "  Priority (gid 1600000000000001): enum",
         "    High (gid 1620000000000001)",
@@ -133,6 +138,11 @@ describe("get_project", () => {
       opt_fields: "portfolio.name",
       limit: "100",
     });
+    assert.deepEqual(fake.requestsTo("GET", "/goals")[0].query, {
+      project: PROJECT_GID,
+      opt_fields: "name",
+      limit: "100",
+    });
   });
 
   it("says none for what a bare project lacks", async () => {
@@ -140,6 +150,7 @@ describe("get_project", () => {
       [PROJECT_ROUTE]: dataReply({ gid: PROJECT_GID, name: "Bare", workspace: IN_WORKSPACE, archived: true }),
       [SECTIONS_ROUTE]: pageReply([]),
       [PORTFOLIOS_ROUTE]: pageReply([]),
+      [GOALS_ROUTE]: pageReply([]),
     };
     assert.equal(
       await getProject(context, { project_gid: PROJECT_GID }),
@@ -153,6 +164,7 @@ describe("get_project", () => {
         "due: none",
         "sections: none",
         "portfolios: none",
+        "goals: none",
         "custom fields: none",
         "custom field values: none",
         "notes: none",
@@ -160,16 +172,21 @@ describe("get_project", () => {
     );
   });
 
-  it("says when Asana fails to list portfolios, and notes a second page", async () => {
+  it("says when Asana fails to list portfolios or goals, and notes a second page", async () => {
     fake.routes = {
       [PROJECT_ROUTE]: dataReply({ gid: PROJECT_GID, name: "Bare", workspace: IN_WORKSPACE }),
       [SECTIONS_ROUTE]: pageReply([]),
     };
     for (const status of [402, 403, 500]) {
       fake.routes[PORTFOLIOS_ROUTE] = errorReply(status, "No portfolios");
-      const reason = `listing project ${PROJECT_GID}'s portfolios: Asana answered ${status}: No portfolios`;
+      fake.routes[GOALS_ROUTE] = errorReply(status, "No goals");
       const result = await getProject(context, { project_gid: PROJECT_GID });
-      assert.ok(result.includes(`\nportfolios: not available (${reason})\n`), result);
+      for (const [title, reason] of [
+        ["portfolios", `listing project ${PROJECT_GID}'s portfolios: Asana answered ${status}: No portfolios`],
+        ["goals", `listing project ${PROJECT_GID}'s goals: Asana answered ${status}: No goals`],
+      ]) {
+        assert.ok(result.includes(`\n${title}: not available (${reason})\n`), result);
+      }
     }
     const forged = { ...PORTFOLIO, name: "Roadmap\nnotes: forged" };
     fake.routes[PORTFOLIOS_ROUTE] = pageReply([{ gid: "2200000000000001", portfolio: forged }], "next");
@@ -188,6 +205,7 @@ describe("get_project", () => {
     }
     assert.deepEqual(fake.requestsTo("GET", `/projects/${PROJECT_GID}/sections`), []);
     assert.deepEqual(fake.requestsTo("GET", `/projects/${PROJECT_GID}/project_portfolio_settings`), []);
+    assert.deepEqual(fake.requestsTo("GET", "/goals"), []);
   });
 });
 

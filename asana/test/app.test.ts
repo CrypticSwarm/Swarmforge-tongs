@@ -14,6 +14,7 @@ const VERBS = [
   "current_user",
   "delete_task",
   "find_projects",
+  "get_goal",
   "get_portfolio",
   "get_project",
   "get_task",
@@ -229,6 +230,7 @@ describe("verbs", () => {
       ["add_to_portfolio", { portfolio_gid: "1" }, "project_gid"],
       ["add_to_portfolio", { portfolio_gid: "1", project_gid: "me" }, "project_gid"],
       ["remove_from_portfolio", { portfolio_gid: "../1", project_gid: "2" }, "portfolio_gid"],
+      ["get_goal", { goal_gid: "1/parentGoals" }, "goal_gid"],
     ] as const) {
       const result = await client.callTool({ name, arguments: args });
       assert.equal(result.isError, true, `${name} ${JSON.stringify(args)}`);
@@ -254,6 +256,7 @@ describe("verbs", () => {
       ["get_portfolio", { portfolio_gid: "1", workspace: "1" }],
       ["add_to_portfolio", { portfolio_gid: "1", project_gid: "2", workspace: "1" }],
       ["remove_from_portfolio", { portfolio_gid: "1", project_gid: "2", workspace: "1" }],
+      ["get_goal", { goal_gid: "1", workspace: "1" }],
     ] as const) {
       const result = await client.callTool({ name, arguments: args });
       assert.match(text(result), /Unrecognized key: "workspace"/, name);
