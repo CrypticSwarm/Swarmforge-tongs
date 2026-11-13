@@ -10,12 +10,14 @@ import { FakeAsana, TOKEN, WORKSPACE, dataReply, errorReply, meRoute, workspaceR
 const VERBS = [
   "create_task",
   "current_user",
+  "delete_task",
   "find_projects",
   "get_project",
   "get_task",
   "list_tasks",
   "list_users",
   "search_tasks",
+  "update_task",
 ];
 
 let fake: FakeAsana;
@@ -165,8 +167,15 @@ describe("verbs", () => {
       ["create_task", { name: "x", due_at: "tomorrow", project_gid: "1" }, "due_at"],
       ["create_task", { name: "x", resource_subtype: "section", project_gid: "1" }, "resource_subtype"],
       ["create_task", { name: "x", section_gid: "1;2", project_gid: "1" }, "section_gid"],
-      ["create_task", { name: "x", assignee: "ada@example.com", project_gid: "1" }, "assignee"],
-      ["create_task", { name: "x", notes: null, project_gid: "1" }, "notes"],
+      ["update_task", { task_gid: "1/stories", completed: true }, "task_gid"],
+      ["update_task", { task_gid: "1", name: null }, "name"],
+      ["update_task", { task_gid: "1", resource_subtype: null }, "resource_subtype"],
+      ["update_task", { task_gid: "1", completed: null }, "completed"],
+      ["update_task", { task_gid: "1", approval_status: null }, "approval_status"],
+      ["update_task", { task_gid: "1", html_notes: null }, "html_notes"],
+      ["update_task", { task_gid: "1", assignee: "ada@example.com" }, "assignee"],
+      ["update_task", { task_gid: "1", approval_status: "done" }, "approval_status"],
+      ["delete_task", { task_gid: "1/subtasks" }, "task_gid"],
     ] as const) {
       const result = await client.callTool({ name, arguments: args });
       assert.equal(result.isError, true, `${name} ${JSON.stringify(args)}`);
@@ -182,6 +191,8 @@ describe("verbs", () => {
       ["find_projects", { query: "x", workspace: "1" }],
       ["list_users", { workspace: "1" }],
       ["create_task", { name: "x", project_gid: "1", workspace: "1" }],
+      ["update_task", { task_gid: "1", completed: true, workspace: "1" }],
+      ["delete_task", { task_gid: "1", workspace: "1" }],
     ] as const) {
       const result = await client.callTool({ name, arguments: args });
       assert.match(text(result), /Unrecognized key: "workspace"/, name);
@@ -227,26 +238,38 @@ describe("verbs", () => {
     assert.deepEqual(fake.requestsTo("POST", "/tasks"), []);
   });
 
+  it("accept nulls that clear fields over MCP", async () => {
+    const gid = "1300000000000001";
+    fake.routes[`GET /tasks/${gid}`] = dataReply({ gid, workspace: { gid: WORKSPACE.gid } });
+    fake.routes[`PUT /tasks/${gid}`] = dataReply({ gid, name: "x" });
+    const cleared = { notes: null, assignee: null, due_on: null, start_on: null };
+    const result = await (await connect()).callTool({ name: "update_task", arguments: { task_gid: gid, ...cleared } });
+    assert.equal(result.isError, undefined, text(result));
+    assert.deepEqual(fake.requestsTo("PUT", `/tasks/${gid}`)[0].body, { data: { ...cleared, notes: "" } });
+  });
+
   it("run writes one at a time, each workspace check right before its write", async () => {
     const client = await connect();
-    const parents = ["1300000000000001", "1300000000000002", "1300000000000003"];
-    for (const gid of parents) {
+    const [parent, updated, deleted] = ["1300000000000001", "1300000000000002", "1300000000000003"];
+    for (const gid of [parent, updated, deleted]) {
       fake.routes[`GET /tasks/${gid}`] = dataReply({ gid, workspace: { gid: WORKSPACE.gid } });
     }
-    fake.routes["POST /tasks"] = dataReply({ gid: "1300000000000009" });
-    const results = await Promise.all(
-      parents.map((gid) => client.callTool({ name: "create_task", arguments: { name: "x", parent_gid: gid } })),
-    );
+    fake.routes["POST /tasks"] = dataReply({ gid: "1300000000000004" });
+    fake.routes[`PUT /tasks/${updated}`] = dataReply({ gid: updated, completed: true });
+    fake.routes[`DELETE /tasks/${deleted}`] = dataReply({});
+    const results = await Promise.all([
+      client.callTool({ name: "create_task", arguments: { name: "x", parent_gid: parent } }),
+      client.callTool({ name: "update_task", arguments: { task_gid: updated, completed: true } }),
+      client.callTool({ name: "delete_task", arguments: { task_gid: deleted } }),
+    ]);
     assert.ok(results.every((result) => !result.isError));
-    const parentOf = (body: unknown) => (body as { data: { parent: string } }).data.parent;
-    const order = fake.requests.map((request) =>
-      request.method === "GET" ? request.path : `POST under ${parentOf(request.body)}`,
-    );
+    const order = fake.requests.map((request) => `${request.method} ${request.path}`);
     const pairs = [0, 2, 4].map((index) => order.slice(index, index + 2).join(" then "));
     assert.equal(order.length, 6);
-    assert.deepEqual(
-      pairs.sort(),
-      parents.map((gid) => `/tasks/${gid} then POST under ${gid}`),
-    );
+    assert.deepEqual(pairs.sort(), [
+      `GET /tasks/${parent} then POST /tasks`,
+      `GET /tasks/${updated} then PUT /tasks/${updated}`,
+      `GET /tasks/${deleted} then DELETE /tasks/${deleted}`,
+    ]);
   });
 });

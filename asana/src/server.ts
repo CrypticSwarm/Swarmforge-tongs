@@ -32,7 +32,7 @@ workspace is fixed at startup; no verb accepts a workspace.
 - get_task reads one task in full; list_tasks lists a project's or a section's tasks,
   or a task's subtasks; search_tasks searches the workspace and needs Asana Premium.
 - get_project reads a project with its sections and custom fields.
-- create_task creates a task in a project or one of its sections, or as a subtask.
+- create_task, update_task, and delete_task create, change, and trash tasks.
 - find_projects finds projects by name; list_users lists the workspace's users, or finds
   them by name or email.
 - A list ending in a cursor has more; pass it back as 'cursor' for the next page.
@@ -67,6 +67,7 @@ const htmlNotes = z
 const isoDate = z.iso.date();
 const isoDateTime = z.iso.datetime({ offset: true });
 const subtype = z.enum(["default_task", "milestone", "approval"]);
+const approvalStatus = z.enum(["pending", "approved", "rejected", "changes_requested"]);
 
 const getTaskInput = z.strictObject({ task_gid: gid.describe("The task's gid.") });
 
@@ -105,6 +106,22 @@ const createTaskInput = z.strictObject({
   parent_gid: gid.optional().describe("Make it a subtask of this task."),
 });
 
+const updateTaskInput = z.strictObject({
+  task_gid: gid.describe("The task's gid."),
+  name: taskName.optional().describe("The new name."),
+  notes: notes.nullable().optional().describe("The description as plain text; null clears it."),
+  html_notes: htmlNotes.optional().describe("The description as Asana rich-text HTML, one <body>...</body> element."),
+  assignee: assignee.nullable().optional().describe("The assignee's gid, 'me', or null to unassign."),
+  due_on: isoDate.nullable().optional().describe("The due date, YYYY-MM-DD; null clears it."),
+  due_at: isoDateTime.nullable().optional().describe("The due date and time, ISO 8601; null clears it."),
+  start_on: isoDate.nullable().optional().describe("The start date, YYYY-MM-DD; null clears it."),
+  resource_subtype: subtype.optional().describe("The task's type."),
+  completed: z.boolean().optional().describe("Mark the task complete (true) or incomplete (false)."),
+  approval_status: approvalStatus.optional().describe("An approval task's status. Asana sets 'completed' from it."),
+});
+
+const deleteTaskInput = z.strictObject({ task_gid: gid.describe("The task's gid.") });
+
 const getProjectInput = z.strictObject({ project_gid: gid.describe("The project's gid.") });
 
 const findProjectsInput = z.strictObject({
@@ -131,6 +148,8 @@ const MAX_TOOL_INPUT_ELEMENTS = Math.max(
     listTasksInput,
     searchTasksInput,
     createTaskInput,
+    updateTaskInput,
+    deleteTaskInput,
     getProjectInput,
     findProjectsInput,
     listUsersInput,
@@ -268,32 +287,35 @@ export async function searchTasks(context: Context, input: z.infer<typeof search
   return renderTaskList("matching tasks, newest first", tasks, more);
 }
 
-type TaskFieldInput = Omit<z.infer<typeof createTaskInput>, "project_gid" | "section_gid" | "parent_gid">;
+type TaskFieldInput = Omit<z.infer<typeof updateTaskInput>, "task_gid">;
 
-function refuseBoth(input: TaskFieldInput, first: keyof TaskFieldInput, second: keyof TaskFieldInput) {
+function refuseBoth(input: TaskFieldInput, first: keyof TaskFieldInput, second: keyof TaskFieldInput, reason = "") {
   if (input[first] !== undefined && input[second] !== undefined) {
-    throw new Error(`pass '${first}' or '${second}', not both.`);
+    throw new Error(`pass '${first}' or '${second}', not both${reason}.`);
   }
 }
 
 function taskFields(input: TaskFieldInput): TaskFields {
   refuseBoth(input, "notes", "html_notes");
   refuseBoth(input, "due_on", "due_at");
+  refuseBoth(input, "approval_status", "completed", ": Asana sets 'completed' from 'approval_status'");
   const fields: TaskFields = {
     name: input.name,
-    notes: input.notes,
+    notes: input.notes === null ? "" : input.notes,
     html_notes: input.html_notes,
     assignee: input.assignee,
     due_on: input.due_on,
     due_at: input.due_at,
     start_on: input.start_on,
     resource_subtype: input.resource_subtype,
+    completed: input.completed,
+    approval_status: input.approval_status,
   };
   return Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined));
 }
 
-async function requireAssigneeInPinnedWorkspace(context: Context, assignee: string | undefined) {
-  if (assignee === undefined || assignee === "me") return;
+async function requireAssigneeInPinnedWorkspace(context: Context, assignee: string | null | undefined) {
+  if (assignee === undefined || assignee === null || assignee === "me") return;
   const workspaceGids = await context.asana.userWorkspaces(assignee);
   if (!workspaceGids.includes(context.workspace.gid)) throw notInPinnedWorkspace(context, `user ${assignee}`);
 }
@@ -330,6 +352,44 @@ export async function createTask(context: Context, input: z.infer<typeof createT
     `parent: ${task.parent ? label(task.parent) : "none"}`,
     renderMemberships(task),
   ].join("\n");
+}
+
+const renderDescription = (task: Task) => `description: ${task.notes ? "replaced" : "cleared"}`;
+const renderDue = (task: Task) => `due: ${due(task) ?? "none"}`;
+
+const renderChangedField: Record<keyof TaskFields, (task: Task) => string> = {
+  name: (task) => `name: ${task.name}`,
+  notes: renderDescription,
+  html_notes: renderDescription,
+  assignee: (task) => `assignee: ${task.assignee ? label(task.assignee) : "none"}`,
+  due_on: renderDue,
+  due_at: renderDue,
+  start_on: (task) => `start: ${task.startAt ?? task.startOn ?? "none"}`,
+  resource_subtype: (task) => `type: ${task.subtype ?? "unknown"}`,
+  completed: (task) => `completed: ${task.completed ? "yes" : "no"}`,
+  approval_status: (task) =>
+    `approval status: ${task.approvalStatus ?? "none"}, completed: ${task.completed ? "yes" : "no"}`,
+};
+
+export async function updateTask(context: Context, input: z.infer<typeof updateTaskInput>): Promise<string> {
+  const { task_gid: taskGid, ...changes } = input;
+  const fields = taskFields(changes);
+  const changed = Object.keys(fields) as (keyof TaskFields)[];
+  if (changed.length === 0) throw new Error("pass at least one field to change.");
+  requirePinnedWorkspace(context, await context.asana.taskWorkspace(taskGid), `task ${taskGid}`);
+  await requireAssigneeInPinnedWorkspace(context, fields.assignee);
+  const task = await context.asana
+    .updateTask(taskGid, fields)
+    .catch((err) => rethrowWithLandedHint(err, "get_task"));
+  const lines = new Set(changed.map((field) => renderChangedField[field](task)));
+  return [`updated task: ${label(task)}`, ...lines].join("\n");
+}
+
+export async function deleteTask(context: Context, input: z.infer<typeof deleteTaskInput>): Promise<string> {
+  const taskGid = input.task_gid;
+  requirePinnedWorkspace(context, await context.asana.taskWorkspace(taskGid), `task ${taskGid}`);
+  await context.asana.deleteTask(taskGid).catch((err) => rethrowWithLandedHint(err, "get_task"));
+  return `deleted task ${taskGid}: it is in the token user's Asana trash, restorable for 30 days.`;
 }
 
 function renderCustomField(field: CustomField): string[] {
@@ -495,6 +555,27 @@ export function buildServer(context: Context): McpServer {
       inputSchema: createTaskInput,
     },
     serially(createTask),
+  );
+
+  verb(
+    "update_task",
+    {
+      description:
+        "Change only the given fields of a task; null clears where allowed. At most one of " +
+        "'notes'/'html_notes' and of 'due_on'/'due_at'; send 'approval_status' without 'completed'. " +
+        "Returns each changed field's new value.",
+      inputSchema: updateTaskInput,
+    },
+    serially(updateTask),
+  );
+
+  verb(
+    "delete_task",
+    {
+      description: "Move a task to the token user's Asana trash, restorable for 30 days.",
+      inputSchema: deleteTaskInput,
+    },
+    serially(deleteTask),
   );
 
   verb(
