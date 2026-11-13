@@ -1,6 +1,16 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod";
-import { CURSOR, GID, type Asana, type Compact, type Task, type TaskSummary, type Workspace } from "./asana.js";
+import {
+  CURSOR,
+  GID,
+  type Asana,
+  type Compact,
+  type CustomField,
+  type Project,
+  type Task,
+  type TaskSummary,
+  type Workspace,
+} from "./asana.js";
 
 export type Context = {
   asana: Asana;
@@ -16,6 +26,7 @@ workspace is fixed at startup; no verb accepts a workspace.
 - current_user names the token's user and the pinned workspace.
 - get_task reads one task in full; list_tasks lists a project's or a section's tasks,
   or a task's subtasks; search_tasks searches the workspace and needs Asana Premium.
+- get_project reads a project with its sections and custom fields.
 - A list ending in a cursor has more; pass it back as 'cursor' for the next page.
   A full search page says so; narrow the search to see more.`;
 
@@ -57,9 +68,11 @@ const searchTasksInput = z.strictObject({
   limit,
 });
 
+const getProjectInput = z.strictObject({ project_gid: gid.describe("The project's gid.") });
+
 /** Elements plus members in `arguments`, checked before the schema. Top-level keys only; count nested ones by hand. */
 const MAX_TOOL_INPUT_ELEMENTS = Math.max(
-  ...[getTaskInput, listTasksInput, searchTasksInput].map((input) => Object.keys(input.shape).length),
+  ...[getTaskInput, listTasksInput, searchTasksInput, getProjectInput].map((input) => Object.keys(input.shape).length),
 );
 
 export async function currentUser(context: Context): Promise<string> {
@@ -182,6 +195,34 @@ export async function searchTasks(context: Context, input: z.infer<typeof search
   return renderTaskList("matching tasks, newest first", tasks, more);
 }
 
+function renderCustomField(field: CustomField): string[] {
+  const options = field.enumOptions.map((option) => `  ${label(option)}${option.enabled ? "" : ", disabled"}`);
+  return [`${label(field)}: ${field.type ?? "unknown type"}`, ...options];
+}
+
+function renderProject(project: Project, sections: Compact[], moreSections: boolean): string {
+  return [
+    `project: ${label(project)}`,
+    `url: ${project.permalink ?? "none"}`,
+    `archived: ${project.archived ? "yes" : "no"}`,
+    `completed: ${project.completed ? "yes" : "no"}`,
+    `owner: ${project.owner ? label(project.owner) : "none"}`,
+    `team: ${project.team ? label(project.team) : "none"}`,
+    ...(project.startOn ? [`start: ${project.startOn}`] : []),
+    `due: ${project.dueOn ?? "none"}`,
+    indented("sections", [...sections.map(label), ...(moreSections ? ["more sections not shown"] : [])]),
+    indented("custom fields", project.customFields.flatMap(renderCustomField)),
+    indented("notes", project.notes ? project.notes.split("\n") : []),
+  ].join("\n");
+}
+
+export async function getProject(context: Context, input: z.infer<typeof getProjectInput>): Promise<string> {
+  const project = await context.asana.project(input.project_gid);
+  requirePinnedWorkspace(context, project.workspaceGid, `project ${input.project_gid}`);
+  const sections = await context.asana.sectionList(input.project_gid);
+  return renderProject(project, sections.items, sections.cursor !== undefined);
+}
+
 export function buildServer(context: Context): McpServer {
   const server = new McpServer(
     { name: "asana", version: "0.1.0" },
@@ -255,6 +296,17 @@ export function buildServer(context: Context): McpServer {
       inputSchema: searchTasksInput,
     },
     searchTasks,
+  );
+
+  verb(
+    "get_project",
+    {
+      description:
+        "Read one project: owner, team, dates, archived and completed state, sections, custom fields with " +
+        "their type and enum options, and its description.",
+      inputSchema: getProjectInput,
+    },
+    getProject,
   );
 
   return server;
