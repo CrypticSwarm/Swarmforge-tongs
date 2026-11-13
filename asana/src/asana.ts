@@ -50,6 +50,22 @@ export type Task = TaskSummary & {
   subtaskCount?: number;
 };
 
+export type EnumOption = { gid: string; name: string; enabled: boolean };
+
+export type CustomField = Compact & { type?: string; enumOptions: EnumOption[] };
+
+export type ProjectSummary = Compact & { archived: boolean; team?: Compact; workspaceGid?: string };
+
+export type Project = ProjectSummary & {
+  permalink?: string;
+  completed: boolean;
+  owner?: Compact;
+  startOn?: string;
+  dueOn?: string;
+  notes: string;
+  customFields: CustomField[];
+};
+
 export type Page<Item> = { items: Item[]; cursor?: string };
 
 type Resource = Record<string, unknown> & { gid: string };
@@ -75,6 +91,15 @@ const TASK_FIELDS = [
   "permalink_url,notes,html_notes,start_on,start_at,completed_at,resource_subtype,approval_status",
   "custom_fields.name,custom_fields.display_value,memberships.project.name,memberships.section.name",
   "parent.name,dependencies.name,dependents.name,num_subtasks",
+].join(",");
+
+const PROJECT_SUMMARY_FIELDS = "name,archived,team.name,workspace";
+
+const PROJECT_FIELDS = [
+  PROJECT_SUMMARY_FIELDS,
+  "permalink_url,completed,owner.name,start_on,due_on,notes",
+  "custom_field_settings.custom_field.name,custom_field_settings.custom_field.resource_subtype",
+  "custom_field_settings.custom_field.enum_options.name,custom_field_settings.custom_field.enum_options.enabled",
 ].join(",");
 
 const MAX_NOTES = 20_000;
@@ -171,6 +196,39 @@ function task(data: Resource): Task {
     dependencies: compacts(data.dependencies),
     dependents: compacts(data.dependents),
     subtaskCount: typeof data.num_subtasks === "number" ? data.num_subtasks : undefined,
+  };
+}
+
+function customFieldsOf(setting: unknown): CustomField[] {
+  const field = (setting as { custom_field?: unknown } | null)?.custom_field;
+  if (!isResource(field)) return [];
+  const enumOptions = (Array.isArray(field.enum_options) ? field.enum_options : []).flatMap((option) => {
+    const compactOption = compact(option);
+    return compactOption ? [{ ...compactOption, enabled: option.enabled !== false }] : [];
+  });
+  return [{ gid: field.gid, name: text(field.name) ?? "", type: text(field.resource_subtype), enumOptions }];
+}
+
+function projectSummary(data: Resource): ProjectSummary {
+  return {
+    gid: data.gid,
+    name: text(data.name) ?? "",
+    archived: data.archived === true,
+    team: compact(data.team),
+    workspaceGid: compact(data.workspace)?.gid,
+  };
+}
+
+function project(data: Resource): Project {
+  return {
+    ...projectSummary(data),
+    permalink: text(data.permalink_url),
+    completed: data.completed === true,
+    owner: compact(data.owner),
+    startOn: text(data.start_on),
+    dueOn: text(data.due_on),
+    notes: multiline(data.notes),
+    customFields: (Array.isArray(data.custom_field_settings) ? data.custom_field_settings : []).flatMap(customFieldsOf),
   };
 }
 
@@ -313,6 +371,19 @@ export class Asana {
       throw err;
     });
     return page.items.map(taskSummary);
+  }
+
+  async project(gid: string): Promise<Project> {
+    return project(
+      await this.call(`reading project ${gid}`, () => this.projects.getProject(gid, { opt_fields: PROJECT_FIELDS })),
+    );
+  }
+
+  async sectionList(projectGid: string): Promise<Page<Compact>> {
+    const page = await this.callList(`listing sections of project ${projectGid}`, () =>
+      this.sections.getSectionsForProject(projectGid, { opt_fields: "name", limit: 100 }),
+    );
+    return { items: compacts(page.items), cursor: page.cursor };
   }
 }
 

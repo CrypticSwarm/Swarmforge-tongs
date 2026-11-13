@@ -7,7 +7,7 @@ import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/cli
 import { createApp } from "../src/app.js";
 import { FakeAsana, TOKEN, WORKSPACE, dataReply, errorReply, meRoute, workspaceRoute } from "./fakes.js";
 
-const VERBS = ["current_user", "get_task", "list_tasks", "search_tasks"];
+const VERBS = ["current_user", "get_project", "get_task", "list_tasks", "search_tasks"];
 
 let fake: FakeAsana;
 let httpServer: Server;
@@ -109,7 +109,7 @@ describe("current_user", () => {
   });
 });
 
-describe("task verbs", () => {
+describe("verbs", () => {
   it("serve get_task over MCP", async () => {
     const task = { gid: "1300000000000001", name: "Ship it", workspace: { gid: WORKSPACE.gid } };
     fake.routes = { "GET /tasks/1300000000000001": dataReply(task) };
@@ -132,11 +132,19 @@ describe("task verbs", () => {
       ["search_tasks", { due_on_after: "next week" }, "due_on_after"],
       ["search_tasks", { text: "x".repeat(201) }, "text"],
       ["search_tasks", { limit: 0 }, "limit"],
+      ["get_project", { project_gid: "1?opt_fields=notes" }, "project_gid"],
     ] as const) {
       const result = await client.callTool({ name, arguments: args });
       assert.equal(result.isError, true, `${name} ${JSON.stringify(args)}`);
       assert.match(text(result), new RegExp(`tool ${name}: ${field}: `), `${name} ${JSON.stringify(args)}`);
     }
+    assert.deepEqual(fake.requests, []);
+  });
+
+  it("refuse an invented argument before calling Asana", async () => {
+    const args = { project_gid: "1", workspace: "1" };
+    const result = await (await connect()).callTool({ name: "get_project", arguments: args });
+    assert.match(text(result), /Unrecognized key: "workspace"/);
     assert.deepEqual(fake.requests, []);
   });
 
