@@ -40,7 +40,7 @@ const FULL_PROJECT = {
     },
     {
       gid: "1610000000000002",
-      custom_field: { gid: "1600000000000002", name: "Estimate", resource_subtype: "number" },
+      custom_field: { gid: "1600000000000002", name: "Estimate", resource_subtype: "number", is_formula_field: true },
     },
     { gid: "1610000000000003", custom_field: { gid: "1600000000000003", name: "Mystery" } },
     { gid: "1610000000000004" },
@@ -91,7 +91,7 @@ describe("get_project", () => {
         "    High (gid 1620000000000001)",
         "    Old (gid 1620000000000002), disabled",
         "    Unflagged (gid 1620000000000003)",
-        "  Estimate (gid 1600000000000002): number",
+        "  Estimate (gid 1600000000000002): number, read-only",
         "  Mystery (gid 1600000000000003): unknown type",
         "notes:",
         "  goal one",
@@ -101,7 +101,8 @@ describe("get_project", () => {
     assert.equal(
       fake.requestsTo("GET", `/projects/${PROJECT_GID}`)[0].query.opt_fields.split(",").sort().join(","),
       "archived,completed,custom_field_settings.custom_field.enum_options.enabled," +
-        "custom_field_settings.custom_field.enum_options.name,custom_field_settings.custom_field.name," +
+        "custom_field_settings.custom_field.enum_options.name,custom_field_settings.custom_field.is_formula_field," +
+        "custom_field_settings.custom_field.is_value_read_only,custom_field_settings.custom_field.name," +
         "custom_field_settings.custom_field.resource_subtype,due_on,name,notes,owner.name,permalink_url,start_on," +
         "team.name,workspace",
     );

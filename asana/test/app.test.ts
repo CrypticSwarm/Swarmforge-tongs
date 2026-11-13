@@ -32,6 +32,10 @@ async function connect(): Promise<Client> {
   return client;
 }
 
+function manyFields(count: number, value: unknown): Record<string, unknown> {
+  return Object.fromEntries(Array.from({ length: count }, (_, index) => [`field ${index}`, value]));
+}
+
 function text(result: Awaited<ReturnType<Client["callTool"]>>): string {
   return result.content.map((block) => (block.type === "text" ? block.text : "")).join("");
 }
@@ -178,6 +182,14 @@ describe("verbs", () => {
       ["update_task", { task_gid: "1", assignee: "ada@example.com" }, "assignee"],
       ["update_task", { task_gid: "1", approval_status: "done" }, "approval_status"],
       ["delete_task", { task_gid: "1/subtasks" }, "task_gid"],
+      ["update_task", { task_gid: "1", custom_fields: {} }, "custom_fields"],
+      ["update_task", { task_gid: "1", custom_fields: manyFields(21, "x") }, "custom_fields"],
+      ["update_task", { task_gid: "1", custom_fields: { "a\nb": "x" } }, "custom_fields.a\nb"],
+      ["update_task", { task_gid: "1", custom_fields: { a: "x".repeat(1025) } }, "custom_fields.a"],
+      ["update_task", { task_gid: "1", custom_fields: { a: Array(21).fill("x") } }, "custom_fields.a"],
+      ["update_task", { task_gid: "1", custom_fields: { a: ["x\u2028"] } }, "custom_fields.a.0"],
+      ["update_task", { task_gid: "1", custom_fields: { a: { date: "2026-11-20" } } }, "custom_fields.a"],
+      ["create_task", { name: "x", project_gid: "1", custom_fields: { a: true } }, "custom_fields.a"],
     ] as const) {
       const result = await client.callTool({ name, arguments: args });
       assert.equal(result.isError, true, `${name} ${JSON.stringify(args)}`);
@@ -232,11 +244,12 @@ describe("verbs", () => {
       project_gid: "1",
       section_gid: "2",
       parent_gid: "3",
+      custom_fields: manyFields(20, Array(20).fill("x")),
     };
     const create = await client.callTool({ name: "create_task", arguments: fields });
     assert.match(text(create), /not both/);
     const tooMany = await client.callTool({ name: "create_task", arguments: { ...fields, extra: 1 } });
-    assert.match(text(tooMany), /maximum of 11 elements/);
+    assert.match(text(tooMany), /maximum of 432 elements/);
     assert.deepEqual(fake.requestsTo("POST", "/tasks"), []);
   });
 
