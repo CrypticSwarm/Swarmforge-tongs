@@ -19,14 +19,17 @@ Reached at `http://asana:8080/mcp` on the session network.
 | `list_tasks` | one of `project_gid`, `section_gid`, `parent_gid`; `incomplete_only?`, `limit?`, `cursor?` | Lists a project's or section's tasks, or a task's subtasks. |
 | `search_tasks` | any of `text`, `assignee`, `project_gid` or `section_gid`, `tag_gid`, `completed`, `due_on_after`, `due_on_before`; `limit?` | Searches the workspace, newest first. Needs Asana Premium. |
 | `get_project` | `project_gid` | Reads one project with its first 100 sections and its custom fields, enum options included. |
+| `find_projects` | `query`; `limit?` | Finds projects by name, most recently used first. |
+| `list_users` | `query?` or `cursor?`; `limit?` | Lists the workspace's users, or finds them by name or email, most worked with first. |
 
 - An unknown or malformed parameter is refused before Asana is called.
 - `assignee` is a user gid or `me`.
-- A list returns at most `limit` tasks (default 50, max 100). One ending in a
-  `cursor` has more; pass it back for the next page. A full search page says so;
-  narrow the search to see more.
-- A task or project outside the pinned workspace is refused, as is a `list_tasks`
-  project, section, or parent outside it.
+- A list returns at most `limit` items (default 50, max 100). One ending in a
+  `cursor` has more; pass it back for the next page. A full search or lookup page
+  says so; narrow it to see more.
+- With a `query`, `find_projects` and `list_users` return one page, with no cursor.
+- A task, project, or user outside the pinned workspace is refused, as is a
+  `list_tasks` project, section, or parent outside it.
 - An Asana error comes back as an error result with its status and message.
 - `ASANA_WORKSPACE_ID` pins one workspace; no verb accepts one. Startup stops if
   the token or workspace id is missing or malformed, or the token cannot read the

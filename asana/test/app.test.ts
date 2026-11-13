@@ -7,7 +7,7 @@ import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/cli
 import { createApp } from "../src/app.js";
 import { FakeAsana, TOKEN, WORKSPACE, dataReply, errorReply, meRoute, workspaceRoute } from "./fakes.js";
 
-const VERBS = ["current_user", "get_project", "get_task", "list_tasks", "search_tasks"];
+const VERBS = ["current_user", "find_projects", "get_project", "get_task", "list_tasks", "list_users", "search_tasks"];
 
 let fake: FakeAsana;
 let httpServer: Server;
@@ -110,11 +110,14 @@ describe("current_user", () => {
 });
 
 describe("verbs", () => {
-  it("serve get_task over MCP", async () => {
+  it("serve get_task and list_users over MCP", async () => {
     const task = { gid: "1300000000000001", name: "Ship it", workspace: { gid: WORKSPACE.gid } };
     fake.routes = { "GET /tasks/1300000000000001": dataReply(task) };
     const result = await (await connect()).callTool({ name: "get_task", arguments: { task_gid: task.gid } });
     assert.match(text(result), /^task: Ship it \(gid 1300000000000001\)\n/);
+    fake.routes = { "GET /users": { json: { data: [], next_page: null } } };
+    const users = await (await connect()).callTool({ name: "list_users", arguments: {} });
+    assert.equal(text(users), "users in workspace Acme: none");
   });
 
   it("refuse a malformed argument by name before calling Asana", async () => {
@@ -133,6 +136,13 @@ describe("verbs", () => {
       ["search_tasks", { text: "x".repeat(201) }, "text"],
       ["search_tasks", { limit: 0 }, "limit"],
       ["get_project", { project_gid: "1?opt_fields=notes" }, "project_gid"],
+      ["find_projects", {}, "query"],
+      ["find_projects", { query: " " }, "query"],
+      ["find_projects", { query: "x".repeat(201) }, "query"],
+      ["list_users", { query: " " }, "query"],
+      ["list_users", { query: "x".repeat(201) }, "query"],
+      ["list_users", { cursor: "a b" }, "cursor"],
+      ["list_users", { limit: 101 }, "limit"],
     ] as const) {
       const result = await client.callTool({ name, arguments: args });
       assert.equal(result.isError, true, `${name} ${JSON.stringify(args)}`);
@@ -142,9 +152,15 @@ describe("verbs", () => {
   });
 
   it("refuse an invented argument before calling Asana", async () => {
-    const args = { project_gid: "1", workspace: "1" };
-    const result = await (await connect()).callTool({ name: "get_project", arguments: args });
-    assert.match(text(result), /Unrecognized key: "workspace"/);
+    const client = await connect();
+    for (const [name, args] of [
+      ["get_project", { project_gid: "1", workspace: "1" }],
+      ["find_projects", { query: "x", workspace: "1" }],
+      ["list_users", { workspace: "1" }],
+    ] as const) {
+      const result = await client.callTool({ name, arguments: args });
+      assert.match(text(result), /Unrecognized key: "workspace"/, name);
+    }
     assert.deepEqual(fake.requests, []);
   });
 

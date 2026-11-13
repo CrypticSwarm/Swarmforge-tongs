@@ -97,6 +97,13 @@ export function pageReply(items: unknown[], offset?: string): FakeReply {
   return { json: { data: items, next_page: nextPage } };
 }
 
+export function typeaheadRoute(resourceType: string, items: unknown[]): (request: FakeRequest) => FakeReply {
+  return (request) => {
+    assert.equal(request.query.resource_type, resourceType);
+    return pageReply(items);
+  };
+}
+
 export function meRoute(user: User = USER): Routes {
   return { "GET /users/me": dataReply({ resource_type: "user", ...user }) };
 }

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after, before, beforeEach, describe, it } from "node:test";
-import { getProject, type Context } from "../src/server.js";
-import { FakeAsana, USER, WORKSPACE, dataReply, pageReply } from "./fakes.js";
+import { findProjects, getProject, type Context } from "../src/server.js";
+import { FakeAsana, USER, WORKSPACE, dataReply, pageReply, typeaheadRoute } from "./fakes.js";
 
 const PROJECT_GID = "1400000000000001";
 const IN_WORKSPACE = { gid: WORKSPACE.gid, resource_type: "workspace" };
@@ -9,6 +9,7 @@ const ELSEWHERE = { gid: "1100000000000999", resource_type: "workspace" };
 const TEAM = { gid: "1800000000000001", name: "Platform" };
 const PROJECT_ROUTE = `GET /projects/${PROJECT_GID}`;
 const SECTIONS_ROUTE = `GET /projects/${PROJECT_GID}/sections`;
+const TYPEAHEAD_ROUTE = `GET /workspaces/${WORKSPACE.gid}/typeahead`;
 
 const FULL_PROJECT = {
   gid: PROJECT_GID,
@@ -45,6 +46,10 @@ const FULL_PROJECT = {
     { gid: "1610000000000004" },
   ],
 };
+
+function projectSummary(gid: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return { gid, name: `Project ${gid.slice(-1)}`, archived: false, workspace: IN_WORKSPACE, ...extra };
+}
 
 let fake: FakeAsana;
 let context: Context;
@@ -136,5 +141,47 @@ describe("get_project", () => {
       });
     }
     assert.deepEqual(fake.requestsTo("GET", `/projects/${PROJECT_GID}/sections`), []);
+  });
+});
+
+describe("find_projects", () => {
+  it("asks typeahead for projects in the pinned workspace and says when the page is full", async () => {
+    fake.routes = {
+      [TYPEAHEAD_ROUTE]: typeaheadRoute("project", [
+        projectSummary("1400000000000001", { team: TEAM }),
+        projectSummary("1400000000000002", { archived: true }),
+      ]),
+    };
+    assert.equal(
+      await findProjects(context, { query: "launch", limit: 2 }),
+      [
+        "matching projects, most recently used first:",
+        "- Project 1 (gid 1400000000000001), team Platform (gid 1800000000000001)",
+        "- Project 2 (gid 1400000000000002), archived",
+        "more may match: narrow the query",
+      ].join("\n"),
+    );
+    assert.deepEqual(fake.requestsTo("GET", `/workspaces/${WORKSPACE.gid}/typeahead`)[0].query, {
+      resource_type: "project",
+      query: "launch",
+      count: "2",
+      opt_fields: "name,archived,team.name,workspace",
+    });
+  });
+
+  it("asks for 50 by default and says none when nothing matches", async () => {
+    fake.routes = { [TYPEAHEAD_ROUTE]: typeaheadRoute("project", []) };
+    assert.equal(await findProjects(context, { query: "x" }), "matching projects, most recently used first: none");
+    assert.equal(fake.requestsTo("GET", `/workspaces/${WORKSPACE.gid}/typeahead`)[0].query.count, "50");
+  });
+
+  it("refuses the page if any result is outside the workspace, or in none", async () => {
+    for (const workspace of [ELSEWHERE, undefined]) {
+      const projects = [projectSummary("1400000000000001"), projectSummary("1400000000000002", { workspace })];
+      fake.routes = { [TYPEAHEAD_ROUTE]: typeaheadRoute("project", projects) };
+      await assert.rejects(findProjects(context, { query: "x" }), {
+        message: `a matching project is not in workspace Acme (gid ${WORKSPACE.gid}).`,
+      });
+    }
   });
 });
