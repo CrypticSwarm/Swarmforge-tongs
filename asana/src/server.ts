@@ -13,7 +13,7 @@ import {
   type ProjectSummary,
   type Story,
   type Task,
-  type TaskCustomField,
+  type CustomFieldValue,
   type TaskFields,
   type TaskSummary,
   type Workspace,
@@ -169,6 +169,16 @@ const findProjectsInput = z.strictObject({
   limit: limitSchema("projects"),
 });
 
+const updateProjectInput = z.strictObject({
+  project_gid: gid.describe("The project's gid."),
+  custom_fields: customFieldsInput,
+});
+
+const portfolioItemInput = z.strictObject({
+  portfolio_gid: gid.describe("The portfolio's gid."),
+  project_gid: gid.describe("The project's gid."),
+});
+
 const listUsersInput = z.strictObject({
   query: z
     .string()
@@ -187,6 +197,8 @@ const keyCount = (input: z.ZodObject) => Object.keys(input.shape).length;
 const MAX_TOOL_INPUT_ELEMENTS = Math.max(
   ...[getTaskInput, listTasksInput, searchTasksInput, deleteTaskInput].map(keyCount),
   ...[listCommentsInput, addCommentInput, getProjectInput, findProjectsInput, listUsersInput].map(keyCount),
+  keyCount(portfolioItemInput),
+  keyCount(updateProjectInput) + MAX_CUSTOM_FIELD_ELEMENTS,
   keyCount(createTaskInput) + MAX_BLOCKERS + MAX_CUSTOM_FIELD_ELEMENTS,
   keyCount(updateTaskInput) + keyCount(moveToInput) + 2 * MAX_BLOCKERS + MAX_CUSTOM_FIELD_ELEMENTS,
 );
@@ -256,9 +268,18 @@ function requireTasksInPinnedWorkspace(context: Context, tasks: TaskSummary[], w
   for (const task of tasks) requirePinnedWorkspace(context, task.workspaceGid, `a task in ${what}`);
 }
 
-function renderCustomFieldValue({ field, type, value }: TaskCustomField): string {
+function renderCustomFieldValue({ field, type, value }: CustomFieldValue): string {
   const values = typeof value === "object" ? [value].flat().map(label) : value === undefined ? [] : [String(value)];
   return `${label(field)}, ${type ?? "unknown type"}: ${values.join(", ") || "not set"}`;
+}
+
+function renderCustomFieldChanges(values: CustomFieldValue[], fieldGids: string[]): string {
+  return fieldGids
+    .map((fieldGid) => {
+      const value = values.find((each) => each.field.gid === fieldGid);
+      return `custom field ${value ? renderCustomFieldValue(value) : `${fieldGid}: not in Asana's answer`}`;
+    })
+    .join("\n");
 }
 
 function renderMemberships(task: Task): string {
@@ -477,13 +498,7 @@ const renderChangedField: Record<keyof TaskFields, (task: Task, fields: TaskFiel
   completed: (task) => `completed: ${task.completed ? "yes" : "no"}`,
   approval_status: (task) =>
     `approval status: ${task.approvalStatus ?? "none"}, completed: ${task.completed ? "yes" : "no"}`,
-  custom_fields: (task, fields) =>
-    Object.keys(fields.custom_fields ?? {})
-      .map((fieldGid) => {
-        const value = task.customFields.find((each) => each.field.gid === fieldGid);
-        return `custom field ${value ? renderCustomFieldValue(value) : `${fieldGid}: not in Asana's answer`}`;
-      })
-      .join("\n"),
+  custom_fields: (task, fields) => renderCustomFieldChanges(task.customFields, Object.keys(fields.custom_fields ?? {})),
 };
 
 export async function updateTask(context: Context, input: z.infer<typeof updateTaskInput>): Promise<string> {
@@ -621,7 +636,7 @@ function renderCustomField(field: CustomField): string[] {
   return [`${label(field)}: ${field.type ?? "unknown type"}${field.readOnly ? ", read-only" : ""}`, ...options];
 }
 
-function renderProject(project: Project, sections: Compact[], moreSections: boolean): string {
+function renderProject(project: Project, blocks: string[]): string {
   return [
     `project: ${label(project)}`,
     `url: ${project.permalink ?? "none"}`,
@@ -631,17 +646,70 @@ function renderProject(project: Project, sections: Compact[], moreSections: bool
     `team: ${project.team ? label(project.team) : "none"}`,
     ...(project.startOn ? [`start: ${project.startOn}`] : []),
     `due: ${project.dueOn ?? "none"}`,
-    indented("sections", [...sections.map(label), ...(moreSections ? ["more sections not shown"] : [])]),
+    ...blocks,
     indented("custom fields", project.customFields.flatMap(renderCustomField)),
+    indented("custom field values", project.customFieldValues.map(renderCustomFieldValue)),
     indented("notes", project.notes ? project.notes.split("\n") : []),
   ].join("\n");
+}
+
+function renderFirstPage(title: string, page: { items: Compact[]; cursor?: string }): string {
+  return indented(title, [...page.items.map(label), ...(page.cursor ? [`more ${title} not shown`] : [])]);
+}
+
+async function renderProjectPortfolios(context: Context, projectGid: string): Promise<string> {
+  try {
+    return renderFirstPage("portfolios", await context.asana.projectPortfolios(projectGid));
+  } catch (err) {
+    if (!(err instanceof AsanaError)) throw err;
+    return `portfolios: not available (${err.message})`;
+  }
 }
 
 export async function getProject(context: Context, input: z.infer<typeof getProjectInput>): Promise<string> {
   const project = await context.asana.project(input.project_gid);
   requirePinnedWorkspace(context, project.workspaceGid, `project ${input.project_gid}`);
-  const sections = await context.asana.sectionList(input.project_gid);
-  return renderProject(project, sections.items, sections.cursor !== undefined);
+  const sections = renderFirstPage("sections", await context.asana.sectionList(input.project_gid));
+  return renderProject(project, [sections, await renderProjectPortfolios(context, input.project_gid)]);
+}
+
+export async function updateProject(context: Context, input: z.infer<typeof updateProjectInput>): Promise<string> {
+  const projectGid = input.project_gid;
+  const target = await context.asana.projectTarget(projectGid);
+  requirePinnedWorkspace(context, target.workspaceGid, `project ${projectGid}`);
+  const fields = await resolvePinned(context, input.custom_fields, target.customFields, `project ${projectGid}`);
+  const project = await context.asana
+    .updateProject(projectGid, fields)
+    .catch((err) => rethrowWithLandedHint(err, "get_project"));
+  return [
+    `updated project: ${label(project)}`,
+    renderCustomFieldChanges(project.customFieldValues, Object.keys(fields)),
+  ].join("\n");
+}
+
+async function requirePortfolioItemInPinnedWorkspace(context: Context, input: z.infer<typeof portfolioItemInput>) {
+  const portfolioGid = input.portfolio_gid;
+  requirePinnedWorkspace(context, await context.asana.portfolioWorkspace(portfolioGid), `portfolio ${portfolioGid}`);
+  await requireProjectInPinnedWorkspace(context, input.project_gid);
+}
+
+export async function addToPortfolio(context: Context, input: z.infer<typeof portfolioItemInput>): Promise<string> {
+  await requirePortfolioItemInPinnedWorkspace(context, input);
+  await context.asana
+    .addPortfolioItem(input.portfolio_gid, input.project_gid)
+    .catch((err) => rethrowWithLandedHint(err, "get_project"));
+  return `added project ${input.project_gid} to portfolio ${input.portfolio_gid}`;
+}
+
+export async function removeFromPortfolio(
+  context: Context,
+  input: z.infer<typeof portfolioItemInput>,
+): Promise<string> {
+  await requirePortfolioItemInPinnedWorkspace(context, input);
+  await context.asana
+    .removePortfolioItem(input.portfolio_gid, input.project_gid)
+    .catch((err) => rethrowWithLandedHint(err, "get_project"));
+  return `removed project ${input.project_gid} from portfolio ${input.portfolio_gid}`;
 }
 
 function renderProjectSummary(project: ProjectSummary): string {
@@ -823,11 +891,32 @@ export function buildServer(context: Context): McpServer {
     "get_project",
     {
       description:
-        "Read one project: owner, team, dates, archived and completed state, sections, custom fields with " +
-        "their type and enum options, and its description.",
+        "Read one project: owner, team, dates, archived and completed state, sections, portfolios, custom fields " +
+        "with their type and enum options, its own custom field values, and its description.",
       inputSchema: getProjectInput,
     },
     getProject,
+  );
+
+  verb(
+    "update_project",
+    {
+      description: "Set a project's own custom field values, such as its portfolios' fields, and return them.",
+      inputSchema: updateProjectInput,
+    },
+    serially(updateProject),
+  );
+
+  verb(
+    "add_to_portfolio",
+    { description: "Add a project to a portfolio.", inputSchema: portfolioItemInput },
+    serially(addToPortfolio),
+  );
+
+  verb(
+    "remove_from_portfolio",
+    { description: "Take a project out of a portfolio.", inputSchema: portfolioItemInput },
+    serially(removeFromPortfolio),
   );
 
   verb(
