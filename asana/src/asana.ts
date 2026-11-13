@@ -10,6 +10,7 @@ import {
   SectionsApi,
   StoriesApi,
   TasksApi,
+  TeamsApi,
   TypeaheadApi,
   UsersApi,
   WorkspacesApi,
@@ -126,6 +127,8 @@ export type Goal = Compact & {
   notes: string;
 };
 
+export type GoalScope = { workspace: string; is_workspace_level?: boolean } | { team: string };
+
 export type GoalSupporter = { resource?: Compact; type?: string; subtype?: string; contributionWeight?: number };
 
 export type WorkspaceUser = User & { workspaceGids: string[] };
@@ -226,6 +229,8 @@ const GOAL_FIELDS = [
   "metric.unit,metric.currency_code,metric.initial_number_value,metric.current_number_value",
   "metric.target_number_value,metric.current_display_value,metric.progress_source",
 ].join(",");
+
+const GOAL_SUMMARY_FIELDS = "name,workspace,owner.name,status,time_period.display_name";
 
 const GOAL_RELATIONSHIP_FIELDS = "resource_subtype,contribution_weight,supporting_resource.name";
 
@@ -507,6 +512,7 @@ export class Asana {
   private readonly sections: SectionsApi;
   private readonly stories: StoriesApi;
   private readonly tasks: TasksApi;
+  private readonly teams: TeamsApi;
   private readonly typeahead: TypeaheadApi;
   private readonly users: UsersApi;
   private readonly workspaces: WorkspacesApi;
@@ -528,6 +534,7 @@ export class Asana {
     this.sections = new SectionsApi(client);
     this.stories = new StoriesApi(client);
     this.tasks = new TasksApi(client);
+    this.teams = new TeamsApi(client);
     this.typeahead = new TypeaheadApi(client);
     this.users = new UsersApi(client);
     this.workspaces = new WorkspacesApi(client);
@@ -646,6 +653,46 @@ export class Asana {
 
   async goal(gid: string): Promise<Goal> {
     return goal(await this.call(`reading goal ${gid}`, () => this.goals.getGoal(gid, { opt_fields: GOAL_FIELDS })));
+  }
+
+  async goalWorkspace(gid: string): Promise<string | undefined> {
+    const data = await this.call(`reading goal ${gid}`, () => this.goals.getGoal(gid, { opt_fields: "workspace" }));
+    return compact(data.workspace)?.gid;
+  }
+
+  async teamWorkspace(gid: string): Promise<string | undefined> {
+    const data = await this.call(`reading team ${gid}`, () => this.teams.getTeam(gid, { opt_fields: "organization" }));
+    return compact(data.organization)?.gid;
+  }
+
+  async goalList(
+    scope: GoalScope,
+    options: { timePeriod?: string; limit: number; cursor?: string },
+  ): Promise<Page<Goal>> {
+    const page = await this.callList("listing goals", () =>
+      this.goals.getGoals({
+        ...scope,
+        time_periods: options.timePeriod,
+        limit: options.limit,
+        offset: options.cursor,
+        opt_fields: GOAL_SUMMARY_FIELDS,
+      }),
+    );
+    return { items: page.items.map(goal), cursor: page.cursor };
+  }
+
+  async addGoalSupporter(gid: string, resource: string, weight?: number): Promise<GoalSupporter> {
+    const data = { supporting_resource: resource, contribution_weight: weight };
+    const relationship = await this.call(`linking project ${resource} to goal ${gid}`, () =>
+      this.goalRelationships.addSupportingRelationship({ data }, gid, { opt_fields: GOAL_RELATIONSHIP_FIELDS }),
+    );
+    return goalSupporter(relationship);
+  }
+
+  async removeGoalSupporter(gid: string, resource: string): Promise<void> {
+    await this.send(`unlinking project ${resource} from goal ${gid}`, () =>
+      this.goalRelationships.removeSupportingRelationship({ data: { supporting_resource: resource } }, gid),
+    );
   }
 
   async parentGoals(gid: string): Promise<Page<Compact>> {

@@ -18,12 +18,15 @@ const VERBS = [
   "get_portfolio",
   "get_project",
   "get_task",
+  "link_goal",
   "list_comments",
+  "list_goals",
   "list_portfolios",
   "list_tasks",
   "list_users",
   "remove_from_portfolio",
   "search_tasks",
+  "unlink_goal",
   "update_project",
   "update_task",
 ];
@@ -231,6 +234,18 @@ describe("verbs", () => {
       ["add_to_portfolio", { portfolio_gid: "1", project_gid: "me" }, "project_gid"],
       ["remove_from_portfolio", { portfolio_gid: "../1", project_gid: "2" }, "portfolio_gid"],
       ["get_goal", { goal_gid: "1/parentGoals" }, "goal_gid"],
+      ["list_goals", { team_gid: "1&workspace=2" }, "team_gid"],
+      ["list_goals", { time_period_gid: "Q1" }, "time_period_gid"],
+      ["list_goals", { workspace_level: "yes" }, "workspace_level"],
+      ["list_goals", { limit: 101 }, "limit"],
+      ["list_goals", { cursor: "a b" }, "cursor"],
+      ["link_goal", { goal_gid: "1/../2", project_gid: "2" }, "goal_gid"],
+      ["unlink_goal", { goal_gid: "1", project_gid: "" }, "project_gid"],
+      ["link_goal", { goal_gid: "1", project_gid: "me" }, "project_gid"],
+      ["link_goal", { goal_gid: "1", project_gid: "2", contribution_weight: 1.5 }, "contribution_weight"],
+      ["link_goal", { goal_gid: "1", project_gid: "2", contribution_weight: -0.1 }, "contribution_weight"],
+      ["link_goal", { goal_gid: "1", project_gid: "2", contribution_weight: "0.5" }, "contribution_weight"],
+      ["unlink_goal", { goal_gid: "?1", project_gid: "2" }, "goal_gid"],
     ] as const) {
       const result = await client.callTool({ name, arguments: args });
       assert.equal(result.isError, true, `${name} ${JSON.stringify(args)}`);
@@ -257,6 +272,9 @@ describe("verbs", () => {
       ["add_to_portfolio", { portfolio_gid: "1", project_gid: "2", workspace: "1" }],
       ["remove_from_portfolio", { portfolio_gid: "1", project_gid: "2", workspace: "1" }],
       ["get_goal", { goal_gid: "1", workspace: "1" }],
+      ["list_goals", { workspace: "1" }],
+      ["link_goal", { goal_gid: "1", project_gid: "2", workspace: "1" }],
+      ["unlink_goal", { goal_gid: "1", project_gid: "2", workspace: "1" }],
     ] as const) {
       const result = await client.callTool({ name, arguments: args });
       assert.match(text(result), /Unrecognized key: "workspace"/, name);
