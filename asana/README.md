@@ -15,8 +15,10 @@ Reached at `http://asana:8080/mcp` on the session network.
 | Verb | Params | What it does |
 | --- | --- | --- |
 | `current_user` | none | Names the token's user (name, gid, email) and the pinned workspace (name, gid). |
+| `get_task` | `task_gid` | Reads one task in full, with its description as plain text (`notes`) and HTML (`html_notes`). |
 
-- An unknown parameter is refused before Asana is called.
+- An unknown or malformed parameter is refused before Asana is called.
+- A task outside the pinned workspace is refused.
 - An Asana error comes back as an error result with its status and message.
 - `ASANA_WORKSPACE_ID` pins one workspace; no verb accepts one. Startup stops if
   the token or workspace id is missing or malformed, or the token cannot read the

@@ -5,9 +5,9 @@ import { after, before, beforeEach, describe, it } from "node:test";
 import { inspect } from "node:util";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { createApp } from "../src/app.js";
-import { FakeAsana, TOKEN, WORKSPACE, errorReply, meRoute, workspaceRoute } from "./fakes.js";
+import { FakeAsana, TOKEN, WORKSPACE, dataReply, errorReply, meRoute, workspaceRoute } from "./fakes.js";
 
-const VERBS = ["current_user"];
+const VERBS = ["current_user", "get_task"];
 
 let fake: FakeAsana;
 let httpServer: Server;
@@ -105,6 +105,28 @@ describe("current_user", () => {
   it("refuses an invented argument before calling Asana", async () => {
     const result = await (await connect()).callTool({ name: "current_user", arguments: { workspace: "1" } });
     assert.equal(result.isError, true);
+    assert.deepEqual(fake.requests, []);
+  });
+});
+
+describe("task verbs", () => {
+  it("serve get_task over MCP", async () => {
+    const task = { gid: "1300000000000001", name: "Ship it", workspace: { gid: WORKSPACE.gid } };
+    fake.routes = { "GET /tasks/1300000000000001": dataReply(task) };
+    const result = await (await connect()).callTool({ name: "get_task", arguments: { task_gid: task.gid } });
+    assert.match(text(result), /^task: Ship it \(gid 1300000000000001\)\n/);
+  });
+
+  it("refuse a malformed argument by name before calling Asana", async () => {
+    const client = await connect();
+    for (const [name, args, field] of [
+      ["get_task", { task_gid: "../users/me" }, "task_gid"],
+      ["get_task", { task_gid: "1".repeat(21) }, "task_gid"],
+    ] as const) {
+      const result = await client.callTool({ name, arguments: args });
+      assert.equal(result.isError, true, `${name} ${JSON.stringify(args)}`);
+      assert.match(text(result), new RegExp(`tool ${name}: ${field}: `), `${name} ${JSON.stringify(args)}`);
+    }
     assert.deepEqual(fake.requests, []);
   });
 });
