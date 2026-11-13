@@ -248,8 +248,8 @@ describe("verbs", () => {
     assert.deepEqual(fake.requestsTo("PUT", `/tasks/${gid}`)[0].body, { data: { ...cleared, notes: "" } });
   });
 
-  it("run writes one at a time, each workspace check right before its write", async () => {
-    const client = await connect();
+  it("run writes one at a time across sessions, each workspace check right before its write", async () => {
+    const [first, second, third] = await Promise.all([connect(), connect(), connect()]);
     const [parent, updated, deleted] = ["1300000000000001", "1300000000000002", "1300000000000003"];
     for (const gid of [parent, updated, deleted]) {
       fake.routes[`GET /tasks/${gid}`] = dataReply({ gid, workspace: { gid: WORKSPACE.gid } });
@@ -258,9 +258,9 @@ describe("verbs", () => {
     fake.routes[`PUT /tasks/${updated}`] = dataReply({ gid: updated, completed: true });
     fake.routes[`DELETE /tasks/${deleted}`] = dataReply({});
     const results = await Promise.all([
-      client.callTool({ name: "create_task", arguments: { name: "x", parent_gid: parent } }),
-      client.callTool({ name: "update_task", arguments: { task_gid: updated, completed: true } }),
-      client.callTool({ name: "delete_task", arguments: { task_gid: deleted } }),
+      first.callTool({ name: "create_task", arguments: { name: "x", parent_gid: parent } }),
+      second.callTool({ name: "update_task", arguments: { task_gid: updated, completed: true } }),
+      third.callTool({ name: "delete_task", arguments: { task_gid: deleted } }),
     ]);
     assert.ok(results.every((result) => !result.isError));
     const order = fake.requests.map((request) => `${request.method} ${request.path}`);
