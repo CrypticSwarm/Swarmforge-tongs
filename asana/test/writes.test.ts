@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after, before, beforeEach, describe, it } from "node:test";
 import { createTask, deleteTask, updateTask, type Context } from "../src/server.js";
-import { FakeAsana, WORKSPACE, dataReply, errorReply, unreachableClient, type Routes } from "./fakes.js";
+import { FakeAsana, USER, WORKSPACE, dataReply, errorReply, meRoute, unreachableClient, type Routes } from "./fakes.js";
 
 const TASK_GID = "1300000000000001";
 const PARENT_GID = "1300000000000002";
@@ -360,5 +360,112 @@ describe("delete_task", () => {
       assert.doesNotMatch(err.message, /gone through/);
       return true;
     });
+  });
+});
+
+describe("custom_fields", () => {
+  const PRIORITY = {
+    gid: "1600000000000001",
+    name: "Priority",
+    resource_subtype: "enum",
+    enum_options: [{ gid: "1610000000000001", name: "High", enabled: true }],
+  };
+  const REVIEWERS = { gid: "1600000000000002", name: "Reviewers", resource_subtype: "people" };
+  const DUE = { gid: "1600000000000003", name: "Due", resource_subtype: "date" };
+  const FIELD_OPTS = "name,resource_subtype,is_formula_field,is_value_read_only,enum_options.name,enum_options.enabled";
+  const SET_PRIORITY = { ...PRIORITY, enum_value: { gid: "1610000000000001", name: "High" } };
+
+  function projectFieldsRoute(workspace: unknown = IN_WORKSPACE): Routes {
+    const custom_field_settings = [PRIORITY, REVIEWERS].map((field) => ({ custom_field: field }));
+    return { [`GET /projects/${PROJECT_GID}`]: dataReply({ gid: PROJECT_GID, workspace, custom_field_settings }) };
+  }
+
+  function taskFieldsRoute(workspace: unknown = IN_WORKSPACE): Routes {
+    const custom_fields = [PRIORITY, REVIEWERS, DUE];
+    return { [`GET /tasks/${TASK_GID}`]: dataReply({ gid: TASK_GID, workspace, custom_fields }) };
+  }
+
+  it("creates a task with values resolved against the project's fields", async () => {
+    fake.routes = { ...projectFieldsRoute(), ...userRoute(), ...meRoute(), "POST /tasks": dataReply(CREATED) };
+    await createTask(context, {
+      name: "A",
+      project_gid: PROJECT_GID,
+      custom_fields: { Priority: "High", Reviewers: ["me", USER_GID] },
+    });
+    const [read] = fake.requestsTo("GET", `/projects/${PROJECT_GID}`);
+    const prefixed = FIELD_OPTS.split(",").map((field) => `custom_field_settings.custom_field.${field}`);
+    assert.equal(read.query.opt_fields, ["workspace", ...prefixed].join(","));
+    assert.deepEqual(fake.requestsTo("POST", "/tasks")[0].body, {
+      data: {
+        name: "A",
+        custom_fields: { [PRIORITY.gid]: "1610000000000001", [REVIEWERS.gid]: [USER.gid, USER_GID] },
+        workspace: WORKSPACE.gid,
+        projects: [PROJECT_GID],
+      },
+    });
+  });
+
+  it("updates custom fields against the task's own and reports them by name", async () => {
+    const answer = { gid: TASK_GID, name: "B", custom_fields: [SET_PRIORITY, { ...REVIEWERS, people_value: [] }] };
+    fake.routes = { ...taskFieldsRoute(), [`PUT /tasks/${TASK_GID}`]: dataReply(answer) };
+    const custom_fields = { Priority: "High", Reviewers: null, Due: "2026-11-20" };
+    assert.equal(
+      await updateTask(context, { task_gid: TASK_GID, name: "B", custom_fields }),
+      [
+        "updated task: B (gid 1300000000000001)",
+        "name: B",
+        "custom field Priority (gid 1600000000000001), enum: High (gid 1610000000000001)",
+        "custom field Reviewers (gid 1600000000000002), people: not set",
+        "custom field 1600000000000003: not in Asana's answer",
+      ].join("\n"),
+    );
+    const [read] = fake.requestsTo("GET", `/tasks/${TASK_GID}`);
+    const prefixed = FIELD_OPTS.split(",").map((field) => `custom_fields.${field}`);
+    assert.equal(read.query.opt_fields, ["workspace", ...prefixed].join(","));
+    assert.deepEqual(fake.requestsTo("PUT", `/tasks/${TASK_GID}`)[0].body, {
+      data: {
+        name: "B",
+        custom_fields: { [PRIORITY.gid]: "1610000000000001", [REVIEWERS.gid]: null, [DUE.gid]: { date: "2026-11-20" } },
+      },
+    });
+  });
+
+  it("writes nothing when a field, a person, or the placement is refused", async () => {
+    for (const [routes, run, message] of [
+      [
+        projectFieldsRoute(),
+        () => createTask(context, { name: "A", project_gid: PROJECT_GID, custom_fields: { Nope: 1 } }),
+        `project ${PROJECT_GID} has no custom field "Nope"; its custom fields are "Priority", "Reviewers".`,
+      ],
+      [
+        projectFieldsRoute(ELSEWHERE),
+        () => createTask(context, { name: "A", project_gid: PROJECT_GID, custom_fields: { Nope: 1 } }),
+        `project ${PROJECT_GID} ${NOT_PINNED}`,
+      ],
+      [
+        taskRoute(PARENT_GID),
+        () => createTask(context, { name: "A", parent_gid: PARENT_GID, custom_fields: { Priority: "High" } }),
+        "pass 'project_gid' with 'custom_fields'.",
+      ],
+      [
+        { ...projectFieldsRoute(), ...userRoute([ELSEWHERE]) },
+        () => createTask(context, { name: "A", project_gid: PROJECT_GID, custom_fields: { Reviewers: [USER_GID] } }),
+        `user ${USER_GID} ${NOT_PINNED}`,
+      ],
+      [
+        { ...taskFieldsRoute(), ...userRoute([ELSEWHERE]) },
+        () => updateTask(context, { task_gid: TASK_GID, custom_fields: { Priority: "High", Reviewers: [USER_GID] } }),
+        `user ${USER_GID} ${NOT_PINNED}`,
+      ],
+      [
+        taskFieldsRoute(ELSEWHERE),
+        () => updateTask(context, { task_gid: TASK_GID, custom_fields: { Nope: 1 } }),
+        `task ${TASK_GID} ${NOT_PINNED}`,
+      ],
+    ] as const) {
+      fake.routes = { ...routes, "POST /tasks": dataReply(CREATED), [`PUT /tasks/${TASK_GID}`]: dataReply(CREATED) };
+      await assert.rejects(run(), { message });
+    }
+    assert.deepEqual(writes(), []);
   });
 });

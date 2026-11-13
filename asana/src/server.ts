@@ -17,6 +17,12 @@ import {
   type Workspace,
   type WorkspaceUser,
 } from "./asana.js";
+import {
+  MAX_CUSTOM_FIELD_ELEMENTS,
+  customFieldsInput,
+  resolveCustomFields,
+  type CustomFieldsInput,
+} from "./custom-fields.js";
 
 export type Context = {
   asana: Asana;
@@ -98,6 +104,7 @@ const createTaskInput = z.strictObject({
   project_gid: gid.optional().describe("Add the task to this project."),
   section_gid: gid.optional().describe("Put it in this section of 'project_gid'."),
   parent_gid: gid.optional().describe("Make it a subtask of this task."),
+  custom_fields: customFieldsInput.optional(),
 });
 
 const updateTaskInput = z.strictObject({
@@ -114,6 +121,7 @@ const updateTaskInput = z.strictObject({
   approval_status: approvalStatus
     .optional()
     .describe("An approval task's status. Send it without 'completed', which Asana sets from it."),
+  custom_fields: customFieldsInput.optional(),
 });
 
 const deleteTaskInput = z.strictObject({ task_gid: gid.describe("The task's gid.") });
@@ -137,8 +145,7 @@ const listUsersInput = z.strictObject({
   cursor,
 });
 
-/** Elements plus members in `arguments`, checked before the schema. Top-level keys only; count nested ones by hand. */
-const MAX_TOOL_INPUT_ELEMENTS = Math.max(
+const MAX_TOOL_INPUT_KEYS = Math.max(
   ...[
     getTaskInput,
     listTasksInput,
@@ -151,6 +158,9 @@ const MAX_TOOL_INPUT_ELEMENTS = Math.max(
     listUsersInput,
   ].map((input) => Object.keys(input.shape).length),
 );
+
+/** Elements plus members in `arguments`, checked before the schema. */
+const MAX_TOOL_INPUT_ELEMENTS = MAX_TOOL_INPUT_KEYS + MAX_CUSTOM_FIELD_ELEMENTS;
 
 export async function currentUser(context: Context): Promise<string> {
   const user = await context.asana.me();
@@ -318,6 +328,16 @@ async function requireAssigneeInPinnedWorkspace(context: Context, assignee: stri
   if (!workspaceGids.includes(context.workspace.gid)) throw notInPinnedWorkspace(context, `user ${assignee}`);
 }
 
+async function pinnedPersonGid(context: Context, person: string): Promise<string> {
+  if (person === "me") return (await context.asana.me()).gid;
+  await requireAssigneeInPinnedWorkspace(context, person);
+  return person;
+}
+
+function resolvePinned(context: Context, input: CustomFieldsInput, available: CustomField[], where: string) {
+  return resolveCustomFields(input, available, where, (person) => pinnedPersonGid(context, person));
+}
+
 /** A 5xx, a lost answer, or an unreadable 2xx does not show the write failed. */
 function rethrowWithLandedHint(err: unknown, howToCheck: string): never {
   if (err instanceof AsanaError && (err.status === undefined || err.status < 300 || err.status >= 500)) {
@@ -331,8 +351,14 @@ export async function createTask(context: Context, input: z.infer<typeof createT
   const fields = taskFields(input);
   if (project === undefined && parent === undefined) throw new Error("pass 'project_gid', 'parent_gid', or both.");
   if (section !== undefined && project === undefined) throw new Error("pass 'project_gid' with 'section_gid'.");
+  if (input.custom_fields && project === undefined) throw new Error("pass 'project_gid' with 'custom_fields'.");
+  let available: CustomField[] = [];
   if (project !== undefined) {
-    requirePinnedWorkspace(context, await context.asana.workspaceOf({ project }), `project ${project}`);
+    const target = input.custom_fields
+      ? await context.asana.projectCustomFields(project)
+      : { workspaceGid: await context.asana.workspaceOf({ project }), customFields: [] };
+    requirePinnedWorkspace(context, target.workspaceGid, `project ${project}`);
+    available = target.customFields;
   }
   if (section !== undefined && (await context.asana.projectOfSection(section)) !== project) {
     throw new Error(`section ${section} is not in project ${project}.`);
@@ -341,6 +367,9 @@ export async function createTask(context: Context, input: z.infer<typeof createT
     requirePinnedWorkspace(context, await context.asana.taskWorkspace(parent), `task ${parent}`);
   }
   await requireAssigneeInPinnedWorkspace(context, fields.assignee);
+  if (input.custom_fields) {
+    fields.custom_fields = await resolvePinned(context, input.custom_fields, available, `project ${project}`);
+  }
   const task = await context.asana
     .createTask(context.workspace.gid, { project, section, parent }, fields)
     .catch((err) => rethrowWithLandedHint(err, "list_tasks"));
@@ -355,7 +384,7 @@ export async function createTask(context: Context, input: z.infer<typeof createT
 const renderDescription = (task: Task) => `description: ${task.notes ? "replaced" : "cleared"}`;
 const renderDue = (task: Task) => `due: ${due(task) ?? "none"}`;
 
-const renderChangedField: Record<keyof TaskFields, (task: Task) => string> = {
+const renderChangedField: Record<keyof TaskFields, (task: Task, fields: TaskFields) => string> = {
   name: (task) => `name: ${task.name}`,
   notes: renderDescription,
   html_notes: renderDescription,
@@ -367,19 +396,32 @@ const renderChangedField: Record<keyof TaskFields, (task: Task) => string> = {
   completed: (task) => `completed: ${task.completed ? "yes" : "no"}`,
   approval_status: (task) =>
     `approval status: ${task.approvalStatus ?? "none"}, completed: ${task.completed ? "yes" : "no"}`,
+  custom_fields: (task, fields) =>
+    Object.keys(fields.custom_fields ?? {})
+      .map((fieldGid) => {
+        const value = task.customFields.find((each) => each.field.gid === fieldGid);
+        return `custom field ${value ? renderCustomFieldValue(value) : `${fieldGid}: not in Asana's answer`}`;
+      })
+      .join("\n"),
 };
 
 export async function updateTask(context: Context, input: z.infer<typeof updateTaskInput>): Promise<string> {
   const { task_gid: taskGid, ...changes } = input;
   const fields = taskFields(changes);
-  const changed = Object.keys(fields) as (keyof TaskFields)[];
-  if (changed.length === 0) throw new Error("pass at least one field to change.");
-  requirePinnedWorkspace(context, await context.asana.taskWorkspace(taskGid), `task ${taskGid}`);
+  if (!Object.keys(fields).length && !changes.custom_fields) throw new Error("pass at least one field to change.");
+  const target = changes.custom_fields
+    ? await context.asana.taskCustomFields(taskGid)
+    : { workspaceGid: await context.asana.taskWorkspace(taskGid), customFields: [] };
+  requirePinnedWorkspace(context, target.workspaceGid, `task ${taskGid}`);
   await requireAssigneeInPinnedWorkspace(context, fields.assignee);
+  if (changes.custom_fields) {
+    fields.custom_fields = await resolvePinned(context, changes.custom_fields, target.customFields, `task ${taskGid}`);
+  }
   const task = await context.asana
     .updateTask(taskGid, fields)
     .catch((err) => rethrowWithLandedHint(err, "get_task"));
-  const lines = new Set(changed.map((field) => renderChangedField[field](task)));
+  const changed = Object.keys(fields) as (keyof TaskFields)[];
+  const lines = new Set(changed.map((field) => renderChangedField[field](task, fields)));
   return [`updated task: ${label(task)}`, ...lines].join("\n");
 }
 
@@ -392,7 +434,7 @@ export async function deleteTask(context: Context, input: z.infer<typeof deleteT
 
 function renderCustomField(field: CustomField): string[] {
   const options = field.enumOptions.map((option) => `  ${label(option)}${option.enabled ? "" : ", disabled"}`);
-  return [`${label(field)}: ${field.type ?? "unknown type"}`, ...options];
+  return [`${label(field)}: ${field.type ?? "unknown type"}${field.readOnly ? ", read-only" : ""}`, ...options];
 }
 
 function renderProject(project: Project, sections: Compact[], moreSections: boolean): string {

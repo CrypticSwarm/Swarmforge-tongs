@@ -18,8 +18,8 @@ Reached at `http://asana:8080/mcp` on the session network.
 | `get_task` | `task_gid` | Reads one task in full, with its description as plain text (`notes`) and HTML (`html_notes`). |
 | `list_tasks` | one of `project_gid`, `section_gid`, `parent_gid`; `incomplete_only?`, `limit?`, `cursor?` | Lists a project's or section's tasks, or a task's subtasks. |
 | `search_tasks` | any of `text`, `assignee`, `project_gid` or `section_gid`, `tag_gid`, `completed`, `due_on_after`, `due_on_before`; `limit?` | Searches the workspace, newest first. Needs Asana Premium. |
-| `create_task` | `name`; `project_gid?` with `section_gid?`, `parent_gid?`; `notes?` or `html_notes?`, `assignee?`, `due_on?` or `due_at?`, `start_on?`, `resource_subtype?` | Creates a task in a project or section, or a subtask. |
-| `update_task` | `task_gid`; any of `name`, `notes` or `html_notes`, `assignee`, `due_on` or `due_at`, `start_on`, `resource_subtype`, `completed`, `approval_status` | Changes the given fields and reports their new values. |
+| `create_task` | `name`; `project_gid?` with `section_gid?`, `parent_gid?`; `notes?` or `html_notes?`, `assignee?`, `due_on?` or `due_at?`, `start_on?`, `resource_subtype?`, `custom_fields?` | Creates a task in a project or section, or a subtask. |
+| `update_task` | `task_gid`; any of `name`, `notes` or `html_notes`, `assignee`, `due_on` or `due_at`, `start_on`, `resource_subtype`, `completed`, `approval_status`, `custom_fields` | Changes the given fields and reports their new values. |
 | `delete_task` | `task_gid` | Moves a task to the token user's Asana trash, restorable for 30 days. |
 | `get_project` | `project_gid` | Reads one project with its first 100 sections and its custom fields, enum options included. |
 | `find_projects` | `query`; `limit?` | Finds projects by name, most recently used first. |
@@ -31,6 +31,14 @@ Reached at `http://asana:8080/mcp` on the session network.
   be in `project_gid`.
 - `html_notes` is one `<body>...</body>` element. A description is at most 20000
   characters.
+- `custom_fields` maps a field's gid or exact name to a value: an option's
+  name or gid as `get_task` shows it (enum), a list of them (multi_enum), user
+  gids or `me` (people), a number, text, or a `YYYY-MM-DD` or ISO 8601
+  date-time (date). null clears one. At most 20 fields, 20 values each, and 20
+  people in all.
+- `create_task` resolves `custom_fields` against `project_gid`'s fields, so it
+  needs `project_gid`; `update_task` against the task's own. Any bad field,
+  option, or person refuses the whole write.
 - In `update_task`, null clears `notes`, `assignee`, `due_on`, `due_at`, and
   `start_on`. Send `approval_status` without `completed`; Asana derives it.
 - Writes run one at a time, across every session sharing the tong. A write that

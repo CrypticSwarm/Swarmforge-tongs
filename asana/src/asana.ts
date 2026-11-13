@@ -52,9 +52,13 @@ export type Task = TaskSummary & {
 
 export type EnumOption = { gid: string; name: string; enabled: boolean };
 
-export type CustomField = Compact & { type?: string; enumOptions: EnumOption[] };
+export type CustomField = Compact & { type?: string; readOnly: boolean; enumOptions: EnumOption[] };
 
 export type TaskCustomField = { field: Compact; type?: string; value?: string | number | Compact | Compact[] };
+
+export type CustomFieldTarget = { workspaceGid?: string; customFields: CustomField[] };
+
+export type CustomFieldWrite = string | number | string[] | { date: string } | { date_time: string } | null;
 
 export type ProjectSummary = Compact & { archived: boolean; team?: Compact; workspaceGid?: string };
 
@@ -92,6 +96,7 @@ export type TaskFields = {
   resource_subtype?: TaskSubtype;
   completed?: boolean;
   approval_status?: ApprovalStatus;
+  custom_fields?: Record<string, CustomFieldWrite>;
 };
 
 export type TaskPlacement = { project?: string; section?: string; parent?: string };
@@ -121,11 +126,17 @@ const TASK_FIELDS = [
 
 const PROJECT_SUMMARY_FIELDS = "name,archived,team.name,workspace";
 
+const customFieldOptFields = (prefix: string) =>
+  ["name", "resource_subtype", "is_formula_field", "is_value_read_only", "enum_options.name", "enum_options.enabled"]
+    .map((field) => `${prefix}.${field}`)
+    .join(",");
+const TASK_CUSTOM_FIELDS = customFieldOptFields("custom_fields");
+const PROJECT_CUSTOM_FIELDS = customFieldOptFields("custom_field_settings.custom_field");
+
 const PROJECT_FIELDS = [
   PROJECT_SUMMARY_FIELDS,
   "permalink_url,completed,owner.name,start_on,due_on,notes",
-  "custom_field_settings.custom_field.name,custom_field_settings.custom_field.resource_subtype",
-  "custom_field_settings.custom_field.enum_options.name,custom_field_settings.custom_field.enum_options.enabled",
+  PROJECT_CUSTOM_FIELDS,
 ].join(",");
 
 const USER_FIELDS = "name,email,workspaces";
@@ -249,14 +260,22 @@ function task(data: Resource): Task {
   };
 }
 
-function customFieldsOf(setting: unknown): CustomField[] {
-  const field = (setting as { custom_field?: unknown } | null)?.custom_field;
+function customFields(fields: unknown): CustomField[] {
+  return (Array.isArray(fields) ? fields : []).flatMap(customField);
+}
+
+function settingsCustomFields(settings: unknown): CustomField[] {
+  return customFields((Array.isArray(settings) ? settings : []).map((setting) => setting?.custom_field));
+}
+
+function customField(field: unknown): CustomField[] {
   if (!isResource(field)) return [];
   const enumOptions = (Array.isArray(field.enum_options) ? field.enum_options : []).flatMap((option) => {
     const compactOption = compact(option);
     return compactOption ? [{ ...compactOption, enabled: option.enabled !== false }] : [];
   });
-  return [{ gid: field.gid, name: text(field.name) ?? "", type: text(field.resource_subtype), enumOptions }];
+  const readOnly = field.is_formula_field === true || field.is_value_read_only === true;
+  return [{ gid: field.gid, name: text(field.name) ?? "", type: text(field.resource_subtype), readOnly, enumOptions }];
 }
 
 function projectSummary(data: Resource): ProjectSummary {
@@ -278,7 +297,7 @@ function project(data: Resource): Project {
     startOn: text(data.start_on),
     dueOn: text(data.due_on),
     notes: multiline(data.notes),
-    customFields: (Array.isArray(data.custom_field_settings) ? data.custom_field_settings : []).flatMap(customFieldsOf),
+    customFields: settingsCustomFields(data.custom_field_settings),
   };
 }
 
@@ -367,6 +386,21 @@ export class Asana {
   async taskWorkspace(gid: string): Promise<string | undefined> {
     const data = await this.call(`reading task ${gid}`, () => this.tasks.getTask(gid, { opt_fields: "workspace" }));
     return compact(data.workspace)?.gid;
+  }
+
+  async taskCustomFields(gid: string): Promise<CustomFieldTarget> {
+    const data = await this.call(`reading task ${gid}`, () =>
+      this.tasks.getTask(gid, { opt_fields: `workspace,${TASK_CUSTOM_FIELDS}` }),
+    );
+    return { workspaceGid: compact(data.workspace)?.gid, customFields: customFields(data.custom_fields) };
+  }
+
+  async projectCustomFields(gid: string): Promise<CustomFieldTarget> {
+    const data = await this.call(`reading project ${gid}`, () =>
+      this.projects.getProject(gid, { opt_fields: `workspace,${PROJECT_CUSTOM_FIELDS}` }),
+    );
+    const customFields = settingsCustomFields(data.custom_field_settings);
+    return { workspaceGid: compact(data.workspace)?.gid, customFields };
   }
 
   async userWorkspaces(gid: string): Promise<string[]> {
