@@ -8,12 +8,14 @@ import { createApp } from "../src/app.js";
 import { FakeAsana, TOKEN, WORKSPACE, dataReply, errorReply, meRoute, workspaceRoute } from "./fakes.js";
 
 const VERBS = [
+  "add_comment",
   "create_task",
   "current_user",
   "delete_task",
   "find_projects",
   "get_project",
   "get_task",
+  "list_comments",
   "list_tasks",
   "list_users",
   "search_tasks",
@@ -200,6 +202,17 @@ describe("verbs", () => {
       ["update_task", { task_gid: "1", add_blocked_by: Array(21).fill("2") }, "add_blocked_by"],
       ["update_task", { task_gid: "1", remove_blocked_by: ["2", "x"] }, "remove_blocked_by.1"],
       ["create_task", { name: "x", project_gid: "1", blocked_by: "2" }, "blocked_by"],
+      ["list_comments", { task_gid: "1/stories" }, "task_gid"],
+      ["list_comments", { task_gid: "1", include_system: "yes" }, "include_system"],
+      ["list_comments", { task_gid: "1", include_html: 1 }, "include_html"],
+      ["list_comments", { task_gid: "1", limit: 0 }, "limit"],
+      ["list_comments", { task_gid: "1", cursor: "a&b" }, "cursor"],
+      ["add_comment", { task_gid: "../1", text: "x" }, "task_gid"],
+      ["add_comment", { task_gid: "1", text: " \n" }, "text"],
+      ["add_comment", { task_gid: "1", text: "x".repeat(20_001) }, "text"],
+      ["add_comment", { task_gid: "1", html_text: "plain" }, "html_text"],
+      ["add_comment", { task_gid: "1", html_text: `<body>${"x".repeat(19_988)}</body>` }, "html_text"],
+      ["add_comment", { task_gid: "1", html_text: "<body>a</body><body>b</body>" }, "html_text"],
     ] as const) {
       const result = await client.callTool({ name, arguments: args });
       assert.equal(result.isError, true, `${name} ${JSON.stringify(args)}`);
@@ -218,6 +231,8 @@ describe("verbs", () => {
       ["update_task", { task_gid: "1", completed: true, workspace: "1" }],
       ["update_task", { task_gid: "1", move_to: { project_gid: "1", workspace: "1" } }],
       ["delete_task", { task_gid: "1", workspace: "1" }],
+      ["list_comments", { task_gid: "1", workspace: "1" }],
+      ["add_comment", { task_gid: "1", text: "x", workspace: "1" }],
     ] as const) {
       const result = await client.callTool({ name, arguments: args });
       assert.match(text(result), /Unrecognized key: "workspace"/, name);
@@ -286,27 +301,31 @@ describe("verbs", () => {
   });
 
   it("run writes one at a time across sessions, each workspace check right before its write", async () => {
-    const [first, second, third] = await Promise.all([connect(), connect(), connect()]);
-    const [parent, updated, deleted] = ["1300000000000001", "1300000000000002", "1300000000000003"];
-    for (const gid of [parent, updated, deleted]) {
+    const [first, second, third, fourth] = await Promise.all([connect(), connect(), connect(), connect()]);
+    const gids = ["1300000000000001", "1300000000000002", "1300000000000003", "1300000000000004"];
+    const [parent, updated, deleted, commented] = gids;
+    for (const gid of gids) {
       fake.routes[`GET /tasks/${gid}`] = dataReply({ gid, workspace: { gid: WORKSPACE.gid } });
     }
-    fake.routes["POST /tasks"] = dataReply({ gid: "1300000000000004" });
+    fake.routes["POST /tasks"] = dataReply({ gid: "1300000000000005" });
+    fake.routes[`POST /tasks/${commented}/stories`] = dataReply({ gid: "1900000000000001" });
     fake.routes[`PUT /tasks/${updated}`] = dataReply({ gid: updated, completed: true });
     fake.routes[`DELETE /tasks/${deleted}`] = dataReply({});
     const results = await Promise.all([
       first.callTool({ name: "create_task", arguments: { name: "x", parent_gid: parent } }),
       second.callTool({ name: "update_task", arguments: { task_gid: updated, completed: true } }),
       third.callTool({ name: "delete_task", arguments: { task_gid: deleted } }),
+      fourth.callTool({ name: "add_comment", arguments: { task_gid: commented, text: "x" } }),
     ]);
     assert.ok(results.every((result) => !result.isError));
     const order = fake.requests.map((request) => `${request.method} ${request.path}`);
-    const pairs = [0, 2, 4].map((index) => order.slice(index, index + 2).join(" then "));
-    assert.equal(order.length, 6);
+    const pairs = [0, 2, 4, 6].map((index) => order.slice(index, index + 2).join(" then "));
+    assert.equal(order.length, 8);
     assert.deepEqual(pairs.sort(), [
       `GET /tasks/${parent} then POST /tasks`,
       `GET /tasks/${updated} then PUT /tasks/${updated}`,
       `GET /tasks/${deleted} then DELETE /tasks/${deleted}`,
+      `GET /tasks/${commented} then POST /tasks/${commented}/stories`,
     ]);
   });
 });

@@ -6,10 +6,12 @@ import {
   GID,
   MAX_NOTES,
   type Asana,
+  type CommentBody,
   type Compact,
   type CustomField,
   type Project,
   type ProjectSummary,
+  type Story,
   type Task,
   type TaskCustomField,
   type TaskFields,
@@ -141,6 +143,25 @@ const updateTaskInput = z.strictObject({
 
 const deleteTaskInput = z.strictObject({ task_gid: gid.describe("The task's gid.") });
 
+const listCommentsInput = z.strictObject({
+  task_gid: gid.describe("The task's gid."),
+  include_system: z
+    .boolean()
+    .optional()
+    .describe(
+      "Also list system activity like assignments and moves, each with its type. Use the same value with a cursor.",
+    ),
+  include_html: z.boolean().optional().describe("Add each item's Asana rich-text HTML (html_text)."),
+  limit: limitSchema("comments"),
+  cursor,
+});
+
+const addCommentInput = z.strictObject({
+  task_gid: gid.describe("The task's gid."),
+  text: z.string().max(MAX_NOTES).regex(/\S/, "must not be blank").optional().describe("The comment as plain text."),
+  html_text: htmlNotes.optional().describe("The comment as Asana rich-text HTML, one <body>...</body> element."),
+});
+
 const getProjectInput = z.strictObject({ project_gid: gid.describe("The project's gid.") });
 
 const findProjectsInput = z.strictObject({
@@ -165,7 +186,7 @@ const keyCount = (input: z.ZodObject) => Object.keys(input.shape).length;
 /** Elements plus members in `arguments`, checked before the schema. */
 const MAX_TOOL_INPUT_ELEMENTS = Math.max(
   ...[getTaskInput, listTasksInput, searchTasksInput, deleteTaskInput].map(keyCount),
-  ...[getProjectInput, findProjectsInput, listUsersInput].map(keyCount),
+  ...[listCommentsInput, addCommentInput, getProjectInput, findProjectsInput, listUsersInput].map(keyCount),
   keyCount(createTaskInput) + MAX_BLOCKERS + MAX_CUSTOM_FIELD_ELEMENTS,
   keyCount(updateTaskInput) + keyCount(moveToInput) + 2 * MAX_BLOCKERS + MAX_CUSTOM_FIELD_ELEMENTS,
 );
@@ -552,6 +573,49 @@ export async function deleteTask(context: Context, input: z.infer<typeof deleteT
   return `deleted task ${taskGid}: it is in the token user's Asana trash, restorable for 30 days.`;
 }
 
+function renderStory(story: Story, includeSystem: boolean, withHtml: boolean): string {
+  const details = [
+    ...(includeSystem ? [story.subtype ?? "unknown type"] : []),
+    `by ${story.author ? label(story.author) : "unknown"}`,
+    `at ${story.createdAt ?? "unknown time"}`,
+  ];
+  const bodies = [indented("text", story.text ? story.text.split("\n") : [])];
+  if (withHtml) bodies.push(indented("html_text", story.htmlText ? story.htmlText.split("\n") : []));
+  const bodyLines = bodies.join("\n").split("\n").map((line) => `  ${line}`);
+  return [`${includeSystem ? "story" : "comment"} ${story.gid}: ${details.join(", ")}`, ...bodyLines].join("\n");
+}
+
+export async function listComments(context: Context, input: z.infer<typeof listCommentsInput>): Promise<string> {
+  const taskGid = input.task_gid;
+  const includeSystem = input.include_system ?? false;
+  const withHtml = input.include_html ?? false;
+  await requireTaskInPinnedWorkspace(context, taskGid);
+  const page = await context.asana.storyList(taskGid, {
+    commentsOnly: !includeSystem,
+    withHtml,
+    limit: input.limit ?? DEFAULT_LIMIT,
+    cursor: input.cursor,
+  });
+  const stories = includeSystem ? page.items : page.items.filter((story) => story.subtype === "comment_added");
+  const heading = `${includeSystem ? "stories" : "comments"} on task ${taskGid}, oldest first`;
+  const rows = stories.map((story) => renderStory(story, includeSystem, withHtml));
+  return renderList(heading, rows, page.cursor && `cursor: ${page.cursor}`);
+}
+
+export async function addComment(context: Context, input: z.infer<typeof addCommentInput>): Promise<string> {
+  const { task_gid: taskGid, text, html_text: htmlText } = input;
+  const bodies: CommentBody[] = [
+    ...(text === undefined ? [] : [{ text }]),
+    ...(htmlText === undefined ? [] : [{ html_text: htmlText }]),
+  ];
+  if (bodies.length !== 1) throw new Error("pass exactly one of 'text' or 'html_text'.");
+  await requireTaskInPinnedWorkspace(context, taskGid);
+  const story = await context.asana
+    .addComment(taskGid, bodies[0])
+    .catch((err) => rethrowWithLandedHint(err, "list_comments"));
+  return [`added comment ${story.gid} to task ${taskGid}`, `created_at: ${story.createdAt ?? "unknown"}`].join("\n");
+}
+
 function renderCustomField(field: CustomField): string[] {
   const options = field.enumOptions.map((option) => `  ${label(option)}${option.enabled ? "" : ", disabled"}`);
   return [`${label(field)}: ${field.type ?? "unknown type"}${field.readOnly ? ", read-only" : ""}`, ...options];
@@ -735,6 +799,24 @@ export function buildServer(context: Context): McpServer {
       inputSchema: deleteTaskInput,
     },
     serially(deleteTask),
+  );
+
+  verb(
+    "list_comments",
+    {
+      description: "List a task's comments, oldest first, with author and time.",
+      inputSchema: listCommentsInput,
+    },
+    listComments,
+  );
+
+  verb(
+    "add_comment",
+    {
+      description: "Comment on a task as the token's user. Pass exactly one of 'text' or 'html_text'.",
+      inputSchema: addCommentInput,
+    },
+    serially(addComment),
   );
 
   verb(
