@@ -11,6 +11,7 @@ import {
   type Project,
   type ProjectSummary,
   type Task,
+  type TaskCustomField,
   type TaskFields,
   type TaskSummary,
   type Workspace,
@@ -202,6 +203,11 @@ function requireTasksInPinnedWorkspace(context: Context, tasks: TaskSummary[], w
   for (const task of tasks) requirePinnedWorkspace(context, task.workspaceGid, `a task in ${what}`);
 }
 
+function renderCustomFieldValue({ field, type, value }: TaskCustomField): string {
+  const values = typeof value === "object" ? [value].flat().map(label) : value === undefined ? [] : [String(value)];
+  return `${label(field)}, ${type ?? "unknown type"}: ${values.join(", ") || "not set"}`;
+}
+
 function renderMemberships(task: Task): string {
   return indented(
     "projects",
@@ -223,10 +229,7 @@ function renderTask(task: Task): string {
     `parent: ${task.parent ? label(task.parent) : "none"}`,
     `subtasks: ${task.subtaskCount ?? "unknown"}`,
     renderMemberships(task),
-    indented(
-      "custom fields",
-      task.customFields.map(({ field, value }) => `${label(field)}: ${value ?? "not set"}`),
-    ),
+    indented("custom fields", task.customFields.map(renderCustomFieldValue)),
     indented("blocked by", task.dependencies.map(label)),
     indented("blocking", task.dependents.map(label)),
     indented("notes", task.notes ? task.notes.split("\n") : []),
