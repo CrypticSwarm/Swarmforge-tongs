@@ -107,6 +107,11 @@ const createTaskInput = z.strictObject({
   custom_fields: customFieldsInput.optional(),
 });
 
+const moveToInput = z.strictObject({
+  project_gid: gid,
+  section_gid: gid.optional().describe("A section of 'project_gid'."),
+});
+
 const updateTaskInput = z.strictObject({
   task_gid: gid.describe("The task's gid."),
   name: taskName.optional().describe("The new name."),
@@ -122,6 +127,11 @@ const updateTaskInput = z.strictObject({
     .optional()
     .describe("An approval task's status. Send it without 'completed', which Asana sets from it."),
   custom_fields: customFieldsInput.optional(),
+  move_to: moveToInput
+    .optional()
+    .describe("Add the task to this project, or move it to 'section_gid' in a project it is already in."),
+  remove_from_project: gid.optional().describe("Take the task out of this project."),
+  parent_gid: gid.nullable().optional().describe("Make it a subtask of this task; null makes it top-level."),
 });
 
 const deleteTaskInput = z.strictObject({ task_gid: gid.describe("The task's gid.") });
@@ -145,22 +155,15 @@ const listUsersInput = z.strictObject({
   cursor,
 });
 
-const MAX_TOOL_INPUT_KEYS = Math.max(
-  ...[
-    getTaskInput,
-    listTasksInput,
-    searchTasksInput,
-    createTaskInput,
-    updateTaskInput,
-    deleteTaskInput,
-    getProjectInput,
-    findProjectsInput,
-    listUsersInput,
-  ].map((input) => Object.keys(input.shape).length),
-);
+const keyCount = (input: z.ZodObject) => Object.keys(input.shape).length;
 
 /** Elements plus members in `arguments`, checked before the schema. */
-const MAX_TOOL_INPUT_ELEMENTS = MAX_TOOL_INPUT_KEYS + MAX_CUSTOM_FIELD_ELEMENTS;
+const MAX_TOOL_INPUT_ELEMENTS = Math.max(
+  ...[getTaskInput, listTasksInput, searchTasksInput, deleteTaskInput].map(keyCount),
+  ...[getProjectInput, findProjectsInput, listUsersInput].map(keyCount),
+  keyCount(createTaskInput) + MAX_CUSTOM_FIELD_ELEMENTS,
+  keyCount(updateTaskInput) + keyCount(moveToInput) + MAX_CUSTOM_FIELD_ELEMENTS,
+);
 
 export async function currentUser(context: Context): Promise<string> {
   const user = await context.asana.me();
@@ -207,6 +210,20 @@ function renderTaskList(what: string, tasks: TaskSummary[], more: string | undef
     return `${label(task)}: ${details.join(", ")}`;
   });
   return renderList(what, rows, more, "no tasks");
+}
+
+async function requireTaskInPinnedWorkspace(context: Context, taskGid: string): Promise<void> {
+  requirePinnedWorkspace(context, await context.asana.taskWorkspace(taskGid), `task ${taskGid}`);
+}
+
+async function requireProjectInPinnedWorkspace(context: Context, projectGid: string): Promise<void> {
+  requirePinnedWorkspace(context, await context.asana.workspaceOf({ project: projectGid }), `project ${projectGid}`);
+}
+
+async function requireSectionInProject(context: Context, sectionGid: string, projectGid: string): Promise<void> {
+  if ((await context.asana.projectOfSection(sectionGid)) !== projectGid) {
+    throw new Error(`section ${sectionGid} is not in project ${projectGid}.`);
+  }
 }
 
 function requireTasksInPinnedWorkspace(context: Context, tasks: TaskSummary[], what: string): void {
@@ -346,6 +363,31 @@ function rethrowWithLandedHint(err: unknown, howToCheck: string): never {
   throw err;
 }
 
+type WriteStep = { inputKey: string; run: () => Promise<string[]> };
+
+function withProgress(err: unknown, done: string[], unsent: string[]): unknown {
+  const progress = [indented("already changed", done), `not sent: ${unsent.join(", ") || "none"}`];
+  const message = [(err as Error).message, "", ...progress].join("\n");
+  return err instanceof AsanaError ? new AsanaError(message, err.status) : new Error(message);
+}
+
+async function writeInOrder(steps: WriteStep[]): Promise<string[]> {
+  const done: string[] = [];
+  for (const [index, step] of steps.entries()) {
+    try {
+      done.push(...(await step.run()));
+    } catch (err) {
+      const unsent = steps.slice(index + 1).map((each) => each.inputKey);
+      rethrowWithLandedHint(done.length || unsent.length ? withProgress(err, done, unsent) : err, "get_task");
+    }
+  }
+  return done;
+}
+
+function writeStep<Result>(inputKey: string, write: () => Promise<Result>, render: (result: Result) => string) {
+  return { inputKey, run: async () => [render(await write())] };
+}
+
 export async function createTask(context: Context, input: z.infer<typeof createTaskInput>): Promise<string> {
   const { project_gid: project, section_gid: section, parent_gid: parent } = input;
   const fields = taskFields(input);
@@ -359,13 +401,9 @@ export async function createTask(context: Context, input: z.infer<typeof createT
       : { workspaceGid: await context.asana.workspaceOf({ project }), customFields: [] };
     requirePinnedWorkspace(context, target.workspaceGid, `project ${project}`);
     available = target.customFields;
+    if (section !== undefined) await requireSectionInProject(context, section, project);
   }
-  if (section !== undefined && (await context.asana.projectOfSection(section)) !== project) {
-    throw new Error(`section ${section} is not in project ${project}.`);
-  }
-  if (parent !== undefined) {
-    requirePinnedWorkspace(context, await context.asana.taskWorkspace(parent), `task ${parent}`);
-  }
+  if (parent !== undefined) await requireTaskInPinnedWorkspace(context, parent);
   await requireAssigneeInPinnedWorkspace(context, fields.assignee);
   if (input.custom_fields) {
     fields.custom_fields = await resolvePinned(context, input.custom_fields, available, `project ${project}`);
@@ -406,23 +444,66 @@ const renderChangedField: Record<keyof TaskFields, (task: Task, fields: TaskFiel
 };
 
 export async function updateTask(context: Context, input: z.infer<typeof updateTaskInput>): Promise<string> {
-  const { task_gid: taskGid, ...changes } = input;
+  const { task_gid: taskGid, move_to: moveTo, remove_from_project: removeFrom, parent_gid: parent, ...changes } = input;
   const fields = taskFields(changes);
-  if (!Object.keys(fields).length && !changes.custom_fields) throw new Error("pass at least one field to change.");
-  const target = changes.custom_fields
-    ? await context.asana.taskCustomFields(taskGid)
-    : { workspaceGid: await context.asana.taskWorkspace(taskGid), customFields: [] };
+  const otherChanges = [moveTo, removeFrom, parent];
+  if (!Object.keys(fields).length && !changes.custom_fields && otherChanges.every((each) => each === undefined)) {
+    throw new Error("pass at least one change.");
+  }
+  if (moveTo && moveTo.project_gid === removeFrom) {
+    throw new Error("pass 'move_to' or 'remove_from_project' for a project, not both.");
+  }
+  if (parent === taskGid) throw new Error("a task cannot be its own parent.");
+  const target = await context.asana.taskTarget(taskGid, changes.custom_fields !== undefined);
   requirePinnedWorkspace(context, target.workspaceGid, `task ${taskGid}`);
+  const alreadyInProject = moveTo !== undefined && target.projectGids.includes(moveTo.project_gid);
+  if (moveTo) {
+    if (alreadyInProject && !moveTo.section_gid) {
+      throw new Error(`task ${taskGid} is already in project ${moveTo.project_gid}; pass a 'section_gid' to move it.`);
+    }
+    await requireProjectInPinnedWorkspace(context, moveTo.project_gid);
+    if (moveTo.section_gid) await requireSectionInProject(context, moveTo.section_gid, moveTo.project_gid);
+  }
+  if (removeFrom) {
+    if (!target.projectGids.includes(removeFrom)) throw new Error(`task ${taskGid} is not in project ${removeFrom}.`);
+    await requireProjectInPinnedWorkspace(context, removeFrom);
+  }
+  if (parent) await requireTaskInPinnedWorkspace(context, parent);
   await requireAssigneeInPinnedWorkspace(context, fields.assignee);
   if (changes.custom_fields) {
     fields.custom_fields = await resolvePinned(context, changes.custom_fields, target.customFields, `task ${taskGid}`);
   }
-  const task = await context.asana
-    .updateTask(taskGid, fields)
-    .catch((err) => rethrowWithLandedHint(err, "get_task"));
-  const changed = Object.keys(fields) as (keyof TaskFields)[];
-  const lines = new Set(changed.map((field) => renderChangedField[field](task, fields)));
-  return [`updated task: ${label(task)}`, ...lines].join("\n");
+  let heading = `updated task: ${label({ gid: taskGid, name: target.name })}`;
+  const steps: WriteStep[] = [];
+  if (Object.keys(fields).length) {
+    steps.push({
+      inputKey: "fields",
+      run: async () => {
+        const task = await context.asana.updateTask(taskGid, fields);
+        heading = `updated task: ${label(task)}`;
+        const changed = Object.keys(fields) as (keyof TaskFields)[];
+        return [...new Set(changed.flatMap((field) => renderChangedField[field](task, fields).split("\n")))];
+      },
+    });
+  }
+  if (moveTo) {
+    const { project_gid: project, section_gid: section } = moveTo;
+    const placed = alreadyInProject
+      ? `moved to section ${section} of project ${project}`
+      : `added to project ${project}${section ? `, section ${section}` : ""}`;
+    steps.push(writeStep("move_to", () => context.asana.placeTask(taskGid, project, section), () => placed));
+  }
+  if (removeFrom) {
+    const remove = () => context.asana.removeTaskFromProject(taskGid, removeFrom);
+    steps.push(writeStep("remove_from_project", remove, () => `removed from project ${removeFrom}`));
+  }
+  if (parent !== undefined) {
+    const setParent = () => context.asana.setTaskParent(taskGid, parent);
+    const renderParent = (newParent?: Compact) => `parent: ${newParent ? label(newParent) : (parent ?? "none")}`;
+    steps.push(writeStep("parent_gid", setParent, renderParent));
+  }
+  const done = await writeInOrder(steps);
+  return [heading, ...done].join("\n");
 }
 
 export async function deleteTask(context: Context, input: z.infer<typeof deleteTaskInput>): Promise<string> {
@@ -601,7 +682,8 @@ export function buildServer(context: Context): McpServer {
     {
       description:
         "Change only the given fields of a task and return their new values. " +
-        "At most one of 'notes'/'html_notes' and of 'due_on'/'due_at'.",
+        "At most one of 'notes'/'html_notes' and of 'due_on'/'due_at'. " +
+        "Not atomic: a failure lists what changed and what was not sent.",
       inputSchema: updateTaskInput,
     },
     serially(updateTask),

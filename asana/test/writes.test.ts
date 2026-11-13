@@ -11,6 +11,7 @@ const IN_WORKSPACE = { gid: WORKSPACE.gid };
 const ELSEWHERE = { gid: "1100000000000999" };
 const USER_GID = "1200000000000009";
 const NOT_PINNED = `is not in workspace Acme (gid ${WORKSPACE.gid}).`;
+const TARGET_FIELDS = "name,workspace,memberships.project";
 const GET_TASK_HINT = "\n\nThe write may have gone through; get_task shows whether it did.";
 
 const CREATED = {
@@ -244,7 +245,7 @@ describe("update_task", () => {
         completed: true,
       },
     });
-    assert.deepEqual(fake.requestsTo("GET", `/tasks/${TASK_GID}`)[0].query, { opt_fields: "workspace" });
+    assert.deepEqual(fake.requestsTo("GET", `/tasks/${TASK_GID}`)[0].query, { opt_fields: TARGET_FIELDS });
   });
 
   it("reports an approval status with the completion Asana derived", async () => {
@@ -280,7 +281,7 @@ describe("update_task", () => {
 
   it("refuses an empty update or a conflicting pair before calling Asana", async () => {
     await assert.rejects(updateTask(context, { task_gid: TASK_GID }), {
-      message: "pass at least one field to change.",
+      message: "pass at least one change.",
     });
     await assert.rejects(updateTask(context, { task_gid: TASK_GID, approval_status: "approved", completed: true }), {
       message: "pass 'approval_status' or 'completed', not both: Asana sets 'completed' from 'approval_status'.",
@@ -421,7 +422,7 @@ describe("custom_fields", () => {
     );
     const [read] = fake.requestsTo("GET", `/tasks/${TASK_GID}`);
     const prefixed = FIELD_OPTS.split(",").map((field) => `custom_fields.${field}`);
-    assert.equal(read.query.opt_fields, ["workspace", ...prefixed].join(","));
+    assert.equal(read.query.opt_fields, [TARGET_FIELDS, ...prefixed].join(","));
     assert.deepEqual(fake.requestsTo("PUT", `/tasks/${TASK_GID}`)[0].body, {
       data: {
         name: "B",
@@ -467,5 +468,164 @@ describe("custom_fields", () => {
       await assert.rejects(run(), { message });
     }
     assert.deepEqual(writes(), []);
+  });
+});
+
+describe("placement and parent", () => {
+  const OTHER_PROJECT = "1400000000000002";
+  const relationPath = (action: string) => `POST /tasks/${TASK_GID}/${action}`;
+
+  function relationRoutes(projects = [OTHER_PROJECT]): Routes {
+    const target = {
+      gid: TASK_GID,
+      name: "Ship it",
+      workspace: IN_WORKSPACE,
+      memberships: projects.map((gid) => ({ project: { gid } })),
+    };
+    return {
+      [`GET /tasks/${TASK_GID}`]: dataReply(target),
+      ...projectRoute(),
+      [`GET /projects/${OTHER_PROJECT}`]: dataReply({ gid: OTHER_PROJECT, workspace: IN_WORKSPACE }),
+      ...sectionRoute(),
+      ...taskRoute(PARENT_GID),
+      [`PUT /tasks/${TASK_GID}`]: dataReply({ gid: TASK_GID, name: "Shipped" }),
+      [relationPath("addProject")]: dataReply({}),
+      [relationPath("removeProject")]: dataReply({}),
+      [relationPath("setParent")]: dataReply({ gid: TASK_GID, parent: { gid: PARENT_GID, name: "Epic" } }),
+    };
+  }
+
+  const EVERY_RELATION = {
+    task_gid: TASK_GID,
+    move_to: { project_gid: PROJECT_GID, section_gid: SECTION_GID },
+    remove_from_project: OTHER_PROJECT,
+    parent_gid: PARENT_GID,
+  };
+
+  it("writes the fields, then each relationship in a fixed order, and reports each", async () => {
+    fake.routes = relationRoutes();
+    assert.equal(
+      await updateTask(context, { ...EVERY_RELATION, name: "Shipped" }),
+      [
+        "updated task: Shipped (gid 1300000000000001)",
+        "name: Shipped",
+        `added to project ${PROJECT_GID}, section ${SECTION_GID}`,
+        `removed from project ${OTHER_PROJECT}`,
+        "parent: Epic (gid 1300000000000002)",
+      ].join("\n"),
+    );
+    const sent = fake.requests.filter((request) => request.method !== "GET");
+    assert.deepEqual(
+      sent.map((request) => [`${request.method} ${request.path}`, request.body]),
+      [
+        [`PUT /tasks/${TASK_GID}`, { data: { name: "Shipped" } }],
+        [relationPath("addProject"), { data: { project: PROJECT_GID, section: SECTION_GID } }],
+        [relationPath("removeProject"), { data: { project: OTHER_PROJECT } }],
+        [relationPath("setParent"), { data: { parent: PARENT_GID } }],
+      ],
+    );
+    assert.equal(fake.requests.findIndex((request) => request.method !== "GET"), fake.requests.length - sent.length);
+  });
+
+  it("accepts one non-field change alone, a null parent, and a move within a project", async () => {
+    fake.routes = { ...relationRoutes(), [relationPath("setParent")]: dataReply({ gid: TASK_GID, parent: null }) };
+    assert.equal(
+      await updateTask(context, { task_gid: TASK_GID, parent_gid: null }),
+      `updated task: Ship it (gid ${TASK_GID})\nparent: none`,
+    );
+    assert.deepEqual(fake.requestsTo("POST", `/tasks/${TASK_GID}/setParent`)[0].body, { data: { parent: null } });
+    await updateTask(context, { task_gid: TASK_GID, move_to: { project_gid: PROJECT_GID } });
+    assert.deepEqual(fake.requestsTo("POST", `/tasks/${TASK_GID}/addProject`)[0].body, {
+      data: { project: PROJECT_GID },
+    });
+    fake.routes = relationRoutes([PROJECT_GID]);
+    const move_to = { project_gid: PROJECT_GID, section_gid: SECTION_GID };
+    assert.equal(
+      await updateTask(context, { task_gid: TASK_GID, move_to }),
+      `updated task: Ship it (gid ${TASK_GID})\nmoved to section ${SECTION_GID} of project ${PROJECT_GID}`,
+    );
+  });
+
+  it("refuses a self-reference or a contradiction before calling Asana", async () => {
+    const cases: [Partial<Parameters<typeof updateTask>[1]>, string][] = [
+      [{ parent_gid: TASK_GID }, "a task cannot be its own parent."],
+      [
+        { move_to: { project_gid: PROJECT_GID }, remove_from_project: PROJECT_GID },
+        "pass 'move_to' or 'remove_from_project' for a project, not both.",
+      ],
+    ];
+    for (const [input, message] of cases) {
+      await assert.rejects(updateTask(context, { task_gid: TASK_GID, ...input }), { message });
+    }
+    assert.deepEqual(fake.requests, []);
+  });
+
+  it("refuses a change that does not match the task's placement before writing", async () => {
+    const cases: [string[], Partial<Parameters<typeof updateTask>[1]>, string][] = [
+      [
+        [PROJECT_GID],
+        { move_to: { project_gid: PROJECT_GID } },
+        `task ${TASK_GID} is already in project ${PROJECT_GID}; pass a 'section_gid' to move it.`,
+      ],
+      [[], { remove_from_project: OTHER_PROJECT }, `task ${TASK_GID} is not in project ${OTHER_PROJECT}.`],
+    ];
+    for (const [projects, input, message] of cases) {
+      fake.routes = relationRoutes(projects);
+      await assert.rejects(updateTask(context, { task_gid: TASK_GID, ...input }), { message });
+    }
+    assert.deepEqual(writes(), []);
+  });
+
+  it("refuses the task or any project, section, or parent it names outside the workspace", async () => {
+    const elsewhereTask = { [`GET /tasks/${TASK_GID}`]: dataReply({ gid: TASK_GID, workspace: ELSEWHERE }) };
+    for (const [routes, input, message] of [
+      [elsewhereTask, { parent_gid: null }, `task ${TASK_GID} ${NOT_PINNED}`],
+      [projectRoute(ELSEWHERE), EVERY_RELATION, `project ${PROJECT_GID} ${NOT_PINNED}`],
+      [sectionRoute(OTHER_PROJECT), EVERY_RELATION, `section ${SECTION_GID} is not in project ${PROJECT_GID}.`],
+      [
+        { [`GET /projects/${OTHER_PROJECT}`]: dataReply({ gid: OTHER_PROJECT, workspace: ELSEWHERE }) },
+        EVERY_RELATION,
+        `project ${OTHER_PROJECT} ${NOT_PINNED}`,
+      ],
+      [taskRoute(PARENT_GID, ELSEWHERE), EVERY_RELATION, `task ${PARENT_GID} ${NOT_PINNED}`],
+      [taskRoute(PARENT_GID, null), EVERY_RELATION, `task ${PARENT_GID} ${NOT_PINNED}`],
+    ] as const) {
+      fake.routes = { ...relationRoutes(), ...routes };
+      await assert.rejects(updateTask(context, { ...input, task_gid: TASK_GID, name: "x" }), { message });
+    }
+    assert.deepEqual(writes(), []);
+  });
+
+  it("says which changes landed and which were not sent when a later call fails", async () => {
+    fake.routes = { ...relationRoutes(), [relationPath("removeProject")]: errorReply(503, "Service Unavailable") };
+    await assert.rejects(updateTask(context, { ...EVERY_RELATION, name: "Shipped" }), {
+      message: [
+        `removing task ${TASK_GID} from project ${OTHER_PROJECT}: Asana answered 503: Service Unavailable`,
+        "",
+        "already changed:",
+        "  name: Shipped",
+        `  added to project ${PROJECT_GID}, section ${SECTION_GID}`,
+        "not sent: parent_gid",
+      ].join("\n") + GET_TASK_HINT,
+    });
+    assert.equal(fake.requestsTo("POST", `/tasks/${TASK_GID}/setParent`).length, 0);
+
+    fake.routes = { ...relationRoutes(), [relationPath("setParent")]: { text: "<html>" } };
+    const reparent = { task_gid: TASK_GID, name: "x", parent_gid: PARENT_GID };
+    await assert.rejects(updateTask(context, reparent), (err: Error) => {
+      assert.match(err.message, /^setting task \d+'s parent: Asana answered 200: /);
+      assert.ok(err.message.endsWith(`\n\nalready changed:\n  name: Shipped\nnot sent: none${GET_TASK_HINT}`));
+      return true;
+    });
+
+    fake.routes = { ...relationRoutes(), [relationPath("addProject")]: errorReply(400, "section: Not in project") };
+    await assert.rejects(updateTask(context, { task_gid: TASK_GID, move_to: { project_gid: PROJECT_GID } }), {
+      message: `placing task ${TASK_GID} in project ${PROJECT_GID}: Asana answered 400: section: Not in project`,
+    });
+    fake.routes = { ...relationRoutes(), [`PUT /tasks/${TASK_GID}`]: errorReply(403, "Forbidden") };
+    await assert.rejects(updateTask(context, { task_gid: TASK_GID, name: "x", parent_gid: null }), {
+      message:
+        `updating task ${TASK_GID}: Asana answered 403: Forbidden\n\n` + "already changed: none\nnot sent: parent_gid",
+    });
   });
 });
