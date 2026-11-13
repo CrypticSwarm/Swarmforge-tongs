@@ -68,6 +68,8 @@ const isoDate = z.iso.date();
 const isoDateTime = z.iso.datetime({ offset: true });
 const subtype = z.enum(["default_task", "milestone", "approval"]);
 const approvalStatus = z.enum(["pending", "approved", "rejected", "changes_requested"]);
+const MAX_BLOCKERS = 20;
+const blockerGids = z.array(gid).min(1).max(MAX_BLOCKERS);
 
 const getTaskInput = z.strictObject({ task_gid: gid.describe("The task's gid.") });
 
@@ -105,6 +107,7 @@ const createTaskInput = z.strictObject({
   section_gid: gid.optional().describe("Put it in this section of 'project_gid'."),
   parent_gid: gid.optional().describe("Make it a subtask of this task."),
   custom_fields: customFieldsInput.optional(),
+  blocked_by: blockerGids.optional().describe("Tasks that block this one, added in a separate call after the create."),
 });
 
 const moveToInput = z.strictObject({
@@ -132,6 +135,8 @@ const updateTaskInput = z.strictObject({
     .describe("Add the task to this project, or move it to 'section_gid' in a project it is already in."),
   remove_from_project: gid.optional().describe("Take the task out of this project."),
   parent_gid: gid.nullable().optional().describe("Make it a subtask of this task; null makes it top-level."),
+  remove_blocked_by: blockerGids.optional().describe("Tasks that no longer block this one."),
+  add_blocked_by: blockerGids.optional().describe("Tasks that now block this one."),
 });
 
 const deleteTaskInput = z.strictObject({ task_gid: gid.describe("The task's gid.") });
@@ -161,8 +166,8 @@ const keyCount = (input: z.ZodObject) => Object.keys(input.shape).length;
 const MAX_TOOL_INPUT_ELEMENTS = Math.max(
   ...[getTaskInput, listTasksInput, searchTasksInput, deleteTaskInput].map(keyCount),
   ...[getProjectInput, findProjectsInput, listUsersInput].map(keyCount),
-  keyCount(createTaskInput) + MAX_CUSTOM_FIELD_ELEMENTS,
-  keyCount(updateTaskInput) + keyCount(moveToInput) + MAX_CUSTOM_FIELD_ELEMENTS,
+  keyCount(createTaskInput) + MAX_BLOCKERS + MAX_CUSTOM_FIELD_ELEMENTS,
+  keyCount(updateTaskInput) + keyCount(moveToInput) + 2 * MAX_BLOCKERS + MAX_CUSTOM_FIELD_ELEMENTS,
 );
 
 export async function currentUser(context: Context): Promise<string> {
@@ -371,14 +376,15 @@ function withProgress(err: unknown, done: string[], unsent: string[]): unknown {
   return err instanceof AsanaError ? new AsanaError(message, err.status) : new Error(message);
 }
 
-async function writeInOrder(steps: WriteStep[]): Promise<string[]> {
+async function writeInOrder(steps: WriteStep[], alreadyChanged: string[] = []): Promise<string[]> {
   const done: string[] = [];
   for (const [index, step] of steps.entries()) {
     try {
       done.push(...(await step.run()));
     } catch (err) {
+      const changed = [...alreadyChanged, ...done];
       const unsent = steps.slice(index + 1).map((each) => each.inputKey);
-      rethrowWithLandedHint(done.length || unsent.length ? withProgress(err, done, unsent) : err, "get_task");
+      rethrowWithLandedHint(changed.length || unsent.length ? withProgress(err, changed, unsent) : err, "get_task");
     }
   }
   return done;
@@ -388,8 +394,15 @@ function writeStep<Result>(inputKey: string, write: () => Promise<Result>, rende
   return { inputKey, run: async () => [render(await write())] };
 }
 
+async function requireEachTaskInPinnedWorkspace(context: Context, taskGids: string[]): Promise<void> {
+  for (const taskGid of taskGids) await requireTaskInPinnedWorkspace(context, taskGid);
+}
+
+const dedupe = (gids: string[] | undefined) => (gids === undefined ? undefined : [...new Set(gids)]);
+
 export async function createTask(context: Context, input: z.infer<typeof createTaskInput>): Promise<string> {
   const { project_gid: project, section_gid: section, parent_gid: parent } = input;
+  const blockedBy = dedupe(input.blocked_by);
   const fields = taskFields(input);
   if (project === undefined && parent === undefined) throw new Error("pass 'project_gid', 'parent_gid', or both.");
   if (section !== undefined && project === undefined) throw new Error("pass 'project_gid' with 'section_gid'.");
@@ -404,18 +417,27 @@ export async function createTask(context: Context, input: z.infer<typeof createT
     if (section !== undefined) await requireSectionInProject(context, section, project);
   }
   if (parent !== undefined) await requireTaskInPinnedWorkspace(context, parent);
+  await requireEachTaskInPinnedWorkspace(context, blockedBy ?? []);
   await requireAssigneeInPinnedWorkspace(context, fields.assignee);
   if (input.custom_fields) {
     fields.custom_fields = await resolvePinned(context, input.custom_fields, available, `project ${project}`);
   }
   const task = await context.asana
     .createTask(context.workspace.gid, { project, section, parent }, fields)
-    .catch((err) => rethrowWithLandedHint(err, "list_tasks"));
+    .catch((err) => rethrowWithLandedHint(blockedBy ? withProgress(err, [], ["blocked_by"]) : err, "list_tasks"));
+  const created = `created task: ${label(task)}`;
+  let blockerLines: string[] = [];
+  if (blockedBy) {
+    const addBlockers = () => context.asana.addBlockers(task.gid, blockedBy);
+    const step = writeStep("blocked_by", addBlockers, () => `blockers added: ${blockedBy.join(", ")}`);
+    blockerLines = await writeInOrder([step], [created]);
+  }
   return [
-    `created task: ${label(task)}`,
+    created,
     `url: ${task.permalink ?? "none"}`,
     `parent: ${task.parent ? label(task.parent) : "none"}`,
     renderMemberships(task),
+    ...blockerLines,
   ].join("\n");
 }
 
@@ -445,8 +467,10 @@ const renderChangedField: Record<keyof TaskFields, (task: Task, fields: TaskFiel
 
 export async function updateTask(context: Context, input: z.infer<typeof updateTaskInput>): Promise<string> {
   const { task_gid: taskGid, move_to: moveTo, remove_from_project: removeFrom, parent_gid: parent, ...changes } = input;
+  const addBlockedBy = dedupe(input.add_blocked_by);
+  const removeBlockedBy = dedupe(input.remove_blocked_by);
   const fields = taskFields(changes);
-  const otherChanges = [moveTo, removeFrom, parent];
+  const otherChanges = [moveTo, removeFrom, parent, addBlockedBy, removeBlockedBy];
   if (!Object.keys(fields).length && !changes.custom_fields && otherChanges.every((each) => each === undefined)) {
     throw new Error("pass at least one change.");
   }
@@ -454,6 +478,10 @@ export async function updateTask(context: Context, input: z.infer<typeof updateT
     throw new Error("pass 'move_to' or 'remove_from_project' for a project, not both.");
   }
   if (parent === taskGid) throw new Error("a task cannot be its own parent.");
+  const namedBlockers = [...(addBlockedBy ?? []), ...(removeBlockedBy ?? [])];
+  if (namedBlockers.includes(taskGid)) throw new Error("a task cannot block itself.");
+  const inBoth = addBlockedBy?.find((blocker) => removeBlockedBy?.includes(blocker));
+  if (inBoth) throw new Error(`pass task ${inBoth} in 'add_blocked_by' or 'remove_blocked_by', not both.`);
   const target = await context.asana.taskTarget(taskGid, changes.custom_fields !== undefined);
   requirePinnedWorkspace(context, target.workspaceGid, `task ${taskGid}`);
   const alreadyInProject = moveTo !== undefined && target.projectGids.includes(moveTo.project_gid);
@@ -469,6 +497,9 @@ export async function updateTask(context: Context, input: z.infer<typeof updateT
     await requireProjectInPinnedWorkspace(context, removeFrom);
   }
   if (parent) await requireTaskInPinnedWorkspace(context, parent);
+  const notBlocking = removeBlockedBy?.find((blocker) => !target.blockerGids.includes(blocker));
+  if (notBlocking) throw new Error(`task ${notBlocking} does not block task ${taskGid}.`);
+  await requireEachTaskInPinnedWorkspace(context, namedBlockers);
   await requireAssigneeInPinnedWorkspace(context, fields.assignee);
   if (changes.custom_fields) {
     fields.custom_fields = await resolvePinned(context, changes.custom_fields, target.customFields, `task ${taskGid}`);
@@ -501,6 +532,14 @@ export async function updateTask(context: Context, input: z.infer<typeof updateT
     const setParent = () => context.asana.setTaskParent(taskGid, parent);
     const renderParent = (newParent?: Compact) => `parent: ${newParent ? label(newParent) : (parent ?? "none")}`;
     steps.push(writeStep("parent_gid", setParent, renderParent));
+  }
+  if (removeBlockedBy) {
+    const remove = () => context.asana.removeBlockers(taskGid, removeBlockedBy);
+    steps.push(writeStep("remove_blocked_by", remove, () => `blockers removed: ${removeBlockedBy.join(", ")}`));
+  }
+  if (addBlockedBy) {
+    const add = () => context.asana.addBlockers(taskGid, addBlockedBy);
+    steps.push(writeStep("add_blocked_by", add, () => `blockers added: ${addBlockedBy.join(", ")}`));
   }
   const done = await writeInOrder(steps);
   return [heading, ...done].join("\n");

@@ -58,7 +58,7 @@ export type TaskCustomField = { field: Compact; type?: string; value?: string | 
 
 export type CustomFieldTarget = { workspaceGid?: string; customFields: CustomField[] };
 
-export type TaskTarget = CustomFieldTarget & { name: string; projectGids: string[] };
+export type TaskTarget = CustomFieldTarget & { name: string; projectGids: string[]; blockerGids: string[] };
 
 export type CustomFieldWrite = string | number | string[] | { date: string } | { date_time: string } | null;
 
@@ -394,7 +394,7 @@ export class Asana {
   }
 
   async taskTarget(gid: string, withCustomFields: boolean): Promise<TaskTarget> {
-    const targetFields = "name,workspace,memberships.project";
+    const targetFields = "name,workspace,memberships.project,dependencies";
     const opt_fields = withCustomFields ? `${targetFields},${TASK_CUSTOM_FIELDS}` : targetFields;
     const data = await this.call(`reading task ${gid}`, () => this.tasks.getTask(gid, { opt_fields }));
     return {
@@ -402,6 +402,7 @@ export class Asana {
       workspaceGid: compact(data.workspace)?.gid,
       customFields: customFields(data.custom_fields),
       projectGids: memberships(data).map((membership) => membership.project.gid),
+      blockerGids: compacts(data.dependencies).map((blocker) => blocker.gid),
     };
   }
 
@@ -453,6 +454,18 @@ export class Asana {
       this.tasks.setParentForTask({ data: { parent } }, gid, { opt_fields: "parent.name" }),
     );
     return compact(data.parent);
+  }
+
+  async addBlockers(gid: string, blockers: string[]): Promise<void> {
+    await this.send(`adding blockers to task ${gid}`, () =>
+      this.tasks.addDependenciesForTask({ data: { dependencies: blockers } }, gid),
+    );
+  }
+
+  async removeBlockers(gid: string, blockers: string[]): Promise<void> {
+    await this.send(`removing blockers from task ${gid}`, () =>
+      this.tasks.removeDependenciesForTask({ data: { dependencies: blockers } }, gid),
+    );
   }
 
   async deleteTask(gid: string): Promise<void> {

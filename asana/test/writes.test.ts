@@ -11,7 +11,7 @@ const IN_WORKSPACE = { gid: WORKSPACE.gid };
 const ELSEWHERE = { gid: "1100000000000999" };
 const USER_GID = "1200000000000009";
 const NOT_PINNED = `is not in workspace Acme (gid ${WORKSPACE.gid}).`;
-const TARGET_FIELDS = "name,workspace,memberships.project";
+const TARGET_FIELDS = "name,workspace,memberships.project,dependencies";
 const GET_TASK_HINT = "\n\nThe write may have gone through; get_task shows whether it did.";
 
 const CREATED = {
@@ -471,7 +471,9 @@ describe("custom_fields", () => {
   });
 });
 
-describe("placement and parent", () => {
+describe("placement, parent, and blockers", () => {
+  const BLOCKER = "1300000000000003";
+  const OTHER_BLOCKER = "1300000000000004";
   const OTHER_PROJECT = "1400000000000002";
   const relationPath = (action: string) => `POST /tasks/${TASK_GID}/${action}`;
 
@@ -481,6 +483,7 @@ describe("placement and parent", () => {
       name: "Ship it",
       workspace: IN_WORKSPACE,
       memberships: projects.map((gid) => ({ project: { gid } })),
+      dependencies: [{ gid: OTHER_BLOCKER }],
     };
     return {
       [`GET /tasks/${TASK_GID}`]: dataReply(target),
@@ -488,10 +491,14 @@ describe("placement and parent", () => {
       [`GET /projects/${OTHER_PROJECT}`]: dataReply({ gid: OTHER_PROJECT, workspace: IN_WORKSPACE }),
       ...sectionRoute(),
       ...taskRoute(PARENT_GID),
+      ...taskRoute(BLOCKER),
+      ...taskRoute(OTHER_BLOCKER),
       [`PUT /tasks/${TASK_GID}`]: dataReply({ gid: TASK_GID, name: "Shipped" }),
       [relationPath("addProject")]: dataReply({}),
       [relationPath("removeProject")]: dataReply({}),
       [relationPath("setParent")]: dataReply({ gid: TASK_GID, parent: { gid: PARENT_GID, name: "Epic" } }),
+      [relationPath("addDependencies")]: dataReply({}),
+      [relationPath("removeDependencies")]: dataReply({}),
     };
   }
 
@@ -500,6 +507,8 @@ describe("placement and parent", () => {
     move_to: { project_gid: PROJECT_GID, section_gid: SECTION_GID },
     remove_from_project: OTHER_PROJECT,
     parent_gid: PARENT_GID,
+    add_blocked_by: [BLOCKER, BLOCKER],
+    remove_blocked_by: [OTHER_BLOCKER, OTHER_BLOCKER],
   };
 
   it("writes the fields, then each relationship in a fixed order, and reports each", async () => {
@@ -512,6 +521,8 @@ describe("placement and parent", () => {
         `added to project ${PROJECT_GID}, section ${SECTION_GID}`,
         `removed from project ${OTHER_PROJECT}`,
         "parent: Epic (gid 1300000000000002)",
+        `blockers removed: ${OTHER_BLOCKER}`,
+        `blockers added: ${BLOCKER}`,
       ].join("\n"),
     );
     const sent = fake.requests.filter((request) => request.method !== "GET");
@@ -522,6 +533,8 @@ describe("placement and parent", () => {
         [relationPath("addProject"), { data: { project: PROJECT_GID, section: SECTION_GID } }],
         [relationPath("removeProject"), { data: { project: OTHER_PROJECT } }],
         [relationPath("setParent"), { data: { parent: PARENT_GID } }],
+        [relationPath("removeDependencies"), { data: { dependencies: [OTHER_BLOCKER] } }],
+        [relationPath("addDependencies"), { data: { dependencies: [BLOCKER] } }],
       ],
     );
     assert.equal(fake.requests.findIndex((request) => request.method !== "GET"), fake.requests.length - sent.length);
@@ -549,6 +562,12 @@ describe("placement and parent", () => {
   it("refuses a self-reference or a contradiction before calling Asana", async () => {
     const cases: [Partial<Parameters<typeof updateTask>[1]>, string][] = [
       [{ parent_gid: TASK_GID }, "a task cannot be its own parent."],
+      [{ add_blocked_by: [TASK_GID] }, "a task cannot block itself."],
+      [{ remove_blocked_by: [TASK_GID] }, "a task cannot block itself."],
+      [
+        { add_blocked_by: [BLOCKER], remove_blocked_by: [BLOCKER] },
+        `pass task ${BLOCKER} in 'add_blocked_by' or 'remove_blocked_by', not both.`,
+      ],
       [
         { move_to: { project_gid: PROJECT_GID }, remove_from_project: PROJECT_GID },
         "pass 'move_to' or 'remove_from_project' for a project, not both.",
@@ -560,7 +579,7 @@ describe("placement and parent", () => {
     assert.deepEqual(fake.requests, []);
   });
 
-  it("refuses a change that does not match the task's placement before writing", async () => {
+  it("refuses a change that does not match the task's placement or blockers before writing", async () => {
     const cases: [string[], Partial<Parameters<typeof updateTask>[1]>, string][] = [
       [
         [PROJECT_GID],
@@ -568,6 +587,7 @@ describe("placement and parent", () => {
         `task ${TASK_GID} is already in project ${PROJECT_GID}; pass a 'section_gid' to move it.`,
       ],
       [[], { remove_from_project: OTHER_PROJECT }, `task ${TASK_GID} is not in project ${OTHER_PROJECT}.`],
+      [[], { remove_blocked_by: [BLOCKER] }, `task ${BLOCKER} does not block task ${TASK_GID}.`],
     ];
     for (const [projects, input, message] of cases) {
       fake.routes = relationRoutes(projects);
@@ -576,7 +596,7 @@ describe("placement and parent", () => {
     assert.deepEqual(writes(), []);
   });
 
-  it("refuses the task or any project, section, or parent it names outside the workspace", async () => {
+  it("refuses the task or any project, section, parent, or blocker it names outside the workspace", async () => {
     const elsewhereTask = { [`GET /tasks/${TASK_GID}`]: dataReply({ gid: TASK_GID, workspace: ELSEWHERE }) };
     for (const [routes, input, message] of [
       [elsewhereTask, { parent_gid: null }, `task ${TASK_GID} ${NOT_PINNED}`],
@@ -589,6 +609,8 @@ describe("placement and parent", () => {
       ],
       [taskRoute(PARENT_GID, ELSEWHERE), EVERY_RELATION, `task ${PARENT_GID} ${NOT_PINNED}`],
       [taskRoute(PARENT_GID, null), EVERY_RELATION, `task ${PARENT_GID} ${NOT_PINNED}`],
+      [taskRoute(BLOCKER, null), EVERY_RELATION, `task ${BLOCKER} ${NOT_PINNED}`],
+      [taskRoute(OTHER_BLOCKER, ELSEWHERE), EVERY_RELATION, `task ${OTHER_BLOCKER} ${NOT_PINNED}`],
     ] as const) {
       fake.routes = { ...relationRoutes(), ...routes };
       await assert.rejects(updateTask(context, { ...input, task_gid: TASK_GID, name: "x" }), { message });
@@ -605,7 +627,7 @@ describe("placement and parent", () => {
         "already changed:",
         "  name: Shipped",
         `  added to project ${PROJECT_GID}, section ${SECTION_GID}`,
-        "not sent: parent_gid",
+        "not sent: parent_gid, remove_blocked_by, add_blocked_by",
       ].join("\n") + GET_TASK_HINT,
     });
     assert.equal(fake.requestsTo("POST", `/tasks/${TASK_GID}/setParent`).length, 0);
@@ -626,6 +648,74 @@ describe("placement and parent", () => {
     await assert.rejects(updateTask(context, { task_gid: TASK_GID, name: "x", parent_gid: null }), {
       message:
         `updating task ${TASK_GID}: Asana answered 403: Forbidden\n\n` + "already changed: none\nnot sent: parent_gid",
+    });
+  });
+
+  it("creates a task blocked by others, checking each blocker before the create", async () => {
+    fake.routes = {
+      ...projectRoute(),
+      ...taskRoute(BLOCKER),
+      "POST /tasks": dataReply({ gid: TASK_GID, name: "A" }),
+      [relationPath("addDependencies")]: dataReply({}),
+    };
+    assert.equal(
+      await createTask(context, { name: "A", project_gid: PROJECT_GID, blocked_by: [BLOCKER, BLOCKER] }),
+      [
+        "created task: A (gid 1300000000000001)",
+        "url: none",
+        "parent: none",
+        "projects: none",
+        `blockers added: ${BLOCKER}`,
+      ].join("\n"),
+    );
+    assert.deepEqual(fake.requestsTo("POST", `/tasks/${TASK_GID}/addDependencies`)[0].body, {
+      data: { dependencies: [BLOCKER] },
+    });
+
+    fake.requests.length = 0;
+    fake.routes = { ...fake.routes, ...taskRoute(BLOCKER, ELSEWHERE) };
+    await assert.rejects(createTask(context, { name: "A", project_gid: PROJECT_GID, blocked_by: [BLOCKER] }), {
+      message: `task ${BLOCKER} ${NOT_PINNED}`,
+    });
+    assert.deepEqual(writes(), []);
+  });
+
+  it("says whether a create with blockers landed when a call fails", async () => {
+    const input = { name: "A", project_gid: PROJECT_GID, blocked_by: [BLOCKER] };
+    fake.routes = {
+      ...projectRoute(),
+      ...taskRoute(BLOCKER),
+      "POST /tasks": dataReply({ gid: TASK_GID, name: "A" }),
+      [relationPath("addDependencies")]: errorReply(500, "Oops"),
+    };
+    await assert.rejects(createTask(context, input), {
+      message: [
+        `adding blockers to task ${TASK_GID}: Asana answered 500: Oops`,
+        "",
+        "already changed:",
+        "  created task: A (gid 1300000000000001)",
+        "not sent: none",
+      ].join("\n") + GET_TASK_HINT,
+    });
+    fake.routes["POST /tasks"] = errorReply(400, "name: Missing input");
+    await assert.rejects(createTask(context, input), {
+      message: [
+        "creating a task: Asana answered 400: name: Missing input",
+        "",
+        "already changed: none",
+        "not sent: blocked_by",
+      ].join("\n"),
+    });
+    fake.routes["POST /tasks"] = errorReply(502, "Bad Gateway");
+    await assert.rejects(createTask(context, input), {
+      message: [
+        "creating a task: Asana answered 502: Bad Gateway",
+        "",
+        "already changed: none",
+        "not sent: blocked_by",
+        "",
+        "The write may have gone through; list_tasks shows whether it did.",
+      ].join("\n"),
     });
   });
 });
