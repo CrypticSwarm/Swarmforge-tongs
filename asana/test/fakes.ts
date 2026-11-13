@@ -92,6 +92,11 @@ export function dataReply(data: unknown): FakeReply {
   return { json: { data } };
 }
 
+export function pageReply(items: unknown[], offset?: string): FakeReply {
+  const nextPage = offset === undefined ? null : { offset, path: `/next?offset=${offset}`, uri: "https://example/next" };
+  return { json: { data: items, next_page: nextPage } };
+}
+
 export function meRoute(user: User = USER): Routes {
   return { "GET /users/me": dataReply({ resource_type: "user", ...user }) };
 }

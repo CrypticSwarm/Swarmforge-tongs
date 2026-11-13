@@ -1,11 +1,13 @@
 // The only module that touches the asana SDK.
 
-import { ApiClient, TasksApi, UsersApi, WorkspacesApi } from "asana";
+import { ApiClient, ProjectsApi, SectionsApi, TasksApi, UsersApi, WorkspacesApi } from "asana";
 
 export const ASANA_API = "https://app.asana.com/api/1.0";
 
 /** An Asana gid: a decimal string, kept as a string since gids outgrow a double. */
 export const GID = /^\d{1,20}$/;
+
+export const CURSOR = /^[\w\-.:=+/]{1,512}$/;
 
 /** Carries no reference to the SDK's error, whose request object holds the token. */
 export class AsanaError extends Error {
@@ -48,7 +50,23 @@ export type Task = TaskSummary & {
   subtaskCount?: number;
 };
 
+export type Page<Item> = { items: Item[]; cursor?: string };
+
 type Resource = Record<string, unknown> & { gid: string };
+
+export type TaskScope = { project: string } | { section: string } | { parent: string };
+
+export type TaskSearch = {
+  text?: string;
+  assignee?: string;
+  project?: string;
+  section?: string;
+  tag?: string;
+  completed?: boolean;
+  dueOnAfter?: string;
+  dueOnBefore?: string;
+  limit: number;
+};
 
 const TASK_SUMMARY_FIELDS = "name,completed,assignee.name,due_on,due_at,workspace";
 
@@ -157,6 +175,8 @@ function task(data: Resource): Task {
 }
 
 export class Asana {
+  private readonly projects: ProjectsApi;
+  private readonly sections: SectionsApi;
   private readonly tasks: TasksApi;
   private readonly users: UsersApi;
   private readonly workspaces: WorkspacesApi;
@@ -168,25 +188,43 @@ export class Asana {
     // superagent resends the Authorization header on a 307 or 308 to any host.
     const applyAuth = client.applyAuthToRequest.bind(client);
     client.applyAuthToRequest = (request, authNames) => applyAuth(request.redirects(0), authNames);
+    // Otherwise list calls drop `next_page`.
+    client.RETURN_COLLECTION = false;
+    this.projects = new ProjectsApi(client);
+    this.sections = new SectionsApi(client);
     this.tasks = new TasksApi(client);
     this.users = new UsersApi(client);
     this.workspaces = new WorkspacesApi(client);
   }
 
-  private async call(what: string, request: () => Promise<unknown>): Promise<Resource> {
-    let body: unknown;
+  private async send(what: string, request: () => Promise<unknown>): Promise<{ data?: unknown; next_page?: unknown }> {
     try {
-      body = await request();
+      return ((await request()) ?? {}) as { data?: unknown; next_page?: unknown };
     } catch (err) {
       const { message, status } = describeFailure(err);
       throw new AsanaError(`${what}: ${message}`, status);
     }
-    const data = (body as { data?: unknown } | null)?.data;
+  }
+
+  private async call(what: string, request: () => Promise<unknown>): Promise<Resource> {
+    const { data } = await this.send(what, request);
     if (typeof data !== "object" || data === null || Array.isArray(data)) {
       throw new AsanaError(`${what}: Asana's answer had no data`);
     }
     if (!isResource(data)) throw new AsanaError(`${what}: Asana's answer had no gid`);
     return data;
+  }
+
+  private async callList(what: string, request: () => Promise<unknown>): Promise<Page<Resource>> {
+    const { data, next_page: nextPage } = await this.send(what, request);
+    if (!Array.isArray(data)) throw new AsanaError(`${what}: Asana's answer had no data`);
+    if (!data.every(isResource)) throw new AsanaError(`${what}: Asana's answer had an item without a gid`);
+    if (nextPage === undefined || nextPage === null) return { items: data };
+    const offset = (nextPage as { offset?: unknown }).offset;
+    if (typeof offset !== "string" || !CURSOR.test(offset)) {
+      throw new AsanaError(`${what}: Asana's next page was malformed`);
+    }
+    return { items: data, cursor: offset };
   }
 
   async me(): Promise<User> {
@@ -205,6 +243,76 @@ export class Asana {
 
   async task(gid: string): Promise<Task> {
     return task(await this.call(`reading task ${gid}`, () => this.tasks.getTask(gid, { opt_fields: TASK_FIELDS })));
+  }
+
+  async workspaceOf(scope: TaskScope): Promise<string | undefined> {
+    if ("parent" in scope) {
+      const parent = await this.call(`reading task ${scope.parent}`, () =>
+        this.tasks.getTask(scope.parent, { opt_fields: "workspace" }),
+      );
+      return compact(parent.workspace)?.gid;
+    }
+    const projectGid = "project" in scope ? scope.project : await this.projectOfSection(scope.section);
+    if (projectGid === undefined) return undefined;
+    const what = "project" in scope ? `reading project ${projectGid}` : `reading section ${scope.section}'s project`;
+    const project = await this.call(what, () =>
+      this.projects.getProject(projectGid, { opt_fields: "workspace" }),
+    );
+    return compact(project.workspace)?.gid;
+  }
+
+  private async projectOfSection(sectionGid: string): Promise<string | undefined> {
+    const section = await this.call(`reading section ${sectionGid}`, () =>
+      this.sections.getSection(sectionGid, { opt_fields: "project" }),
+    );
+    return compact(section.project)?.gid;
+  }
+
+  async taskList(
+    scope: TaskScope,
+    options: { incompleteOnly: boolean; limit: number; cursor?: string },
+  ): Promise<Page<TaskSummary>> {
+    const query = { opt_fields: TASK_SUMMARY_FIELDS, limit: options.limit, offset: options.cursor };
+    const incompleteFilter = options.incompleteOnly ? { completed_since: "now" } : {};
+    const page =
+      "project" in scope
+        ? await this.callList(`listing tasks in project ${scope.project}`, () =>
+            this.tasks.getTasksForProject(scope.project, { ...query, ...incompleteFilter }),
+          )
+        : "section" in scope
+          ? await this.callList(`listing tasks in section ${scope.section}`, () =>
+              this.tasks.getTasksForSection(scope.section, { ...query, ...incompleteFilter }),
+            )
+          : await this.callList(`listing subtasks of task ${scope.parent}`, () =>
+              this.tasks.getSubtasksForTask(scope.parent, query),
+            );
+    return { items: page.items.map(taskSummary), cursor: page.cursor };
+  }
+
+  async searchTasks(workspaceGid: string, search: TaskSearch): Promise<TaskSummary[]> {
+    const query = {
+      opt_fields: TASK_SUMMARY_FIELDS,
+      limit: search.limit,
+      sort_by: "created_at",
+      sort_ascending: false,
+      text: search.text,
+      "assignee.any": search.assignee,
+      "projects.any": search.project,
+      "sections.any": search.section,
+      "tags.any": search.tag,
+      completed: search.completed,
+      "due_on.after": search.dueOnAfter,
+      "due_on.before": search.dueOnBefore,
+    };
+    const page = await this.callList("searching tasks", () =>
+      this.tasks.searchTasksForWorkspace(workspaceGid, query),
+    ).catch((err) => {
+      if (err instanceof AsanaError && err.status === 402) {
+        throw new AsanaError(`${err.message}. Task search needs Asana Premium.`, 402);
+      }
+      throw err;
+    });
+    return page.items.map(taskSummary);
   }
 }
 

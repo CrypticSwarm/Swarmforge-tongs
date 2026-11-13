@@ -7,7 +7,7 @@ import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/cli
 import { createApp } from "../src/app.js";
 import { FakeAsana, TOKEN, WORKSPACE, dataReply, errorReply, meRoute, workspaceRoute } from "./fakes.js";
 
-const VERBS = ["current_user", "get_task"];
+const VERBS = ["current_user", "get_task", "list_tasks", "search_tasks"];
 
 let fake: FakeAsana;
 let httpServer: Server;
@@ -122,11 +122,43 @@ describe("task verbs", () => {
     for (const [name, args, field] of [
       ["get_task", { task_gid: "../users/me" }, "task_gid"],
       ["get_task", { task_gid: "1".repeat(21) }, "task_gid"],
+      ["list_tasks", { section_gid: "1/2" }, "section_gid"],
+      ["list_tasks", { parent_gid: "" }, "parent_gid"],
+      ["list_tasks", { cursor: "a&b" }, "cursor"],
+      ["list_tasks", { limit: 101 }, "limit"],
+      ["list_tasks", { limit: 1.5 }, "limit"],
+      ["search_tasks", { assignee: "ada@example.com" }, "assignee"],
+      ["search_tasks", { tag_gid: "x" }, "tag_gid"],
+      ["search_tasks", { due_on_after: "next week" }, "due_on_after"],
+      ["search_tasks", { text: "x".repeat(201) }, "text"],
+      ["search_tasks", { limit: 0 }, "limit"],
     ] as const) {
       const result = await client.callTool({ name, arguments: args });
       assert.equal(result.isError, true, `${name} ${JSON.stringify(args)}`);
       assert.match(text(result), new RegExp(`tool ${name}: ${field}: `), `${name} ${JSON.stringify(args)}`);
     }
     assert.deepEqual(fake.requests, []);
+  });
+
+  it("count all nine search parameters within the limit, and refuse one more", async (t) => {
+    t.mock.method(console, "error", () => {});
+    const client = await connect();
+    fake.routes = { [`GET /workspaces/${WORKSPACE.gid}/tasks/search`]: { json: { data: [] } } };
+    const filters = {
+      text: "x",
+      assignee: "me",
+      project_gid: "1",
+      tag_gid: "3",
+      completed: true,
+      due_on_after: "2026-01-01",
+      due_on_before: "2026-02-01",
+      limit: 5,
+    };
+    const every = await client.callTool({ name: "search_tasks", arguments: { ...filters, section_gid: "2" } });
+    assert.match(text(every), /not both/);
+    const accepted = await client.callTool({ name: "search_tasks", arguments: filters });
+    assert.equal(text(accepted), "matching tasks, newest first: no tasks");
+    const tooMany = await client.callTool({ name: "search_tasks", arguments: { ...filters, section_gid: "2", extra: 1 } });
+    assert.match(text(tooMany), /maximum of 9 elements/);
   });
 });

@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod";
-import { GID, type Asana, type Compact, type Task, type TaskSummary, type Workspace } from "./asana.js";
+import { CURSOR, GID, type Asana, type Compact, type Task, type TaskSummary, type Workspace } from "./asana.js";
 
 export type Context = {
   asana: Asana;
@@ -14,14 +14,52 @@ The Asana token lives only in this tong and is never exposed to the caller. The
 workspace is fixed at startup; no verb accepts a workspace.
 
 - current_user names the token's user and the pinned workspace.
-- get_task reads one task in full.`;
+- get_task reads one task in full; list_tasks lists a project's or a section's tasks,
+  or a task's subtasks; search_tasks searches the workspace and needs Asana Premium.
+- A list ending in a cursor has more; pass it back as 'cursor' for the next page.
+  A full search page says so; narrow the search to see more.`;
+
+const DEFAULT_LIMIT = 50;
 
 const gid = z.string().regex(GID, "must be an Asana gid, a string of digits");
+const limit = z
+  .number()
+  .int()
+  .min(1)
+  .max(100)
+  .optional()
+  .describe(`Max tasks to return, 1-100 (default ${DEFAULT_LIMIT}).`);
+
 const getTaskInput = z.strictObject({ task_gid: gid.describe("The task's gid.") });
+
+const listTasksInput = z.strictObject({
+  project_gid: gid.optional().describe("List this project's tasks."),
+  section_gid: gid.optional().describe("List this section's tasks."),
+  parent_gid: gid.optional().describe("List this task's subtasks."),
+  incomplete_only: z.boolean().optional().describe("Leave out completed tasks."),
+  limit,
+  cursor: z
+    .string()
+    .regex(CURSOR, "must be a cursor from a previous page")
+    .optional()
+    .describe("The cursor the previous page ended with."),
+});
+
+const searchTasksInput = z.strictObject({
+  text: z.string().min(1).max(200).optional().describe("Words to find in the task's name or description."),
+  assignee: z.union([z.literal("me"), gid]).optional().describe("The assignee's gid, or 'me' for the token's user."),
+  project_gid: gid.optional().describe("Only tasks in this project, or under one of its tasks."),
+  section_gid: gid.optional().describe("Only tasks in this section."),
+  tag_gid: gid.optional().describe("Only tasks with this tag."),
+  completed: z.boolean().optional().describe("Only completed (true) or incomplete (false) tasks."),
+  due_on_after: z.iso.date().optional().describe("Only tasks due after this date, YYYY-MM-DD."),
+  due_on_before: z.iso.date().optional().describe("Only tasks due before this date, YYYY-MM-DD."),
+  limit,
+});
 
 /** Elements plus members in `arguments`, checked before the schema. Top-level keys only; count nested ones by hand. */
 const MAX_TOOL_INPUT_ELEMENTS = Math.max(
-  ...[getTaskInput].map((input) => Object.keys(input.shape).length),
+  ...[getTaskInput, listTasksInput, searchTasksInput].map((input) => Object.keys(input.shape).length),
 );
 
 export async function currentUser(context: Context): Promise<string> {
@@ -49,6 +87,23 @@ function requirePinnedWorkspace(context: Context, workspaceGid: string | undefin
   if (workspaceGid !== context.workspace.gid) {
     throw new Error(`${what} is not in workspace ${context.workspace.name} (gid ${context.workspace.gid}).`);
   }
+}
+
+function renderTaskList(what: string, tasks: TaskSummary[], more: string | undefined): string {
+  const rows = tasks.map((task) => {
+    const details = [task.completed ? "completed" : "incomplete"];
+    if (task.assignee) details.push(`assignee ${label(task.assignee)}`);
+    const dueDate = due(task);
+    if (dueDate) details.push(`due ${dueDate}`);
+    return `- ${label(task)}: ${details.join(", ")}`;
+  });
+  const lines = [rows.length ? `${what}:` : `${what}: ${more ? "none on this page" : "no tasks"}`, ...rows];
+  if (more) lines.push(more);
+  return lines.join("\n");
+}
+
+function requireTasksInPinnedWorkspace(context: Context, tasks: TaskSummary[], what: string): void {
+  for (const task of tasks) requirePinnedWorkspace(context, task.workspaceGid, `a task in ${what}`);
 }
 
 function renderTask(task: Task): string {
@@ -83,6 +138,48 @@ export async function getTask(context: Context, input: z.infer<typeof getTaskInp
   const task = await context.asana.task(input.task_gid);
   requirePinnedWorkspace(context, task.workspaceGid, `task ${task.gid}`);
   return renderTask(task);
+}
+
+export async function listTasks(context: Context, input: z.infer<typeof listTasksInput>): Promise<string> {
+  const scopes = [
+    ...(input.project_gid ? [{ project: input.project_gid, what: `project ${input.project_gid}` }] : []),
+    ...(input.section_gid ? [{ section: input.section_gid, what: `section ${input.section_gid}` }] : []),
+    ...(input.parent_gid ? [{ parent: input.parent_gid, what: `task ${input.parent_gid}` }] : []),
+  ];
+  if (scopes.length !== 1) throw new Error("pass exactly one of 'project_gid', 'section_gid', or 'parent_gid'.");
+  const [{ what, ...scope }] = scopes;
+  requirePinnedWorkspace(context, await context.asana.workspaceOf(scope), what);
+  const page = await context.asana.taskList(scope, {
+    incompleteOnly: input.incomplete_only ?? false,
+    limit: input.limit ?? DEFAULT_LIMIT,
+    cursor: input.cursor,
+  });
+  requireTasksInPinnedWorkspace(context, page.items, what);
+  // The subtasks endpoint cannot leave out completed tasks itself.
+  const tasks = input.incomplete_only ? page.items.filter((task) => !task.completed) : page.items;
+  const heading = "parent" in scope ? `subtasks of ${what}` : `tasks in ${what}`;
+  return renderTaskList(heading, tasks, page.cursor && `cursor: ${page.cursor}`);
+}
+
+export async function searchTasks(context: Context, input: z.infer<typeof searchTasksInput>): Promise<string> {
+  if (input.project_gid && input.section_gid) {
+    throw new Error("pass 'project_gid' or 'section_gid', not both: Asana would return the tasks of either.");
+  }
+  const limit = input.limit ?? DEFAULT_LIMIT;
+  const tasks = await context.asana.searchTasks(context.workspace.gid, {
+    text: input.text,
+    assignee: input.assignee,
+    project: input.project_gid,
+    section: input.section_gid,
+    tag: input.tag_gid,
+    completed: input.completed,
+    dueOnAfter: input.due_on_after,
+    dueOnBefore: input.due_on_before,
+    limit,
+  });
+  requireTasksInPinnedWorkspace(context, tasks, "the search");
+  const more = tasks.length === limit ? "more may match: narrow the search" : undefined;
+  return renderTaskList("matching tasks, newest first", tasks, more);
 }
 
 export function buildServer(context: Context): McpServer {
@@ -135,6 +232,29 @@ export function buildServer(context: Context): McpServer {
       inputSchema: getTaskInput,
     },
     getTask,
+  );
+
+  verb(
+    "list_tasks",
+    {
+      description:
+        "List the tasks in a project or a section, or a task's subtasks, in their Asana order. " +
+        "Pass exactly one of 'project_gid', 'section_gid', or 'parent_gid'.",
+      inputSchema: listTasksInput,
+    },
+    listTasks,
+  );
+
+  verb(
+    "search_tasks",
+    {
+      description:
+        "Search the workspace's tasks, newest first, by the filters given; all must match. " +
+        "Pass at most one of 'project_gid' and 'section_gid'. Needs Asana Premium. " +
+        "Results lag edits by up to a minute.",
+      inputSchema: searchTasksInput,
+    },
+    searchTasks,
   );
 
   return server;
