@@ -33,8 +33,8 @@ Reached at `http://asana:8080/mcp` on the session network.
   characters.
 - In `update_task`, null clears `notes`, `assignee`, `due_on`, `due_at`, and
   `start_on`. Send `approval_status` without `completed`; Asana derives it.
-- Writes run one at a time. A write that gets a 5xx, no answer, or an unreadable
-  answer says it may have gone through.
+- Writes run one at a time, across every session sharing the tong. A write that
+  gets a 5xx, no answer, or an unreadable answer says it may have gone through.
 - A list returns at most `limit` items (default 50, max 100). One ending in a
   `cursor` has more; pass it back for the next page. A full search or lookup page
   says so; narrow it to see more.
@@ -51,7 +51,7 @@ Reached at `http://asana:8080/mcp` on the session network.
 
 | Grant | Why |
 | --- | --- |
-| `lifecycle: session` | It holds a credential. |
+| `lifecycle: shared` | It mounts nothing, and every session sharing it acts as the token's Asana user. Trade-off vs `session`: the token stays loaded between sessions, even once rotated, until its container is removed. |
 | `env: ASANA_TOKEN` | The token. |
 | `env: ASANA_WORKSPACE_ID` | The workspace's gid. Not a credential. |
 
@@ -64,8 +64,12 @@ user can. The tong pins one.
 
 ```sh
 make image TONG=asana                               # swarmforge-tong-asana:latest
-cp asana/asana.tong.yaml ~/.swarmforge/tongs/asana.yaml
+cp asana/asana.tong.yaml "$SWARMFORGE_ORG_CONFIG_ROOT/.swarmforge/tongs/asana.yaml"
 ```
+
+That is the org layer, the usual setup. For one user only, copy it to
+`~/.swarmforge/tongs/asana.yaml` instead. Both layers skip the approval gate; a
+workspace-sourced copy prompts on first run.
 
 Then **edit the copy**. Both `REPLACE-ME` values are placeholders: the secret
 reference will not resolve, and the workspace id stops startup.
