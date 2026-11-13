@@ -74,6 +74,21 @@ type Resource = Record<string, unknown> & { gid: string };
 
 export type TaskScope = { project: string } | { section: string } | { parent: string };
 
+export type TaskSubtype = "default_task" | "milestone" | "approval";
+
+export type TaskFields = {
+  name?: string;
+  notes?: string;
+  html_notes?: string;
+  assignee?: string;
+  due_on?: string;
+  due_at?: string;
+  start_on?: string;
+  resource_subtype?: TaskSubtype;
+};
+
+export type TaskPlacement = { project?: string; section?: string; parent?: string };
+
 export type TaskSearch = {
   text?: string;
   assignee?: string;
@@ -106,7 +121,7 @@ const PROJECT_FIELDS = [
 
 const USER_FIELDS = "name,email,workspaces";
 
-const MAX_NOTES = 20_000;
+export const MAX_NOTES = 20_000;
 
 type SdkError = {
   status?: unknown;
@@ -318,13 +333,29 @@ export class Asana {
     return task(await this.call(`reading task ${gid}`, () => this.tasks.getTask(gid, { opt_fields: TASK_FIELDS })));
   }
 
+  async taskWorkspace(gid: string): Promise<string | undefined> {
+    const data = await this.call(`reading task ${gid}`, () => this.tasks.getTask(gid, { opt_fields: "workspace" }));
+    return compact(data.workspace)?.gid;
+  }
+
+  async userWorkspaces(gid: string): Promise<string[]> {
+    const data = await this.call(`reading user ${gid}`, () => this.users.getUser(gid, { opt_fields: "workspaces" }));
+    return compacts(data.workspaces).map((workspace) => workspace.gid);
+  }
+
+  async createTask(workspaceGid: string, placement: TaskPlacement, fields: TaskFields): Promise<Task> {
+    const { project, section, parent } = placement;
+    const data = {
+      ...fields,
+      workspace: workspaceGid,
+      ...(project === undefined ? {} : section ? { memberships: [{ project, section }] } : { projects: [project] }),
+      ...(parent === undefined ? {} : { parent }),
+    };
+    return task(await this.call("creating a task", () => this.tasks.createTask({ data }, { opt_fields: TASK_FIELDS })));
+  }
+
   async workspaceOf(scope: TaskScope): Promise<string | undefined> {
-    if ("parent" in scope) {
-      const parent = await this.call(`reading task ${scope.parent}`, () =>
-        this.tasks.getTask(scope.parent, { opt_fields: "workspace" }),
-      );
-      return compact(parent.workspace)?.gid;
-    }
+    if ("parent" in scope) return this.taskWorkspace(scope.parent);
     const projectGid = "project" in scope ? scope.project : await this.projectOfSection(scope.section);
     if (projectGid === undefined) return undefined;
     const what = "project" in scope ? `reading project ${projectGid}` : `reading section ${scope.section}'s project`;
@@ -334,7 +365,7 @@ export class Asana {
     return compact(project.workspace)?.gid;
   }
 
-  private async projectOfSection(sectionGid: string): Promise<string | undefined> {
+  async projectOfSection(sectionGid: string): Promise<string | undefined> {
     const section = await this.call(`reading section ${sectionGid}`, () =>
       this.sections.getSection(sectionGid, { opt_fields: "project" }),
     );
