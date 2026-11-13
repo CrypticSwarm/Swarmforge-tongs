@@ -16,6 +16,7 @@ are documented [upstream][sf-tongs].
 
 | Tong | Status | Holds | Interface |
 | --- | --- | --- | --- |
+| [`asana`](asana/) | built | Asana token; no mounts | `mcp` |
 | [`git-signing`](git-signing/) | built | commit signing key; workspace `rw` | `mcp` |
 | [`github`](github/) | built | GitHub token; workspace `rw` | `mcp` |
 
