@@ -196,6 +196,10 @@ describe("verbs", () => {
       ["update_task", { task_gid: "1", move_to: "1" }, "move_to"],
       ["update_task", { task_gid: "1", remove_from_project: null }, "remove_from_project"],
       ["update_task", { task_gid: "1", parent_gid: "../2" }, "parent_gid"],
+      ["update_task", { task_gid: "1", add_blocked_by: [] }, "add_blocked_by"],
+      ["update_task", { task_gid: "1", add_blocked_by: Array(21).fill("2") }, "add_blocked_by"],
+      ["update_task", { task_gid: "1", remove_blocked_by: ["2", "x"] }, "remove_blocked_by.1"],
+      ["create_task", { name: "x", project_gid: "1", blocked_by: "2" }, "blocked_by"],
     ] as const) {
       const result = await client.callTool({ name, arguments: args });
       assert.equal(result.isError, true, `${name} ${JSON.stringify(args)}`);
@@ -239,6 +243,7 @@ describe("verbs", () => {
     assert.match(text(every), /not both/);
     const accepted = await client.callTool({ name: "search_tasks", arguments: filters });
     assert.equal(text(accepted), "matching tasks, newest first: no tasks");
+    const blockers = Array.from({ length: 20 }, (_, index) => String(1300000000000100 + index));
     const fields = {
       task_gid: "1",
       name: "x",
@@ -255,11 +260,13 @@ describe("verbs", () => {
       move_to: { project_gid: "2", section_gid: "3" },
       remove_from_project: "4",
       parent_gid: "5",
+      add_blocked_by: blockers,
+      remove_blocked_by: blockers,
     };
     const update = await client.callTool({ name: "update_task", arguments: fields });
     assert.match(text(update), /not both/);
     const tooMany = await client.callTool({ name: "update_task", arguments: { ...fields, extra: 1 } });
-    assert.match(text(tooMany), /maximum of 437 elements/);
+    assert.match(text(tooMany), /maximum of 479 elements/);
     assert.ok(fake.requests.every((request) => request.method === "GET"));
   });
 
