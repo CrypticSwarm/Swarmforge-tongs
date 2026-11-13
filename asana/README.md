@@ -25,6 +25,8 @@ Reached at `http://asana:8080/mcp` on the session network.
 | `add_comment` | `task_gid`; `text` or `html_text` | Comments on a task as the token's user. |
 | `get_project` | `project_gid` | Reads one project with its first 100 sections and portfolios, custom fields with enum options, and the project's own field values. |
 | `update_project` | `project_gid`, `custom_fields` | Sets the project's own custom field values, such as its portfolios' fields. |
+| `list_portfolios` | `owner?`, `limit?`, `cursor?` | Lists a user's portfolios. Only a service account's token can name another user. |
+| `get_portfolio` | `portfolio_gid`; `limit?`, `cursor?` | Reads a portfolio with its custom fields and a page of its items, with each item's values. |
 | `add_to_portfolio` | `portfolio_gid`, `project_gid` | Adds a project to a portfolio. |
 | `remove_from_portfolio` | `portfolio_gid`, `project_gid` | Takes a project out of a portfolio. |
 | `find_projects` | `query`; `limit?` | Finds projects by name, most recently used first. |
