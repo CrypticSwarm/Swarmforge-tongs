@@ -10,6 +10,10 @@ const IN_WORKSPACE = { gid: WORKSPACE.gid, resource_type: "workspace" };
 const ELSEWHERE = { gid: "1100000000000999", resource_type: "workspace" };
 const SUMMARY_FIELDS = "name,completed,assignee.name,due_on,due_at,workspace";
 
+function customField(index: number, name: string, type: string, value: Record<string, unknown>) {
+  return { gid: `160000000000000${index}`, name, resource_subtype: type, ...value };
+}
+
 const FULL_TASK = {
   gid: TASK_GID,
   name: "Ship it",
@@ -25,8 +29,15 @@ const FULL_TASK = {
   resource_subtype: "approval",
   approval_status: "pending",
   custom_fields: [
-    { gid: "1600000000000001", name: "Priority", display_value: "High" },
-    { gid: "1600000000000002", name: "Estimate", display_value: "" },
+    customField(1, "Priority", "enum", { enum_value: { gid: "1620000000000001", name: "High" } }),
+    customField(2, "Estimate", "number", { number_value: null, display_value: "" }),
+    customField(3, "Tags", "multi_enum", { multi_enum_values: [{ gid: "1620000000000002", name: "Red" }] }),
+    customField(4, "Points", "number", { number_value: 3.5, display_value: "3.50" }),
+    customField(5, "Ship", "date", { date_value: { date: "2026-11-20", date_time: null } }),
+    customField(9, "Due", "date", { date_value: { date: "2026-11-20", date_time: "2026-11-20T17:00:00.000Z" } }),
+    customField(6, "Reviewers", "people", { people_value: [{ gid: "1200000000000001", name: "Ada" }] }),
+    customField(7, "Code", "text", { text_value: "A-1" }),
+    customField(8, "Score", "formula", { display_value: "42" }),
   ],
   memberships: [{ project: { gid: PROJECT_GID, name: "Launch" }, section: { gid: SECTION_GID, name: "Doing" } }],
   parent: { gid: "1300000000000002", name: "Epic" },
@@ -76,8 +87,15 @@ describe("get_task", () => {
         "projects:",
         "  Launch (gid 1400000000000001), section Doing (gid 1500000000000001)",
         "custom fields:",
-        "  Priority (gid 1600000000000001): High",
-        "  Estimate (gid 1600000000000002): not set",
+        "  Priority (gid 1600000000000001), enum: High (gid 1620000000000001)",
+        "  Estimate (gid 1600000000000002), number: not set",
+        "  Tags (gid 1600000000000003), multi_enum: Red (gid 1620000000000002)",
+        "  Points (gid 1600000000000004), number: 3.5",
+        "  Ship (gid 1600000000000005), date: 2026-11-20",
+        "  Due (gid 1600000000000009), date: 2026-11-20T17:00:00.000Z",
+        "  Reviewers (gid 1600000000000006), people: Ada (gid 1200000000000001)",
+        "  Code (gid 1600000000000007), text: A-1",
+        "  Score (gid 1600000000000008), formula: 42",
         "blocked by:",
         "  Design (gid 1300000000000003)",
         "blocking: none",
@@ -94,7 +112,10 @@ describe("get_task", () => {
     const { query } = fake.requestsTo("GET", `/tasks/${TASK_GID}`)[0];
     assert.equal(
       query.opt_fields.split(",").sort().join(","),
-      "approval_status,assignee.name,completed,completed_at,custom_fields.display_value,custom_fields.name," +
+      "approval_status,assignee.name,completed,completed_at,custom_fields.date_value,custom_fields.display_value," +
+        "custom_fields.enum_value.name,custom_fields.multi_enum_values.name,custom_fields.name," +
+        "custom_fields.number_value,custom_fields.people_value.name,custom_fields.resource_subtype," +
+        "custom_fields.text_value," +
         "dependencies.name,dependents.name,due_at,due_on,html_notes,memberships.project.name," +
         "memberships.section.name,name,notes,num_subtasks,parent.name,permalink_url,resource_subtype,start_at," +
         "start_on,workspace",

@@ -42,7 +42,7 @@ export type Task = TaskSummary & {
   completedAt?: string;
   subtype?: string;
   approvalStatus?: string;
-  customFields: { field: Compact; value?: string }[];
+  customFields: TaskCustomField[];
   memberships: { project: Compact; section?: Compact }[];
   parent?: Compact;
   dependencies: Compact[];
@@ -53,6 +53,8 @@ export type Task = TaskSummary & {
 export type EnumOption = { gid: string; name: string; enabled: boolean };
 
 export type CustomField = Compact & { type?: string; enumOptions: EnumOption[] };
+
+export type TaskCustomField = { field: Compact; type?: string; value?: string | number | Compact | Compact[] };
 
 export type ProjectSummary = Compact & { archived: boolean; team?: Compact; workspaceGid?: string };
 
@@ -111,7 +113,9 @@ const TASK_SUMMARY_FIELDS = "name,completed,assignee.name,due_on,due_at,workspac
 const TASK_FIELDS = [
   TASK_SUMMARY_FIELDS,
   "permalink_url,notes,html_notes,start_on,start_at,completed_at,resource_subtype,approval_status",
-  "custom_fields.name,custom_fields.display_value,memberships.project.name,memberships.section.name",
+  "custom_fields.name,custom_fields.resource_subtype,custom_fields.display_value,custom_fields.enum_value.name",
+  "custom_fields.multi_enum_values.name,custom_fields.number_value,custom_fields.text_value",
+  "custom_fields.date_value,custom_fields.people_value.name,memberships.project.name,memberships.section.name",
   "parent.name,dependencies.name,dependents.name,num_subtasks",
 ].join(",");
 
@@ -158,8 +162,8 @@ function describeFailure(err: unknown): { message: string; status?: number } {
   return { message, status };
 }
 
-function text(value: unknown): string | undefined {
-  return typeof value === "string" ? oneLine(value) : undefined;
+function text(value: unknown, max?: number): string | undefined {
+  return typeof value === "string" ? oneLine(value, max) : undefined;
 }
 
 /** Keeps newlines, so each line can be indented under a heading. */
@@ -183,6 +187,27 @@ function compacts(value: unknown): Compact[] {
   return (Array.isArray(value) ? value : []).map(compact).filter((item): item is Compact => item !== undefined);
 }
 
+function customFieldValue(field: Resource): TaskCustomField["value"] {
+  switch (field.resource_subtype) {
+    case "enum":
+      return compact(field.enum_value);
+    case "multi_enum":
+      return compacts(field.multi_enum_values);
+    case "people":
+      return compacts(field.people_value);
+    case "number":
+      return typeof field.number_value === "number" ? field.number_value : undefined;
+    case "text":
+      return text(field.text_value, 1024) || undefined;
+    case "date": {
+      const date = (field.date_value ?? {}) as { date?: unknown; date_time?: unknown };
+      return text(date.date_time) ?? text(date.date);
+    }
+    default:
+      return text(field.display_value) || undefined;
+  }
+}
+
 function taskSummary(data: Resource): TaskSummary {
   return {
     gid: data.gid,
@@ -202,7 +227,8 @@ function task(data: Resource): Task {
   });
   const customFields = (Array.isArray(data.custom_fields) ? data.custom_fields : []).flatMap((field) => {
     const fieldCompact = compact(field);
-    return fieldCompact ? [{ field: fieldCompact, value: text(field.display_value) || undefined }] : [];
+    if (!fieldCompact) return [];
+    return [{ field: fieldCompact, type: text(field.resource_subtype), value: customFieldValue(field) }];
   });
   return {
     ...taskSummary(data),
