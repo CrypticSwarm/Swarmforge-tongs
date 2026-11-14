@@ -30,6 +30,9 @@ Reached at `http://asana:8080/mcp` on the session network.
 | `add_to_portfolio` | `portfolio_gid`, `project_gid` | Adds a project to a portfolio. |
 | `remove_from_portfolio` | `portfolio_gid`, `project_gid` | Takes a project out of a portfolio. |
 | `get_goal` | `goal_gid` | Reads a goal with its metric, parent goals, and first 100 supporters and their contribution weights. |
+| `list_goals` | `team_gid?` or `workspace_level?`; `time_period_gid?`, `limit?`, `cursor?` | Lists the workspace's or a team's goals. |
+| `link_goal` | `goal_gid`, `project_gid`; `contribution_weight?` | Adds a project to a goal's supporting work. |
+| `unlink_goal` | `goal_gid`, `project_gid` | Takes a project out of a goal's supporting work. |
 | `find_projects` | `query`; `limit?` | Finds projects by name, most recently used first. |
 | `list_users` | `query?` or `cursor?`; `limit?` | Lists the workspace's users, or finds them by name or email, most worked with first. |
 

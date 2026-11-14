@@ -203,6 +203,29 @@ const portfolioItemInput = z.strictObject({
 
 const getGoalInput = z.strictObject({ goal_gid: gid.describe("The goal's gid.") });
 
+const listGoalsInput = z.strictObject({
+  team_gid: gid.optional().describe("List this team's goals."),
+  workspace_level: z.boolean().optional().describe("Only workspace-level (true) or team (false) goals."),
+  time_period_gid: gid.optional().describe("Only goals in this time period."),
+  limit: limitSchema("goals"),
+  cursor,
+});
+
+const goalLinkInput = z.strictObject({
+  goal_gid: gid.describe("The goal's gid."),
+  project_gid: gid.describe("The project's gid."),
+});
+
+const linkGoalInput = z.strictObject({
+  ...goalLinkInput.shape,
+  contribution_weight: z
+    .number()
+    .min(0)
+    .max(1)
+    .optional()
+    .describe("The project's share of the goal's automatic progress, 0-1 (default 0: none)."),
+});
+
 const listUsersInput = z.strictObject({
   query: z
     .string()
@@ -222,6 +245,7 @@ const MAX_TOOL_INPUT_ELEMENTS = Math.max(
   ...[getTaskInput, listTasksInput, searchTasksInput, deleteTaskInput].map(keyCount),
   ...[listCommentsInput, addCommentInput, getProjectInput, findProjectsInput, listUsersInput].map(keyCount),
   ...[listPortfoliosInput, getPortfolioInput, portfolioItemInput, getGoalInput].map(keyCount),
+  ...[listGoalsInput, linkGoalInput, goalLinkInput].map(keyCount),
   keyCount(updateProjectInput) + MAX_CUSTOM_FIELD_ELEMENTS,
   keyCount(createTaskInput) + MAX_BLOCKERS + MAX_CUSTOM_FIELD_ELEMENTS,
   keyCount(updateTaskInput) + keyCount(moveToInput) + 2 * MAX_BLOCKERS + MAX_CUSTOM_FIELD_ELEMENTS,
@@ -842,6 +866,55 @@ export async function getGoal(context: Context, input: z.infer<typeof getGoalInp
   return renderGoal(goal, [parents, indented("supporters", [...supporters.items.map(renderGoalSupporter), ...more])]);
 }
 
+function renderGoalSummary(goal: Goal): string {
+  const details = [label(goal)];
+  if (goal.status) details.push(`status ${goal.status}`);
+  if (goal.timePeriod) details.push(`time period ${label(goal.timePeriod)}`);
+  if (goal.owner) details.push(`owner ${label(goal.owner)}`);
+  return details.join(", ");
+}
+
+export async function listGoals(context: Context, input: z.infer<typeof listGoalsInput>): Promise<string> {
+  if (input.team_gid !== undefined && input.workspace_level !== undefined) {
+    throw new Error("pass 'team_gid' or 'workspace_level', not both.");
+  }
+  const workspace = context.workspace.gid;
+  if (input.team_gid) {
+    requirePinnedWorkspace(context, await context.asana.teamWorkspace(input.team_gid), `team ${input.team_gid}`);
+  }
+  const scope = input.team_gid ? { team: input.team_gid } : { workspace, is_workspace_level: input.workspace_level };
+  const page = await context.asana.goalList(scope, {
+    timePeriod: input.time_period_gid,
+    limit: input.limit ?? DEFAULT_LIMIT,
+    cursor: input.cursor,
+  });
+  requireAllInPinnedWorkspace(context, page.items, "a listed goal");
+  const heading = input.team_gid ? `goals of team ${input.team_gid}` : `goals in workspace ${context.workspace.name}`;
+  return renderList(heading, page.items.map(renderGoalSummary), page.cursor && `cursor: ${page.cursor}`);
+}
+
+async function requireGoalLinkInPinnedWorkspace(context: Context, input: z.infer<typeof goalLinkInput>) {
+  requirePinnedWorkspace(context, await context.asana.goalWorkspace(input.goal_gid), `goal ${input.goal_gid}`);
+  await requireProjectInPinnedWorkspace(context, input.project_gid);
+}
+
+export async function linkGoal(context: Context, input: z.infer<typeof linkGoalInput>): Promise<string> {
+  await requireGoalLinkInPinnedWorkspace(context, input);
+  const supporter = await context.asana
+    .addGoalSupporter(input.goal_gid, input.project_gid, input.contribution_weight)
+    .catch((err) => rethrowWithLandedHint(err, "get_goal"));
+  const weight = supporter.contributionWeight === undefined ? "" : `, weight ${supporter.contributionWeight}`;
+  return `linked project ${input.project_gid} to goal ${input.goal_gid}${weight}`;
+}
+
+export async function unlinkGoal(context: Context, input: z.infer<typeof goalLinkInput>): Promise<string> {
+  await requireGoalLinkInPinnedWorkspace(context, input);
+  await context.asana
+    .removeGoalSupporter(input.goal_gid, input.project_gid)
+    .catch((err) => rethrowWithLandedHint(err, "get_goal"));
+  return `unlinked project ${input.project_gid} from goal ${input.goal_gid}`;
+}
+
 function renderProjectSummary(project: ProjectSummary): string {
   const details = [label(project), ...(project.team ? [`team ${label(project.team)}`] : [])];
   if (project.archived) details.push("archived");
@@ -1078,6 +1151,24 @@ export function buildServer(context: Context): McpServer {
       inputSchema: getGoalInput,
     },
     getGoal,
+  );
+
+  verb(
+    "list_goals",
+    { description: "List the workspace's or a team's goals.", inputSchema: listGoalsInput },
+    listGoals,
+  );
+
+  verb(
+    "link_goal",
+    { description: "Add a project to a goal's supporting work.", inputSchema: linkGoalInput },
+    serially(linkGoal),
+  );
+
+  verb(
+    "unlink_goal",
+    { description: "Take a project out of a goal's supporting work.", inputSchema: goalLinkInput },
+    serially(unlinkGoal),
   );
 
   verb(
