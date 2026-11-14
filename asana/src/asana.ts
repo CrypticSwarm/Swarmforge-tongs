@@ -2,6 +2,8 @@
 
 import {
   ApiClient,
+  PortfoliosApi,
+  ProjectPortfolioSettingsApi,
   ProjectsApi,
   SectionsApi,
   StoriesApi,
@@ -51,7 +53,7 @@ export type Task = TaskSummary & {
   completedAt?: string;
   subtype?: string;
   approvalStatus?: string;
-  customFields: TaskCustomField[];
+  customFields: CustomFieldValue[];
   memberships: { project: Compact; section?: Compact }[];
   parent?: Compact;
   dependencies: Compact[];
@@ -63,7 +65,7 @@ export type EnumOption = { gid: string; name: string; enabled: boolean };
 
 export type CustomField = Compact & { type?: string; readOnly: boolean; enumOptions: EnumOption[] };
 
-export type TaskCustomField = { field: Compact; type?: string; value?: string | number | Compact | Compact[] };
+export type CustomFieldValue = { field: Compact; type?: string; value?: string | number | Compact | Compact[] };
 
 export type CustomFieldTarget = { workspaceGid?: string; customFields: CustomField[] };
 
@@ -81,7 +83,10 @@ export type Project = ProjectSummary & {
   dueOn?: string;
   notes: string;
   customFields: CustomField[];
+  customFieldValues: CustomFieldValue[];
 };
+
+export type ProjectCustomFieldValues = Compact & { customFieldValues: CustomFieldValue[] };
 
 export type WorkspaceUser = User & { workspaceGids: string[] };
 
@@ -137,13 +142,17 @@ export type TaskSearch = {
 
 const TASK_SUMMARY_FIELDS = "name,completed,assignee.name,due_on,due_at,workspace";
 
+const CUSTOM_FIELD_VALUES = [
+  "custom_fields.name,custom_fields.resource_subtype,custom_fields.display_value,custom_fields.enum_value.name",
+  "custom_fields.multi_enum_values.name,custom_fields.number_value,custom_fields.text_value",
+  "custom_fields.date_value,custom_fields.people_value.name",
+].join(",");
+
 const TASK_FIELDS = [
   TASK_SUMMARY_FIELDS,
   "permalink_url,notes,html_notes,start_on,start_at,completed_at,resource_subtype,approval_status",
-  "custom_fields.name,custom_fields.resource_subtype,custom_fields.display_value,custom_fields.enum_value.name",
-  "custom_fields.multi_enum_values.name,custom_fields.number_value,custom_fields.text_value",
-  "custom_fields.date_value,custom_fields.people_value.name,memberships.project.name,memberships.section.name",
-  "parent.name,dependencies.name,dependents.name,num_subtasks",
+  CUSTOM_FIELD_VALUES,
+  "memberships.project.name,memberships.section.name,parent.name,dependencies.name,dependents.name,num_subtasks",
 ].join(",");
 
 const PROJECT_SUMMARY_FIELDS = "name,archived,team.name,workspace";
@@ -152,13 +161,14 @@ const customFieldOptFields = (prefix: string) =>
   ["name", "resource_subtype", "is_formula_field", "is_value_read_only", "enum_options.name", "enum_options.enabled"]
     .map((field) => `${prefix}.${field}`)
     .join(",");
-const TASK_CUSTOM_FIELDS = customFieldOptFields("custom_fields");
-const PROJECT_CUSTOM_FIELDS = customFieldOptFields("custom_field_settings.custom_field");
+const OWN_CUSTOM_FIELDS = customFieldOptFields("custom_fields");
+const SETTINGS_CUSTOM_FIELDS = customFieldOptFields("custom_field_settings.custom_field");
 
 const PROJECT_FIELDS = [
   PROJECT_SUMMARY_FIELDS,
   "permalink_url,completed,owner.name,start_on,due_on,notes",
-  PROJECT_CUSTOM_FIELDS,
+  SETTINGS_CUSTOM_FIELDS,
+  CUSTOM_FIELD_VALUES,
 ].join(",");
 
 const USER_FIELDS = "name,email,workspaces";
@@ -222,7 +232,7 @@ function compacts(value: unknown): Compact[] {
   return (Array.isArray(value) ? value : []).map(compact).filter((item): item is Compact => item !== undefined);
 }
 
-function customFieldValue(field: Resource): TaskCustomField["value"] {
+function customFieldValue(field: Resource): CustomFieldValue["value"] {
   switch (field.resource_subtype) {
     case "enum":
       return compact(field.enum_value);
@@ -262,12 +272,15 @@ function memberships(data: Resource): Task["memberships"] {
   });
 }
 
-function task(data: Resource): Task {
-  const customFields = (Array.isArray(data.custom_fields) ? data.custom_fields : []).flatMap((field) => {
+function customFieldValues(fields: unknown): CustomFieldValue[] {
+  return (Array.isArray(fields) ? fields : []).flatMap((field) => {
     const fieldCompact = compact(field);
     if (!fieldCompact) return [];
     return [{ field: fieldCompact, type: text(field.resource_subtype), value: customFieldValue(field) }];
   });
+}
+
+function task(data: Resource): Task {
   return {
     ...taskSummary(data),
     permalink: text(data.permalink_url),
@@ -278,7 +291,7 @@ function task(data: Resource): Task {
     completedAt: text(data.completed_at),
     subtype: text(data.resource_subtype),
     approvalStatus: text(data.approval_status),
-    customFields,
+    customFields: customFieldValues(data.custom_fields),
     memberships: memberships(data),
     parent: compact(data.parent),
     dependencies: compacts(data.dependencies),
@@ -325,6 +338,7 @@ function project(data: Resource): Project {
     dueOn: text(data.due_on),
     notes: multiline(data.notes),
     customFields: settingsCustomFields(data.custom_field_settings),
+    customFieldValues: customFieldValues(data.custom_fields),
   };
 }
 
@@ -349,6 +363,8 @@ function story(data: Resource): Story {
 }
 
 export class Asana {
+  private readonly portfolios: PortfoliosApi;
+  private readonly projectPortfolioSettings: ProjectPortfolioSettingsApi;
   private readonly projects: ProjectsApi;
   private readonly sections: SectionsApi;
   private readonly stories: StoriesApi;
@@ -366,6 +382,8 @@ export class Asana {
     client.applyAuthToRequest = (request, authNames) => applyAuth(request.redirects(0), authNames);
     // Otherwise list calls drop `next_page`.
     client.RETURN_COLLECTION = false;
+    this.portfolios = new PortfoliosApi(client);
+    this.projectPortfolioSettings = new ProjectPortfolioSettingsApi(client);
     this.projects = new ProjectsApi(client);
     this.sections = new SectionsApi(client);
     this.stories = new StoriesApi(client);
@@ -430,7 +448,7 @@ export class Asana {
 
   async taskTarget(gid: string, withCustomFields: boolean): Promise<TaskTarget> {
     const targetFields = "name,workspace,memberships.project,dependencies";
-    const opt_fields = withCustomFields ? `${targetFields},${TASK_CUSTOM_FIELDS}` : targetFields;
+    const opt_fields = withCustomFields ? `${targetFields},${OWN_CUSTOM_FIELDS}` : targetFields;
     const data = await this.call(`reading task ${gid}`, () => this.tasks.getTask(gid, { opt_fields }));
     return {
       name: text(data.name) ?? "",
@@ -443,10 +461,59 @@ export class Asana {
 
   async projectCustomFields(gid: string): Promise<CustomFieldTarget> {
     const data = await this.call(`reading project ${gid}`, () =>
-      this.projects.getProject(gid, { opt_fields: `workspace,${PROJECT_CUSTOM_FIELDS}` }),
+      this.projects.getProject(gid, { opt_fields: `workspace,${SETTINGS_CUSTOM_FIELDS}` }),
     );
     const customFields = settingsCustomFields(data.custom_field_settings);
     return { workspaceGid: compact(data.workspace)?.gid, customFields };
+  }
+
+  async projectTarget(gid: string): Promise<CustomFieldTarget & { name: string }> {
+    const data = await this.call(`reading project ${gid}`, () =>
+      this.projects.getProject(gid, { opt_fields: `name,workspace,${OWN_CUSTOM_FIELDS}` }),
+    );
+    return {
+      name: text(data.name) ?? "",
+      workspaceGid: compact(data.workspace)?.gid,
+      customFields: customFields(data.custom_fields),
+    };
+  }
+
+  async updateProject(gid: string, fields: Record<string, CustomFieldWrite>): Promise<ProjectCustomFieldValues> {
+    const data = await this.call(`updating project ${gid}`, () =>
+      this.projects.updateProject({ data: { custom_fields: fields } }, gid, {
+        opt_fields: `name,${CUSTOM_FIELD_VALUES}`,
+      }),
+    );
+    return { gid: data.gid, name: text(data.name) ?? "", customFieldValues: customFieldValues(data.custom_fields) };
+  }
+
+  async projectPortfolios(gid: string): Promise<Page<Compact>> {
+    const page = await this.callList(`listing project ${gid}'s portfolios`, () =>
+      this.projectPortfolioSettings.getProjectPortfolioSettingsForProject(gid, {
+        opt_fields: "portfolio.name",
+        limit: 100,
+      }),
+    );
+    return { items: compacts(page.items.map((setting) => setting.portfolio)), cursor: page.cursor };
+  }
+
+  async portfolioWorkspace(gid: string): Promise<string | undefined> {
+    const data = await this.call(`reading portfolio ${gid}`, () =>
+      this.portfolios.getPortfolio(gid, { opt_fields: "workspace" }),
+    );
+    return compact(data.workspace)?.gid;
+  }
+
+  async addPortfolioItem(gid: string, item: string): Promise<void> {
+    await this.send(`adding project ${item} to portfolio ${gid}`, () =>
+      this.portfolios.addItemForPortfolio({ data: { item } }, gid),
+    );
+  }
+
+  async removePortfolioItem(gid: string, item: string): Promise<void> {
+    await this.send(`removing project ${item} from portfolio ${gid}`, () =>
+      this.portfolios.removeItemForPortfolio({ data: { item } }, gid),
+    );
   }
 
   async userWorkspaces(gid: string): Promise<string[]> {
