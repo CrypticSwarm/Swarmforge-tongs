@@ -23,12 +23,13 @@ Reached at `http://asana:8080/mcp` on the session network.
 | `delete_task` | `task_gid` | Moves a task to the token user's Asana trash, restorable for 30 days. |
 | `list_comments` | `task_gid`; `include_system?`, `include_html?`, `limit?`, `cursor?` | Lists a task's comments, oldest first; `include_system` adds activity like assignments. |
 | `add_comment` | `task_gid`; `text` or `html_text` | Comments on a task as the token's user. |
-| `get_project` | `project_gid` | Reads one project with its first 100 sections and portfolios, custom fields with enum options, and the project's own field values. |
+| `get_project` | `project_gid` | Reads one project with its first 100 sections, portfolios, and goals; custom fields with enum options; and the project's own field values. |
 | `update_project` | `project_gid`, `custom_fields` | Sets the project's own custom field values, such as its portfolios' fields. |
 | `list_portfolios` | `owner?`, `limit?`, `cursor?` | Lists a user's portfolios. Only a service account's token can name another user. |
 | `get_portfolio` | `portfolio_gid`; `limit?`, `cursor?` | Reads a portfolio with its custom fields and a page of its items, with each item's values. |
 | `add_to_portfolio` | `portfolio_gid`, `project_gid` | Adds a project to a portfolio. |
 | `remove_from_portfolio` | `portfolio_gid`, `project_gid` | Takes a project out of a portfolio. |
+| `get_goal` | `goal_gid` | Reads a goal with its metric, parent goals, and first 100 supporters and their contribution weights. |
 | `find_projects` | `query`; `limit?` | Finds projects by name, most recently used first. |
 | `list_users` | `query?` or `cursor?`; `limit?` | Lists the workspace's users, or finds them by name or email, most worked with first. |
 
@@ -61,10 +62,12 @@ Reached at `http://asana:8080/mcp` on the session network.
   `cursor` has more; pass it back for the next page. A full search or lookup page
   says so; narrow it to see more.
 - With a `query`, `find_projects` and `list_users` return one page, with no cursor.
-- A task, project, portfolio, or user outside the pinned workspace is refused,
+- A task, project, portfolio, goal, or user outside the pinned workspace is refused,
   as is any project, section, parent, blocker, or assignee a verb names outside
   it. Writes check this before sending.
 - An Asana error comes back as an error result with its status and message.
+  `get_project` instead shows portfolios or goals it cannot list, such as on a
+  plan without goals, as not available with that error.
 - `ASANA_WORKSPACE_ID` pins one workspace; no verb accepts one. Startup stops if
   the token or workspace id is missing or malformed, or the token cannot read the
   workspace.
