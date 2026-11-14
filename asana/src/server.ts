@@ -9,6 +9,9 @@ import {
   type CommentBody,
   type Compact,
   type CustomField,
+  type Portfolio,
+  type PortfolioItem,
+  type PortfolioSummary,
   type Project,
   type ProjectSummary,
   type Story,
@@ -174,6 +177,21 @@ const updateProjectInput = z.strictObject({
   custom_fields: customFieldsInput,
 });
 
+const listPortfoliosInput = z.strictObject({
+  owner: z
+    .union([z.literal("me"), gid])
+    .optional()
+    .describe("The owner's gid, or 'me' (default). Only a service account's token can name another user."),
+  limit: limitSchema("portfolios"),
+  cursor,
+});
+
+const getPortfolioInput = z.strictObject({
+  portfolio_gid: gid.describe("The portfolio's gid."),
+  limit: limitSchema("items"),
+  cursor,
+});
+
 const portfolioItemInput = z.strictObject({
   portfolio_gid: gid.describe("The portfolio's gid."),
   project_gid: gid.describe("The project's gid."),
@@ -197,7 +215,7 @@ const keyCount = (input: z.ZodObject) => Object.keys(input.shape).length;
 const MAX_TOOL_INPUT_ELEMENTS = Math.max(
   ...[getTaskInput, listTasksInput, searchTasksInput, deleteTaskInput].map(keyCount),
   ...[listCommentsInput, addCommentInput, getProjectInput, findProjectsInput, listUsersInput].map(keyCount),
-  keyCount(portfolioItemInput),
+  ...[listPortfoliosInput, getPortfolioInput, portfolioItemInput].map(keyCount),
   keyCount(updateProjectInput) + MAX_CUSTOM_FIELD_ELEMENTS,
   keyCount(createTaskInput) + MAX_BLOCKERS + MAX_CUSTOM_FIELD_ELEMENTS,
   keyCount(updateTaskInput) + keyCount(moveToInput) + 2 * MAX_BLOCKERS + MAX_CUSTOM_FIELD_ELEMENTS,
@@ -687,6 +705,58 @@ export async function updateProject(context: Context, input: z.infer<typeof upda
   ].join("\n");
 }
 
+function renderPortfolioSummary(portfolio: PortfolioSummary | PortfolioItem): string {
+  return portfolio.archived ? `${label(portfolio)}, archived` : label(portfolio);
+}
+
+function requireAllInPinnedWorkspace(context: Context, items: { workspaceGid?: string }[], what: string): void {
+  for (const item of items) requirePinnedWorkspace(context, item.workspaceGid, what);
+}
+
+export async function listPortfolios(context: Context, input: z.infer<typeof listPortfoliosInput>): Promise<string> {
+  const owner = input.owner ?? "me";
+  const page = await context.asana.portfolioList(context.workspace.gid, owner, {
+    limit: input.limit ?? DEFAULT_LIMIT,
+    cursor: input.cursor,
+  });
+  requireAllInPinnedWorkspace(context, page.items, "a listed portfolio");
+  const heading = `portfolios owned by ${owner === "me" ? "the token's user" : `user ${owner}`}`;
+  return renderList(heading, page.items.map(renderPortfolioSummary), page.cursor && `cursor: ${page.cursor}`);
+}
+
+function renderPortfolioItem(item: PortfolioItem, fieldGids: Set<string>): string {
+  const values = item.customFieldValues.filter((value) => fieldGids.has(value.field.gid));
+  const heading = `${item.type ?? "item"} ${renderPortfolioSummary(item)}`;
+  return [heading, ...values.map((value) => `  ${renderCustomFieldValue(value)}`)].join("\n");
+}
+
+function renderPortfolio(portfolio: Portfolio, items: PortfolioItem[], more: string | undefined): string {
+  const fieldGids = new Set(portfolio.customFields.map((field) => field.gid));
+  return [
+    `portfolio: ${label(portfolio)}`,
+    `url: ${portfolio.permalink ?? "none"}`,
+    `archived: ${portfolio.archived ? "yes" : "no"}`,
+    `owner: ${portfolio.owner ? label(portfolio.owner) : "none"}`,
+    ...(portfolio.color ? [`color: ${portfolio.color}`] : []),
+    `latest status update: ${portfolio.statusTitle ?? "none"}`,
+    ...(portfolio.startOn ? [`start: ${portfolio.startOn}`] : []),
+    `due: ${portfolio.dueOn ?? "none"}`,
+    indented("custom fields", portfolio.customFields.flatMap(renderCustomField)),
+    renderList("items", items.map((item) => renderPortfolioItem(item, fieldGids)), more),
+  ].join("\n");
+}
+
+export async function getPortfolio(context: Context, input: z.infer<typeof getPortfolioInput>): Promise<string> {
+  const portfolioGid = input.portfolio_gid;
+  const portfolio = await context.asana.portfolio(portfolioGid);
+  requirePinnedWorkspace(context, portfolio.workspaceGid, `portfolio ${portfolioGid}`);
+  const page = await context.asana.portfolioItems(portfolioGid, {
+    limit: input.limit ?? DEFAULT_LIMIT,
+    cursor: input.cursor,
+  });
+  return renderPortfolio(portfolio, page.items, page.cursor && `cursor: ${page.cursor}`);
+}
+
 async function requirePortfolioItemInPinnedWorkspace(context: Context, input: z.infer<typeof portfolioItemInput>) {
   const portfolioGid = input.portfolio_gid;
   requirePinnedWorkspace(context, await context.asana.portfolioWorkspace(portfolioGid), `portfolio ${portfolioGid}`);
@@ -905,6 +975,26 @@ export function buildServer(context: Context): McpServer {
       inputSchema: updateProjectInput,
     },
     serially(updateProject),
+  );
+
+  verb(
+    "list_portfolios",
+    {
+      description: "List the workspace's portfolios a user owns.",
+      inputSchema: listPortfoliosInput,
+    },
+    listPortfolios,
+  );
+
+  verb(
+    "get_portfolio",
+    {
+      description:
+        "Read one portfolio: owner, status, dates, its custom fields with enum options, and a page of its " +
+        "projects and portfolios with each one's values for those fields.",
+      inputSchema: getPortfolioInput,
+    },
+    getPortfolio,
   );
 
   verb(

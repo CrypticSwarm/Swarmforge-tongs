@@ -14,9 +14,11 @@ const VERBS = [
   "current_user",
   "delete_task",
   "find_projects",
+  "get_portfolio",
   "get_project",
   "get_task",
   "list_comments",
+  "list_portfolios",
   "list_tasks",
   "list_users",
   "remove_from_portfolio",
@@ -219,6 +221,11 @@ describe("verbs", () => {
       ["update_project", { project_gid: "1" }, "custom_fields"],
       ["update_project", { project_gid: "1", custom_fields: {} }, "custom_fields"],
       ["update_project", { project_gid: "1/duplicate", custom_fields: { a: "x" } }, "project_gid"],
+      ["list_portfolios", { owner: "ada@example.com" }, "owner"],
+      ["list_portfolios", { limit: 101 }, "limit"],
+      ["list_portfolios", { cursor: "a b" }, "cursor"],
+      ["get_portfolio", { portfolio_gid: "1/items" }, "portfolio_gid"],
+      ["get_portfolio", { portfolio_gid: "1", limit: 0 }, "limit"],
       ["add_to_portfolio", { portfolio_gid: "1" }, "project_gid"],
       ["add_to_portfolio", { portfolio_gid: "1", project_gid: "me" }, "project_gid"],
       ["remove_from_portfolio", { portfolio_gid: "../1", project_gid: "2" }, "portfolio_gid"],
@@ -243,6 +250,8 @@ describe("verbs", () => {
       ["list_comments", { task_gid: "1", workspace: "1" }],
       ["add_comment", { task_gid: "1", text: "x", workspace: "1" }],
       ["update_project", { project_gid: "1", custom_fields: { a: "x" }, workspace: "1" }],
+      ["list_portfolios", { workspace: "1" }],
+      ["get_portfolio", { portfolio_gid: "1", workspace: "1" }],
       ["add_to_portfolio", { portfolio_gid: "1", project_gid: "2", workspace: "1" }],
       ["remove_from_portfolio", { portfolio_gid: "1", project_gid: "2", workspace: "1" }],
     ] as const) {
@@ -312,18 +321,25 @@ describe("verbs", () => {
     assert.deepEqual(fake.requestsTo("POST", `/tasks/${gid}/setParent`)[0].body, { data: { parent: null } });
   });
 
-  it("route portfolio and project writes, and run them one at a time", async () => {
+  it("route portfolio and project verbs, and run their writes one at a time", async () => {
     const [first, second, third] = await Promise.all([connect(), connect(), connect()]);
     const portfolio = "2100000000000001";
     const [updated, added, removed] = ["1400000000000001", "1400000000000002", "1400000000000003"];
     const inWorkspace = { workspace: { gid: WORKSPACE.gid } };
-    fake.routes[`GET /portfolios/${portfolio}`] = dataReply({ gid: portfolio, ...inWorkspace });
+    fake.routes[`GET /portfolios/${portfolio}`] = dataReply({ gid: portfolio, name: "Roadmap", ...inWorkspace });
+    fake.routes[`GET /portfolios/${portfolio}/items`] = { json: { data: [] } };
+    fake.routes["GET /portfolios"] = { json: { data: [{ gid: portfolio, name: "Roadmap", ...inWorkspace }] } };
     for (const gid of [added, removed]) fake.routes[`GET /projects/${gid}`] = dataReply({ gid, ...inWorkspace });
     const field = { gid: "1600000000000001", name: "Budget", resource_subtype: "number" };
     fake.routes[`GET /projects/${updated}`] = dataReply({ gid: updated, ...inWorkspace, custom_fields: [field] });
     fake.routes[`PUT /projects/${updated}`] = dataReply({ gid: updated, name: "Launch" });
     fake.routes[`POST /portfolios/${portfolio}/addItem`] = dataReply({});
     fake.routes[`POST /portfolios/${portfolio}/removeItem`] = dataReply({});
+    const listed = await first.callTool({ name: "list_portfolios", arguments: {} });
+    assert.match(text(listed), /^portfolios owned by the token's user:\n- Roadmap/);
+    const read = await first.callTool({ name: "get_portfolio", arguments: { portfolio_gid: portfolio } });
+    assert.match(text(read), /^portfolio: Roadmap/);
+    fake.requests.length = 0;
     const results = await Promise.all([
       first.callTool({ name: "update_project", arguments: { project_gid: updated, custom_fields: { Budget: 5 } } }),
       second.callTool({ name: "add_to_portfolio", arguments: { portfolio_gid: portfolio, project_gid: added } }),

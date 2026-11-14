@@ -88,6 +88,20 @@ export type Project = ProjectSummary & {
 
 export type ProjectCustomFieldValues = Compact & { customFieldValues: CustomFieldValue[] };
 
+export type PortfolioSummary = Compact & { archived: boolean; workspaceGid?: string };
+
+export type Portfolio = PortfolioSummary & {
+  permalink?: string;
+  owner?: Compact;
+  color?: string;
+  statusTitle?: string;
+  startOn?: string;
+  dueOn?: string;
+  customFields: CustomField[];
+};
+
+export type PortfolioItem = Compact & { type?: string; archived: boolean; customFieldValues: CustomFieldValue[] };
+
 export type WorkspaceUser = User & { workspaceGids: string[] };
 
 export type Story = {
@@ -170,6 +184,16 @@ const PROJECT_FIELDS = [
   SETTINGS_CUSTOM_FIELDS,
   CUSTOM_FIELD_VALUES,
 ].join(",");
+
+const PORTFOLIO_SUMMARY_FIELDS = "name,archived,workspace";
+
+const PORTFOLIO_FIELDS = [
+  PORTFOLIO_SUMMARY_FIELDS,
+  "permalink_url,color,owner.name,start_on,due_on,current_status_update.title",
+  SETTINGS_CUSTOM_FIELDS,
+].join(",");
+
+const PORTFOLIO_ITEM_FIELDS = `name,archived,resource_type,${CUSTOM_FIELD_VALUES}`;
 
 const USER_FIELDS = "name,email,workspaces";
 
@@ -342,6 +366,39 @@ function project(data: Resource): Project {
   };
 }
 
+function portfolioSummary(data: Resource): PortfolioSummary {
+  return {
+    gid: data.gid,
+    name: text(data.name) ?? "",
+    archived: data.archived === true,
+    workspaceGid: compact(data.workspace)?.gid,
+  };
+}
+
+function portfolio(data: Resource): Portfolio {
+  const status = (data.current_status_update ?? {}) as { title?: unknown };
+  return {
+    ...portfolioSummary(data),
+    permalink: text(data.permalink_url),
+    owner: compact(data.owner),
+    color: text(data.color),
+    statusTitle: text(status.title),
+    startOn: text(data.start_on),
+    dueOn: text(data.due_on),
+    customFields: settingsCustomFields(data.custom_field_settings),
+  };
+}
+
+function portfolioItem(data: Resource): PortfolioItem {
+  return {
+    gid: data.gid,
+    name: text(data.name) ?? "",
+    archived: data.archived === true,
+    type: text(data.resource_type),
+    customFieldValues: customFieldValues(data.custom_fields),
+  };
+}
+
 function workspaceUser(data: Resource): WorkspaceUser {
   return {
     gid: data.gid,
@@ -497,11 +554,46 @@ export class Asana {
     return { items: compacts(page.items.map((setting) => setting.portfolio)), cursor: page.cursor };
   }
 
+  async portfolioList(
+    workspaceGid: string,
+    owner: string,
+    options: { limit: number; cursor?: string },
+  ): Promise<Page<PortfolioSummary>> {
+    const page = await this.callList("listing portfolios", () =>
+      this.portfolios.getPortfolios(workspaceGid, {
+        owner,
+        limit: options.limit,
+        offset: options.cursor,
+        opt_fields: PORTFOLIO_SUMMARY_FIELDS,
+      }),
+    );
+    return { items: page.items.map(portfolioSummary), cursor: page.cursor };
+  }
+
+  async portfolio(gid: string): Promise<Portfolio> {
+    return portfolio(
+      await this.call(`reading portfolio ${gid}`, () =>
+        this.portfolios.getPortfolio(gid, { opt_fields: PORTFOLIO_FIELDS }),
+      ),
+    );
+  }
+
   async portfolioWorkspace(gid: string): Promise<string | undefined> {
     const data = await this.call(`reading portfolio ${gid}`, () =>
       this.portfolios.getPortfolio(gid, { opt_fields: "workspace" }),
     );
     return compact(data.workspace)?.gid;
+  }
+
+  async portfolioItems(gid: string, options: { limit: number; cursor?: string }): Promise<Page<PortfolioItem>> {
+    const page = await this.callList(`listing portfolio ${gid}'s items`, () =>
+      this.portfolios.getItemsForPortfolio(gid, {
+        opt_fields: PORTFOLIO_ITEM_FIELDS,
+        limit: options.limit,
+        offset: options.cursor,
+      }),
+    );
+    return { items: page.items.map(portfolioItem), cursor: page.cursor };
   }
 
   async addPortfolioItem(gid: string, item: string): Promise<void> {
