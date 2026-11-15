@@ -11,8 +11,11 @@ import {
   MAX_TITLE,
   MERGE_METHODS,
   NoAnswer,
+  type DeleteState,
   type GitHub,
+  type Listed,
   type MergeMethod,
+  type MergeState,
   type PullRequest,
 } from "./github.js";
 import type { Origin } from "./origin.js";
@@ -321,17 +324,70 @@ function refusal(status: string, base: string): string {
   }
 }
 
-export async function mergePr(context: Context, input: { number: number; method?: MergeMethod }): Promise<string> {
-  const { number, method = "merge" } = input;
-  const pr = await context.github.mergeState(number);
-  if (pr.state === "MERGED") return `#${number} is already merged; nothing to do.\n${pr.url}`;
+const one = (list: Listed<number>) => list.total === 1;
 
+/** `open pull request #1`, `open pull requests #1, #2, and 3 more`, or `2 open pull requests` if none are listed. */
+function openPrs(list: Listed<number>): string {
+  const noun = `open pull request${one(list) ? "" : "s"}`;
+  if (list.items.length === 0) return `${list.total} ${noun}`;
+  const more = list.total - list.items.length;
+  return `${noun} ${list.items.map((number) => `#${number}`).join(", ")}${more > 0 ? `, and ${more} more` : ""}`;
+}
+
+/** Why `branch` must stay once pull request `number` has merged from it, or null if nothing says so. */
+function keepReason(number: number, branch: DeleteState): string | null {
+  if (branch.restricted) return "branch protection or a ruleset restricts deleting it, and the tong uses no bypass.";
+  // Deleting a head closes every open pull request from it.
+  const self = branch.heads.items.includes(number) ? 1 : 0;
+  const heads = { items: branch.heads.items.filter((other) => other !== number), total: branch.heads.total - self };
+  if (heads.total > 0) {
+    return `deleting it would close ${openPrs(heads)}, which ${one(heads) ? "has" : "have"} the same head.`;
+  }
+  const { dependents } = branch;
+  if (dependents.total === 0) return null;
+  return (
+    `it is the base of ${openPrs(dependents)}. Retarget ${one(dependents) ? "it" : "them"} to another base ` +
+    `with update_pr, then call merge_pr again with delete_branch.`
+  );
+}
+
+/** What became of the head branch, on one clean line; never throws, since the merge has happened. */
+async function deleteHead(context: Context, number: number, pr: MergeState): Promise<string> {
+  const head = `\`${clean(pr.head)}\``;
+  const sentence = (text: string) => clean(text).replace(/(?<![.!?])$/, ".");
+  const kept = (why: string) => `did not delete ${head}: ${sentence(why)}`;
+  const gone = `${head} is gone.`;
+  try {
+    if (pr.crossRepository) return kept("it is in a fork.");
+    if (pr.head === (await context.github.repository()).defaultBranch) return kept("it is the default branch.");
+    const branch = await context.github.deleteState(pr.head);
+    if (!branch) return gone;
+    const why = keepReason(number, branch);
+    if (why) return kept(why);
+    const reason = await context.repo.deleteBranch(context.remoteUrl, context.token, pr.head, pr.headSha);
+    if (reason === null) return `deleted ${head}.`;
+    // A killed push may have landed, and a lease on a missing branch is refused like a moved one.
+    const after = await context.github.deleteState(pr.head).catch(() => undefined);
+    if (after === null) return gone;
+    if (after === undefined) {
+      return `${head} may be gone: ${sentence(reason)} Call merge_pr again with delete_branch to check.`;
+    }
+    return kept(reason);
+  } catch (err) {
+    const retry = err instanceof GitHubError ? " Call merge_pr again with delete_branch to retry." : "";
+    return kept(`${(err as Error).message}${retry}`);
+  }
+}
+
+/** Merges an open pull request, or throws why not; returns what it did. */
+async function mergeOpen(context: Context, number: number, method: MergeMethod, pr: MergeState): Promise<string> {
+  const base = clean(pr.base);
   const refuse = (why: string) => new Error(`#${number} cannot merge: ${why}`);
   if (pr.state === "CLOSED") throw refuse("it is closed.");
   if (pr.draft) throw refuse("it is a draft. Mark it ready for review with update_pr first.");
   // A direct merge would skip the queue, which is a bypass of its own.
-  if (pr.mergeQueue) throw refuse(`${pr.base} requires a merge queue, which this tong does not enqueue into.`);
-  if (!MERGEABLE.has(pr.status)) throw refuse(refusal(pr.status, pr.base));
+  if (pr.mergeQueue) throw refuse(`${base} requires a merge queue, which this tong does not enqueue into.`);
+  if (!MERGEABLE.has(pr.status)) throw refuse(refusal(pr.status, base));
 
   let sha: string;
   try {
@@ -341,7 +397,19 @@ export async function mergePr(context: Context, input: { number: number; method?
     if (!(err instanceof GitHubError && (err instanceof NoAnswer || err.status >= 500))) throw err;
     throw new Error(`${err.message}\n\nThe merge may have landed anyway; get_pr shows whether it did.`);
   }
-  return `Merged #${number} into ${pr.base} (${method}) as ${sha.slice(0, 12) || "an unreported commit"}.\n${pr.url}`;
+  return `Merged #${number} into ${base} (${method}) as ${sha.slice(0, 12) || "an unreported commit"}`;
+}
+
+export type MergePrInput = { number: number; method?: MergeMethod; delete_branch?: boolean };
+
+/** Merges only what GitHub reports mergeable without a bypass, so a token that may bypass does not. */
+export async function mergePr(context: Context, input: MergePrInput): Promise<string> {
+  const { number, method = "merge", delete_branch: deleteBranch } = input;
+  const pr = await context.github.mergeState(number);
+  const merged = pr.state === "MERGED";
+  const done = merged ? `#${number} is already merged` : await mergeOpen(context, number, method, pr);
+  if (deleteBranch) return `${done}; ${await deleteHead(context, number, pr)}\n${pr.url}`;
+  return `${done}${merged ? "; nothing to do." : "."}\n${pr.url}`;
 }
 
 /** Why the workspace has no repository to serve. */
@@ -512,10 +580,17 @@ export function buildServer(context: Context): McpServer {
         "Merge an open pull request of this workspace's repository, pinned to the head commit it checked. " +
         "Refuses anything branch protection or a ruleset blocks, without using any bypass the token may " +
         "have, and any pull request whose base uses a merge queue. The repository's settings decide which " +
-        "methods are allowed, the commit message, and whether the head branch is deleted.",
+        "methods are allowed, the commit message, and whether GitHub deletes the head branch itself. " +
+        "'delete_branch' deletes the head branch after the merge unless it has moved, is in a fork, is the " +
+        "default branch, is protected from deletion, or heads or bases another open pull request; the result " +
+        "says which, and a kept branch never fails the call.",
       inputSchema: z.strictObject({
         number: positiveId.describe("Pull request number, as it appears in the repository."),
         method: z.enum(MERGE_METHODS).optional().describe("How to merge. Defaults to 'merge'."),
+        delete_branch: z
+          .boolean()
+          .optional()
+          .describe("Delete the head branch once merged, by this call or an earlier one. Defaults to false."),
       }),
     },
     serially(mergePr),

@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { remoteUrl } from "../src/origin.js";
-import { Repo, RepoError } from "../src/repo.js";
+import { RunError } from "../src/exec.js";
+import { DELETE_TIMEOUT_MS, Repo, RepoError } from "../src/repo.js";
 import { ASKPASS, FakeGit, ORIGIN, TOKEN, WORKSPACE, configPairs } from "./fakes.js";
 
 const URL = remoteUrl(ORIGIN);
@@ -184,5 +185,78 @@ describe("push refusals", () => {
       await assert.rejects(() => repoFor(git).push(ORIGIN, URL, TOKEN), RepoError, `accepted ${branch}`);
       assert.equal(git.pushCall, undefined, `pushed ${branch}`);
     }
+  });
+});
+
+describe("branch delete", () => {
+  const SHA = "abc123abc123abc123abc123abc123abc123abcd";
+
+  it("deletes the branch on the pinned URL, leased to the sha it was given", async () => {
+    const git = new FakeGit();
+    assert.equal(await repoFor(git).deleteBranch(URL, TOKEN, "feature/x", SHA), null);
+
+    assert.deepEqual(git.calls.map((call) => call.verb), [
+      ["push", "--no-verify", "--porcelain", `--force-with-lease=refs/heads/feature/x:${SHA}`, URL, ":refs/heads/feature/x"],
+    ]);
+  });
+
+  it("skips the signing gate and leaves the remote-tracking ref alone", async () => {
+    const git = new FakeGit({ unpushed: ["9".repeat(40)] });
+    git.refs.set("refs/remotes/origin/feature", SHA);
+    await new Repo(git.run, WORKSPACE, ASKPASS, true).deleteBranch(URL, TOKEN, "feature", SHA);
+
+    assert.deepEqual(git.calls.map((call) => call.verb[0]), ["push"]);
+    assert.equal(git.refs.get("refs/remotes/origin/feature"), SHA);
+  });
+
+  it("refuses a branch name or sha that would not make an unambiguous push", async () => {
+    const cases: Array<[string, string]> = [
+      ["--force", SHA],
+      ["a:b", SHA],
+      ["a b", SHA],
+      ["", SHA],
+      ["feature", "HEAD"],
+      ["feature", `-${SHA}`],
+      ["feature", `${SHA}:refs/heads/main`],
+      ["feature", "b".repeat(64)],
+      ["feature", SHA.slice(0, 12)],
+    ];
+    for (const [branch, sha] of cases) {
+      const git = new FakeGit();
+      await assert.rejects(() => repoFor(git).deleteBranch(URL, TOKEN, branch, sha), RepoError);
+      assert.equal(git.pushCall, undefined, `pushed ${branch} ${sha}`);
+    }
+  });
+
+  it("bounds the delete push alone with a timeout", async () => {
+    const git = new FakeGit();
+    await repoFor(git).deleteBranch(URL, TOKEN, "feature", SHA);
+    await repoFor(git).push(ORIGIN, URL, TOKEN);
+    await repoFor(git).fetch(ORIGIN, URL, TOKEN);
+    assert.deepEqual(
+      git.calls.filter((call) => call.verb[0] === "push" || call.verb[0] === "fetch").map((call) => call.timeoutMs),
+      [DELETE_TIMEOUT_MS, undefined, undefined],
+    );
+  });
+
+  it("returns why a delete push that timed out failed", async () => {
+    const git = new FakeGit({ pushThrows: new RunError("git timed out after 60s") });
+    assert.equal(await repoFor(git).deleteBranch(URL, TOKEN, "feature", SHA), "git timed out after 60s");
+  });
+
+  it("returns why a killed delete push failed", async () => {
+    const git = new FakeGit({ pushThrows: new RunError("git was killed by SIGTERM") });
+    assert.equal(await repoFor(git).deleteBranch(URL, TOKEN, "feature", SHA), "git was killed by SIGTERM");
+  });
+
+  it("returns git's reason when the server refuses", async () => {
+    const git = new FakeGit({
+      pushFails: {
+        stdout: "To github.com\n!\t(delete):refs/heads/feature\t[rejected] (stale info)\n",
+        stderr: "error: failed to push some refs",
+      },
+    });
+    const reason = await repoFor(git).deleteBranch(URL, TOKEN, "feature", SHA);
+    assert.match(reason ?? "", /^git refused the push: .*\(stale info\)\nerror: failed to push some refs/s);
   });
 });

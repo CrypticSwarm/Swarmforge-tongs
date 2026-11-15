@@ -22,7 +22,7 @@ Reached at `http://github:8080/mcp` on the session network. Serves MCP 2026-07-2
 | `get_pr` | `number` | Reads one pull request: title, description, branches, state, and when it was opened, closed, and merged. |
 | `find_pr` | `head` | Lists up to 10 pull requests opened from a branch of this repository, newest first, closed and merged ones included. |
 | `update_pr` | `number`, `title?`, `body?`, `base?`, `state?`, `draft?` | Edits a pull request; `state: open` reopens one. See [Editing a pull request](#editing-a-pull-request). |
-| `merge_pr` | `number`, `method?` | Merges an open pull request with `merge` (default), `squash`, or `rebase`. See [Merging](#merging). |
+| `merge_pr` | `number`, `method?`, `delete_branch?` | Merges an open pull request with `merge` (default), `squash`, or `rebase`, and optionally deletes its head branch. See [Merging](#merging). |
 | `ci_status` | `sha?`, `pr?`, `run?` | Lists up to 10 Actions runs for a commit, newest first, or one run by id, with each job's state and failed step. See [Reading CI](#reading-ci). |
 | `ci_job` | `job_id` | Lists a job's steps with state, start offset, and duration, plus its runner. |
 | `ci_log` | `job_id`, `step?`, `start?`, `limit?` | Returns part of a job's log. Defaults to the end of the failed step, or of the whole log. |
@@ -77,8 +77,30 @@ Caveats:
 - a head that moved since the check.
 
 The repository's settings decide the allowed methods, the commit messages, and
-whether the head branch is deleted. A `rebase` merge re-creates the commits
-unsigned.
+whether GitHub deletes the head branch itself. A `rebase` merge re-creates the
+commits unsigned.
+
+### Deleting the head branch
+
+`delete_branch: true` deletes the head branch once the pull request is merged, by
+this call or an earlier one.
+
+- The delete pushes `:refs/heads/<head>` to the pinned URL with
+  `--force-with-lease=refs/heads/<head>:<head sha>`, so it is refused if the branch
+  has moved. The name and sha come from GitHub, never the caller.
+- A push still running after 60 seconds has its process group killed. After a
+  refused or killed push, the branch is read again, and the result says whether it
+  is gone, still there, or may be gone.
+- It leaves the branch, and says why, if it is in a fork or the default branch,
+  heads another open pull request, is the base of one (retarget it with
+  `update_pr` first), has protection or a ruleset restricting deletion, or git
+  refuses the push. So does an incomplete answer to any of these checks.
+- No delete outcome fails the call: the merge has happened.
+- Other writes wait for `merge_pr`, so the tong cannot open or retarget a pull
+  request onto the branch between the checks and the delete. Someone outside the
+  tong can.
+- `refs/remotes/origin/<head>` is kept, so its commits stay published as far as
+  `git-signing` is concerned.
 
 **Not airtight.** A token whose account can bypass branch rules still bypasses a
 rule or base changed between the check and the merge, or a rule GitHub does not
@@ -197,8 +219,9 @@ env:
   GITHUB_TONG_REQUIRE_SIGNED_COMMITS: "true"
 ```
 
-- Every push, including the one in `create_pr`, refuses if a commit it would add has
-  no signature. Nothing is pushed, and the error names the commits.
+- Every push that adds commits, including the one in `create_pr`, refuses if a
+  commit it would add has no signature. Nothing is pushed, and the error names the
+  commits. `merge_pr`'s branch delete adds none.
 - It checks exactly the commits `sign_commits` signs, so signing then pushing
   always passes.
 - It checks that a signature is present, not that it is valid. GitHub's branch
@@ -224,8 +247,8 @@ log storage a log download redirects to. Enforcing that is the launcher's job.
 Use a **fine-grained personal access token** scoped to the repositories the tong
 serves, with:
 
-- **Contents: read and write**: fetch, push, and merge. Startup stops if the token
-  cannot push to the repository.
+- **Contents: read and write**: fetch, push, merge, and delete a merged head
+  branch. Startup stops if the token cannot push to the repository.
 - **Pull requests: read and write**: open, read, and edit pull requests.
 - **Actions: read**: the `ci_*` verbs. Without it they fail with a `403` that names
   it; the other verbs still work.
@@ -234,6 +257,10 @@ serves, with:
 
 A token's permissions cover every repository it lists, so `GITHUB_TONG_DISPATCH`,
 not the token, switches dispatch, for the whole tong.
+
+`delete_branch` also reads the head branch's protection, rulesets, and open pull
+requests. GitHub documents no further permission for these; if a read is refused,
+the branch is left.
 
 A classic `repo` token works but is account-wide. An SSH key cannot open pull
 requests.

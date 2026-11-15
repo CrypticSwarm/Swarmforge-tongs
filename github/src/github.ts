@@ -65,6 +65,19 @@ export type PullRequest = {
   mergedAt: string | null;
 };
 
+/** The items GitHub listed from a connection, and how many it has in all. */
+export type Listed<T> = { items: T[]; total: number };
+
+/** What deleting a branch depends on. */
+export type DeleteState = {
+  /** Branch protection or a ruleset restricts deleting it, or a rule went unread. */
+  restricted: boolean;
+  /** Open pull requests with it as their head. */
+  heads: Listed<number>;
+  /** Open pull requests with it as their base. */
+  dependents: Listed<number>;
+};
+
 export type CreatePullRequest = {
   title: string;
   body?: string;
@@ -113,8 +126,10 @@ export type MergeMethod = (typeof MERGE_METHODS)[number];
 
 const PR_STATES = ["OPEN", "CLOSED", "MERGED"] as const;
 
-export type MergeState = Pick<PullRequest, "url" | "base" | "headSha" | "draft"> & {
+export type MergeState = Pick<PullRequest, "url" | "base" | "head" | "headSha" | "draft"> & {
   state: (typeof PR_STATES)[number];
+  /** The head is in a fork. */
+  crossRepository: boolean;
   /** GraphQL's MergeStateStatus. */
   status: string;
   mergeQueue: boolean;
@@ -220,11 +235,8 @@ export class GitHub {
 
   /** `head` carries the pinned owner, so fork branches never match. */
   async findPullRequests(branch: string): Promise<{ pullRequests: PullRequest[]; more: boolean }> {
-    if (typeof branch !== "string" || branch.length === 0 || branch.length > 255) {
-      throw new GitHubError(`'${String(branch).slice(0, 40)}' is not a branch name`, 0);
-    }
     const query = new URLSearchParams({
-      head: `${this.origin.owner}:${branch}`,
+      head: `${this.origin.owner}:${assertBranch(branch)}`,
       state: "all",
       sort: "created",
       direction: "desc",
@@ -259,7 +271,8 @@ export class GitHub {
       `query($owner: String!, $name: String!, $number: Int!) {
         repository(owner: $owner, name: $name) {
           pullRequest(number: $number) {
-            url baseRefName state isDraft headRefOid mergeStateStatus isMergeQueueEnabled
+            url baseRefName headRefName isCrossRepository state isDraft headRefOid mergeStateStatus
+            isMergeQueueEnabled
           }
         }
       }`,
@@ -271,6 +284,8 @@ export class GitHub {
     if (
       typeof pr?.url !== "string" ||
       typeof pr.baseRefName !== "string" ||
+      typeof pr.headRefName !== "string" ||
+      typeof pr.isCrossRepository !== "boolean" ||
       !PR_STATES.includes(state) ||
       typeof pr.isDraft !== "boolean" ||
       typeof pr.headRefOid !== "string" ||
@@ -283,12 +298,52 @@ export class GitHub {
     return {
       url: pr.url,
       base: pr.baseRefName,
+      head: pr.headRefName,
+      crossRepository: pr.isCrossRepository,
       state,
       draft: pr.isDraft,
       headSha: pr.headRefOid,
       status: pr.mergeStateStatus,
       mergeQueue: pr.isMergeQueueEnabled,
     };
+  }
+
+  /** What deleting `branch` depends on, or null if it does not exist; a partial answer throws. */
+  async deleteState(branch: string): Promise<DeleteState | null> {
+    const data = (await this.graphql(
+      `query($owner: String!, $name: String!, $ref: String!, $branch: String!) {
+        repository(owner: $owner, name: $name) {
+          ref(qualifiedName: $ref) {
+            refUpdateRule { allowsDeletions }
+            rules(first: 100) { totalCount nodes { type } }
+            associatedPullRequests(states: OPEN, first: ${MAX_FIND_RESULTS}) { totalCount nodes { number } }
+          }
+          pullRequests(baseRefName: $branch, states: OPEN, first: ${MAX_FIND_RESULTS}) { totalCount nodes { number } }
+        }
+      }`,
+      { owner: this.origin.owner, name: this.origin.repo, ref: `refs/heads/${assertBranch(branch)}`, branch },
+    )) as { repository?: Record<string, unknown> | null };
+    const ref = data.repository?.ref as Record<string, unknown> | null | undefined;
+    if (ref === null) return null;
+    const rule = ref?.refUpdateRule as Record<string, unknown> | null | undefined;
+    const rules = listed(ref?.rules, "type", isString);
+    const heads = listed(ref?.associatedPullRequests, "number", isInteger);
+    const dependents = listed(data.repository?.pullRequests, "number", isInteger);
+    if (
+      rule === undefined ||
+      (rule !== null && typeof rule.allowsDeletions !== "boolean") ||
+      !rules ||
+      !heads ||
+      !dependents
+    ) {
+      throw new GitHubError("GitHub did not fully describe the branch.", 0);
+    }
+    const restricted =
+      rule?.allowsDeletions === false ||
+      // A rule this did not read might be the one that restricts it.
+      rules.total > rules.items.length ||
+      rules.items.includes("DELETION");
+    return { restricted, heads, dependents };
   }
 
   /** GitHub refuses with a 409 if the head has moved off `sha`. */
@@ -596,6 +651,24 @@ function parseJob(data: unknown): Job {
 function assertId(value: number, what: string): number {
   if (!Number.isSafeInteger(value) || value < 1) {
     throw new GitHubError(`'${String(value).slice(0, 40)}' is not a ${what}`, 0);
+  }
+  return value;
+}
+
+/** A connection's `totalCount` and each node's `field`, or null if any of it is missing or fails `valid`. */
+function listed<T>(connection: unknown, field: string, valid: (value: unknown) => value is T): Listed<T> | null {
+  const { totalCount, nodes } = (connection ?? {}) as { totalCount?: unknown; nodes?: unknown };
+  if (typeof totalCount !== "number" || !Array.isArray(nodes)) return null;
+  const items = nodes.map((node) => (node as Record<string, unknown> | null)?.[field]);
+  return items.every(valid) ? { items, total: totalCount } : null;
+}
+
+const isString = (value: unknown): value is string => typeof value === "string";
+const isInteger = (value: unknown): value is number => Number.isSafeInteger(value);
+
+function assertBranch(value: string): string {
+  if (typeof value !== "string" || value.length === 0 || value.length > 255) {
+    throw new GitHubError(`'${String(value).slice(0, 40)}' is not a branch name`, 0);
   }
   return value;
 }

@@ -1,5 +1,5 @@
-import type { Run, RunResult } from "../src/exec.js";
-import { GitHub, type Fetch, type MergeState } from "../src/github.js";
+import type { RunError, Run, RunResult } from "../src/exec.js";
+import { GitHub, MAX_FIND_RESULTS, type Fetch, type MergeState } from "../src/github.js";
 import { remoteUrl, type Origin } from "../src/origin.js";
 import { Repo } from "../src/repo.js";
 import type { Context } from "../src/server.js";
@@ -13,6 +13,7 @@ export type GitCall = {
   args: string[];
   env: NodeJS.ProcessEnv;
   stdin: Buffer | undefined;
+  timeoutMs: number | undefined;
   verb: string[];
 };
 
@@ -25,6 +26,8 @@ export type FakeGitOptions = {
   originUrl?: string | null;
   isRepo?: boolean;
   pushFails?: GitFailure;
+  /** What running the push throws, as a timeout or a failure to run. */
+  pushThrows?: RunError;
   pushUpToDate?: boolean;
   /** `fetch --porcelain` stdout on success. */
   fetchOutput?: string;
@@ -46,6 +49,7 @@ export class FakeGit {
   originUrl: string | null;
   isRepo: boolean;
   pushFails: GitFailure | undefined;
+  pushThrows: RunError | undefined;
   pushUpToDate: boolean;
   fetchOutput: string;
   fetchFails: GitFailure | undefined;
@@ -61,6 +65,7 @@ export class FakeGit {
     this.originUrl = options.originUrl === undefined ? "git@github.com:acme/widgets.git" : options.originUrl;
     this.isRepo = options.isRepo ?? true;
     this.pushFails = options.pushFails;
+    this.pushThrows = options.pushThrows;
     this.pushUpToDate = options.pushUpToDate ?? false;
     this.fetchOutput = options.fetchOutput ?? "";
     this.fetchFails = options.fetchFails;
@@ -97,7 +102,9 @@ export class FakeGit {
     const argv = [...args];
     const verb = [...argv];
     while (verb[0] === "-c" || verb[0] === "-C") verb.splice(0, 2);
-    this.calls.push({ args: argv, env: options?.env ?? {}, stdin: options?.stdin, verb });
+    const { env = {}, stdin, timeoutMs } = options ?? {};
+    this.calls.push({ args: argv, env, stdin, timeoutMs, verb });
+    if (verb[0] === "push" && this.pushThrows) throw this.pushThrows;
 
     return this.runGit(verb, options?.stdin);
   };
@@ -432,24 +439,64 @@ export function logRoutes(jobId: number, text: string) {
   };
 }
 
-export type MergeableState = { number: number; base?: string } & Partial<
-  Pick<MergeState, "state" | "draft" | "status" | "mergeQueue" | "headSha">
->;
+export type MergeableState = {
+  number: number;
+  base?: string;
+  head?: string;
+  /** Open pull requests based on the head branch. */
+  dependents?: number[];
+  /** Open pull requests from the head branch. */
+  heads?: number[];
+  /** The head branch is gone, as after GitHub's auto-delete. */
+  headDeleted?: boolean;
+  /** What restricts deleting the head branch, if anything. */
+  restrictedBy?: "protection" | "ruleset";
+  /** How the head branch reads after the first time: gone, or half answered. */
+  refAfterPush?: "absent" | "partial";
+} & Partial<Pick<MergeState, "state" | "draft" | "status" | "mergeQueue" | "headSha" | "crossRepository">>;
 
-/** Answers only the fields the query names, so a field dropped from the query reads as missing. */
+/** A GraphQL connection of pull request numbers, cut at a page as GitHub would. */
+export function prConnection(numbers: number[]) {
+  return { totalCount: numbers.length, nodes: numbers.slice(0, MAX_FIND_RESULTS).map((number) => ({ number })) };
+}
+
+/** Answers only the fields a merge-state query names, so a dropped field reads as missing; also the head branch reads. */
 export function mergeRoutes(pr: MergeableState, merge: FakeResponse = { status: 200, json: { sha: "3".repeat(40) } }) {
+  const head = pr.head ?? "feature";
   const fields: Record<string, unknown> = {
     url: `https://github.com/acme/widgets/pull/${pr.number}`,
     baseRefName: pr.base ?? "main",
+    headRefName: head,
+    isCrossRepository: pr.crossRepository ?? false,
     state: pr.state ?? "OPEN",
     isDraft: pr.draft ?? false,
     headRefOid: pr.headSha ?? "2".repeat(40),
     mergeStateStatus: pr.status ?? "CLEAN",
     isMergeQueueEnabled: pr.mergeQueue ?? false,
   };
+  const branch = (later?: MergeableState["refAfterPush"]) => {
+    const ref: Record<string, unknown> = {
+      refUpdateRule: pr.restrictedBy === "protection" ? { allowsDeletions: false } : null,
+      rules:
+        pr.restrictedBy === "ruleset"
+          ? { totalCount: 2, nodes: [{ type: "PULL_REQUEST" }, { type: "DELETION" }] }
+          : { totalCount: 1, nodes: [{ type: "NON_FAST_FORWARD" }] },
+      associatedPullRequests: prConnection(pr.heads ?? []),
+    };
+    if (later === "partial") delete ref.rules;
+    const gone = later === "absent" || (!later && pr.headDeleted);
+    return { ref: gone ? null : ref, pullRequests: prConnection(pr.dependents ?? []) };
+  };
+  let branchReads = 0;
   return {
+    ...REPO_ROUTE,
     "POST /graphql": (call: FetchCall) => {
-      const { query } = call.body as { query: string };
+      const { query, variables } = call.body as { query: string; variables: { ref?: string } };
+      if (/\bref\(qualifiedName:/.test(query)) {
+        const repository = branch(branchReads++ > 0 ? pr.refAfterPush : undefined);
+        if (variables.ref !== `refs/heads/${head}`) repository.ref = null;
+        return { status: 200, json: { data: { repository } } };
+      }
       const asked = Object.entries(fields).filter(([name]) => new RegExp(`\\b${name}\\b`).test(query));
       return { status: 200, json: { data: { repository: { pullRequest: Object.fromEntries(asked) } } } };
     },

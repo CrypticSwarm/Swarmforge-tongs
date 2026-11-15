@@ -9,6 +9,8 @@ export type RunOptions = {
   stdin?: Buffer;
   cwd?: string;
   env?: NodeJS.ProcessEnv;
+  /** Kills the command's whole process group after this long. */
+  timeoutMs?: number;
 };
 
 export type RunResult = {
@@ -34,10 +36,13 @@ function collect(stream: NodeJS.ReadableStream, chunks: Buffer[], state: { bytes
 
 export const realRun: Run = (command, args, options = {}) =>
   new Promise((resolve, reject) => {
+    const { timeoutMs } = options;
     const child = spawn(command, [...args], {
       stdio: ["pipe", "pipe", "pipe"],
       cwd: options.cwd,
       env: options.env,
+      // Its own process group, so a timeout reaches helpers like git-remote-https too.
+      detached: timeoutMs !== undefined,
     });
 
     const stdoutChunks: Buffer[] = [];
@@ -50,8 +55,28 @@ export const realRun: Run = (command, args, options = {}) =>
     });
     child.stdin!.end(options.stdin ?? Buffer.alloc(0));
 
-    child.on("error", (err) => reject(new RunError(`cannot run ${command}: ${err.message}`)));
+    // Kills the group at `timeoutMs` and rejects then, without waiting for `close`.
+    const timer =
+      timeoutMs === undefined
+        ? undefined
+        : setTimeout(() => {
+            try {
+              process.kill(-child.pid!, "SIGKILL");
+            } catch {
+              /* the group has already exited */
+            }
+            // Releases the pipes, in case a process escaped the group and still holds them.
+            child.stdout!.destroy();
+            child.stderr!.destroy();
+            reject(new RunError(`${command} timed out after ${timeoutMs / 1000}s`));
+          }, timeoutMs);
+
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      reject(new RunError(`cannot run ${command}: ${err.message}`));
+    });
     child.on("close", (code, signal) => {
+      clearTimeout(timer);
       // A killed push must never read as a completed one.
       if (code === null) {
         reject(new RunError(`${command} was killed by ${signal ?? "a signal"}`));

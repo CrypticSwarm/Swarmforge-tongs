@@ -106,6 +106,7 @@ describe("find_pr", () => {
 
     for (const value of ["", "x".repeat(256), 7 as unknown as string, null as unknown as string]) {
       await assert.rejects(() => github.findPullRequests(value), /is not a branch name/);
+      await assert.rejects(() => github.deleteState(value), /is not a branch name/);
     }
     assert.equal(api.calls.length, 0);
   });
